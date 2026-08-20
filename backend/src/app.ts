@@ -1,6 +1,11 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+// Faz o Express encaminhar automaticamente rejeições de Promise não tratadas dentro de rotas
+// async para o error handler abaixo. Sem isso, um erro assíncrono (ex.: falha do Prisma) nunca
+// gera resposta — a requisição fica "pendurada" no cliente até a função serverless estourar o
+// timeout (300s), em vez de retornar um 500 imediato. Precisa ser importado antes das rotas.
+import "express-async-errors";
 
 import authRoutes from "./routes/auth";
 import clientRoutes from "./routes/clients";
