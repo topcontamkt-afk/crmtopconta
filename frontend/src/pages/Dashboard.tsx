@@ -35,25 +35,39 @@ interface UsoMensal {
   meses: { mes: string; label: string; usados: number; percent: number }[];
 }
 
+interface Encerramentos {
+  totalClientes: number;
+  taxaMesAtual: number;
+  meses: { mes: string; label: string; encerrados: number; percent: number }[];
+  motivos: { motivo: string; count: number }[];
+}
+
 const currency = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
 
 // Uma única cor de marca por gráfico (magnitude é expressa pelo comprimento/altura da marca,
 // não por variação de matiz) — ver skill de dataviz: "sequential = uma cor".
 const CHART_COLOR = "#4f7cff";
+const CHART_DANGER = "#e15b5b";
 const CHART_GRID = "#2a3346";
 const CHART_MUTED = "#9aa4b8";
 
 export default function Dashboard() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [usoMensal, setUsoMensal] = useState<UsoMensal | null>(null);
+  const [encerramentos, setEncerramentos] = useState<Encerramentos | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     function load() {
-      Promise.all([api<Summary>("/dashboard/summary"), api<UsoMensal>("/dashboard/uso-mensal")])
-        .then(([s, u]) => {
+      Promise.all([
+        api<Summary>("/dashboard/summary"),
+        api<UsoMensal>("/dashboard/uso-mensal"),
+        api<Encerramentos>("/dashboard/encerramentos"),
+      ])
+        .then(([s, u, e]) => {
           setSummary(s);
           setUsoMensal(u);
+          setEncerramentos(e);
         })
         .catch((e) => setError(e.message));
     }
@@ -64,9 +78,10 @@ export default function Dashboard() {
   }, []);
 
   if (error) return <div className="error-text">{error}</div>;
-  if (!summary || !usoMensal) return <div>Carregando...</div>;
+  if (!summary || !usoMensal || !encerramentos) return <div>Carregando...</div>;
 
   const mesAtualLabel = usoMensal.meses[usoMensal.meses.length - 1]?.label ?? "";
+  const temDadosEncerramento = encerramentos.meses.some((m) => m.encerrados > 0);
 
   return (
     <div>
@@ -129,6 +144,70 @@ export default function Dashboard() {
             />
           </AreaChart>
         </ResponsiveContainer>
+      </div>
+
+      <div className="card chart-card" style={{ marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
+          <h3 style={{ margin: 0 }}>Taxa de cancelamento mensal</h3>
+          {temDadosEncerramento && (
+            <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
+              {mesAtualLabel}: <strong style={{ color: "var(--danger)", fontSize: 20 }}>{encerramentos.taxaMesAtual}%</strong> da base encerrou a conta
+            </span>
+          )}
+        </div>
+        <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2, marginBottom: 12 }}>
+          % de clientes cuja conta foi encerrada em cada mês (últimos 12 meses). Só disponível para
+          clientes importados no formato "Cartões e contas" / "SaldoCartao".
+        </p>
+        {!temDadosEncerramento ? (
+          <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
+            Nenhum encerramento de conta registrado ainda na base.
+          </p>
+        ) : (
+          <>
+            <ResponsiveContainer width="100%" height={220}>
+              <AreaChart data={encerramentos.meses} margin={{ top: 8, right: 12, left: -18, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="encerramentoGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={CHART_DANGER} stopOpacity={0.3} />
+                    <stop offset="100%" stopColor={CHART_DANGER} stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke={CHART_GRID} vertical={false} />
+                <XAxis dataKey="label" tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={{ stroke: CHART_GRID }} tickLine={false} />
+                <YAxis
+                  tick={{ fill: CHART_MUTED, fontSize: 12 }}
+                  axisLine={false}
+                  tickLine={false}
+                  width={40}
+                  unit="%"
+                />
+                <Tooltip content={<ChartTooltip suffix="% da base" countKey="encerrados" countLabel="contas" />} />
+                <Area
+                  type="monotone"
+                  dataKey="percent"
+                  stroke={CHART_DANGER}
+                  strokeWidth={2}
+                  fill="url(#encerramentoGradient)"
+                  dot={{ r: 3, fill: CHART_DANGER, strokeWidth: 0 }}
+                  activeDot={{ r: 5, fill: CHART_DANGER, strokeWidth: 2, stroke: "#0f1420" }}
+                  animationDuration={900}
+                  animationEasing="ease-out"
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+            {encerramentos.motivos.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Motivos mais comuns: </span>
+                {encerramentos.motivos.map((m) => (
+                  <span key={m.motivo} className="badge" style={{ marginRight: 6 }}>
+                    {m.motivo} ({m.count})
+                  </span>
+                ))}
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>

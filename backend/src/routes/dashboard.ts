@@ -118,6 +118,63 @@ router.get("/uso-mensal", async (req, res) => {
   res.json({ totalClientes, taxaMesAtual: meses[meses.length - 1]?.percent ?? 0, meses });
 });
 
+/**
+ * GET /api/dashboard/encerramentos — taxa de encerramento/cancelamento de conta, mês a mês
+ * (últimos 12 meses), espelhando /uso-mensal: % da base atual cujo `encerradoEm` caiu em cada
+ * mês, mais os motivos de encerramento mais comuns no período. Só populado para clientes
+ * importados pelo formato "Cartões e contas"/"SaldoCartao" (`encerradoEm`/`motivoEncerramento`
+ * — ver cardAccountImport.ts); planilhas no formato genérico não têm esse dado.
+ */
+router.get("/encerramentos", async (req, res) => {
+  const { tenantId } = req.user!;
+
+  const [totalClientes, porMesRaw, motivosRaw] = await Promise.all([
+    prisma.client.count({ where: { tenantId } }),
+    prisma.$queryRawUnsafe<Array<{ mes: Date; encerrados: bigint }>>(
+      `SELECT date_trunc('month', "encerradoEm") AS mes, COUNT(*)::bigint AS encerrados
+       FROM "Client"
+       WHERE "tenantId" = $1
+         AND "encerradoEm" IS NOT NULL
+         AND "encerradoEm" >= date_trunc('month', now()) - interval '11 months'
+       GROUP BY mes ORDER BY mes ASC`,
+      tenantId
+    ),
+    prisma.client.groupBy({
+      by: ["motivoEncerramento"],
+      where: { tenantId, encerradoEm: { not: null }, motivoEncerramento: { not: null } },
+      _count: true,
+      orderBy: { _count: { motivoEncerramento: "desc" } },
+      take: 5,
+    }),
+  ]);
+
+  const encerradosPorMes = new Map<string, number>();
+  for (const row of porMesRaw) {
+    encerradosPorMes.set(row.mes.toISOString().slice(0, 7), Number(row.encerrados));
+  }
+
+  const meses: Array<{ mes: string; label: string; encerrados: number; percent: number }> = [];
+  const now = new Date();
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    const key = d.toISOString().slice(0, 7);
+    const encerrados = encerradosPorMes.get(key) || 0;
+    meses.push({
+      mes: key,
+      label: d.toLocaleDateString("pt-BR", { month: "short", year: "2-digit", timeZone: "UTC" }),
+      encerrados,
+      percent: totalClientes ? Number(((encerrados / totalClientes) * 100).toFixed(1)) : 0,
+    });
+  }
+
+  res.json({
+    totalClientes,
+    taxaMesAtual: meses[meses.length - 1]?.percent ?? 0,
+    meses,
+    motivos: motivosRaw.map((m) => ({ motivo: m.motivoEncerramento as string, count: m._count })),
+  });
+});
+
 /** GET /api/dashboard/evolucao — série temporal simples de novos clientes por semana/mês */
 router.get("/evolucao", async (req, res) => {
   const { tenantId } = req.user!;
