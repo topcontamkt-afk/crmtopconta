@@ -60,6 +60,62 @@ npm install
 npm run dev                # SPA em http://localhost:5173 (proxy para /api → :4000)
 ```
 
+## Deploy em produção (Vercel + Supabase)
+
+Arquitetura em produção: **dois projetos Vercel** (backend serverless + frontend
+estático) e **Postgres no Supabase**, cada um cuidando de uma responsabilidade:
+
+```
+Navegador → crmtopconta-frontend.vercel.app (Vite estático)
+              └─ vercel.json rewrite: /api/* → crmtopconta-backend (Vercel)
+                   └─ Express (api/index.ts, função serverless) → Prisma → Supabase Postgres
+Vercel Cron Jobs → /api/cron/* (dispatch, automações, sync de planilha, retenção...)
+```
+
+- **backend/**: deployado como projeto Vercel próprio (Root Directory = `backend`),
+  usando `backend/vercel.json` (`builds`/`routes` explícitos — necessário porque a
+  detecção automática de framework da Vercel confunde este projeto com um app
+  Express "tradicional" e tenta um build estático inexistente). Os jobs periódicos
+  do MVP local (`node-cron`, em `src/services/scheduler.ts`) viram **Vercel Cron
+  Jobs** batendo nos endpoints `/api/cron/*` (protegidos por `CRON_SECRET`), já
+  que uma função serverless não mantém um processo vivo entre invocações.
+- **frontend/**: deployado como projeto Vercel próprio (Root Directory = `frontend`),
+  com `frontend/vercel.json` fazendo um *rewrite* de `/api/*` para o domínio do
+  projeto backend — assim o código do frontend continua chamando `/api/...`
+  (mesma origem, sem CORS), sem precisar saber a URL real do backend.
+- **Supabase**: hospeda o Postgres. O schema é aplicado via SQL gerado a partir do
+  Prisma (`prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script`)
+  e executado diretamente no projeto Supabase — não é necessário rodar
+  `prisma migrate deploy` a partir de um ambiente com acesso à rede do banco.
+
+### ⚠️ Limitação do plano Hobby (gratuito) da Vercel: cron só 1x/dia
+
+O plano Hobby só permite cron jobs com frequência mínima de 1x/dia. Os jobs que no
+MVP local rodam a cada 1/5/30 minutos (disparo de fila de campanha, motor de
+automação, refresh de segmentos dinâmicos) em produção no Hobby rodam **1x por
+dia**, em horários espalhados (ver `backend/vercel.json`). Enquanto estiver nesse
+plano, use os botões manuais já disponíveis na UI para execução sob demanda:
+"Disparar lote" (campanhas), "Atualizar agora" (segmentos), "Sincronizar agora"
+(planilha). Upgrade para o plano Pro remove essa limitação e permite restaurar a
+cadência original editando `backend/vercel.json`.
+
+### Variáveis de ambiente a configurar no projeto Vercel do backend
+
+Em *Project Settings → Environment Variables* do projeto `crmtopconta-backend`:
+
+| Variável | De onde vem |
+|---|---|
+| `DATABASE_URL` | Supabase → Project Settings → Database → Connection string → modo **Transaction** (porta 6543, pooler) |
+| `DIRECT_URL` | Supabase → Project Settings → Database → Connection string → conexão **direta** (porta 5432) |
+| `JWT_SECRET` | gere com `openssl rand -base64 32` |
+| `CREDENTIALS_ENCRYPTION_KEY` | gere com `openssl rand -base64 32` |
+| `CRON_SECRET` | gere com `openssl rand -base64 32` — a Vercel envia esse valor automaticamente como `Authorization: Bearer` nas chamadas dos Cron Jobs quando a env var se chama exatamente `CRON_SECRET` |
+| `GOOGLE_SERVICE_ACCOUNT_JSON`, `WHATSAPP_*`, `TWILIO_*` | opcionais — só necessários para sincronização real de planilha e envio real de mensagens |
+
+Depois de configurar as variáveis, é preciso disparar um novo deploy para que a
+função serverless passe a enxergá-las (variáveis adicionadas depois de um deploy
+já criado não retroagem automaticamente).
+
 ### Testes
 
 ```bash
