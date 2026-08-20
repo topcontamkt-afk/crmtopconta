@@ -12,14 +12,25 @@ interface Template {
   status: string;
 }
 
+interface Segment {
+  id: string;
+  name: string;
+  lastCount: number | null;
+}
+
 export default function CampaignWizard() {
   const navigate = useNavigate();
   const [step, setStep] = useState(0);
 
   const [name, setName] = useState("");
   const [objective, setObjective] = useState("");
+  const [segments, setSegments] = useState<Segment[]>([]);
+  const [segmentId, setSegmentId] = useState("");
   const [cidade, setCidade] = useState("");
   const [faixaUso, setFaixaUso] = useState("");
+  const [statusConta, setStatusConta] = useState("");
+  const [semUsoDiasMin, setSemUsoDiasMin] = useState("");
+  const [usadoNosUltimosDias, setUsadoNosUltimosDias] = useState("");
   const [audiencePreview, setAudiencePreview] = useState<number | null>(null);
   const [channel, setChannel] = useState<"WHATSAPP" | "SMS">("WHATSAPP");
 
@@ -45,16 +56,29 @@ export default function CampaignWizard() {
     setTemplateId("");
   }, [channel]);
 
+  useEffect(() => {
+    api<Segment[]>("/segments").then(setSegments);
+  }, []);
+
   function adHocFilters() {
     return {
       cidade: cidade ? [cidade] : undefined,
       faixaUso: faixaUso ? [faixaUso] : undefined,
+      statusConta: statusConta ? [statusConta] : undefined,
+      semUsoDiasMin: semUsoDiasMin ? Number(semUsoDiasMin) : undefined,
+      usadoNosUltimosDias: usadoNosUltimosDias ? Number(usadoNosUltimosDias) : undefined,
     };
   }
 
   async function previewAudience() {
     const resp = await api<{ count: number }>("/segments/preview", { method: "POST", body: adHocFilters() });
     setAudiencePreview(resp.count);
+  }
+
+  function selectSegment(id: string) {
+    setSegmentId(id);
+    const seg = segments.find((s) => s.id === id);
+    setAudiencePreview(seg?.lastCount ?? null);
   }
 
   const effectiveMessage = templateId ? templates.find((t) => t.id === templateId)?.body || "" : messageTemplate;
@@ -69,7 +93,8 @@ export default function CampaignWizard() {
           name,
           objective,
           channel,
-          adHocFilters: adHocFilters(),
+          segmentId: segmentId || undefined,
+          adHocFilters: segmentId ? undefined : adHocFilters(),
           templateId: templateId || undefined,
           messageTemplate: templateId ? undefined : messageTemplate,
           messageTemplateB: abEnabled ? messageTemplateB : undefined,
@@ -116,31 +141,73 @@ export default function CampaignWizard() {
 
         {step === 1 && (
           <div>
-            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-              <input placeholder="Cidade" value={cidade} onChange={(e) => setCidade(e.target.value)} />
-              <select value={faixaUso} onChange={(e) => setFaixaUso(e.target.value)}>
-                <option value="">Qualquer faixa</option>
-                <option value="NAO_UTILIZOU">Não utilizou</option>
-                <option value="BAIXO_USO">Baixo uso</option>
-                <option value="USO_INICIAL">Uso inicial</option>
-                <option value="USO_INTERMEDIARIO">Uso intermediário</option>
-                <option value="USO_ALTO">Uso alto</option>
-                <option value="QUASE_COMPLETO">Quase completo</option>
-                <option value="LIMITE_COMPLETO">Limite completo</option>
+            <div className="form-row">
+              <label>Segmento salvo (opcional)</label>
+              <select value={segmentId} onChange={(e) => selectSegment(e.target.value)}>
+                <option value="">— Montar público na hora (abaixo) —</option>
+                {segments.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} {s.lastCount !== null ? `(${s.lastCount} clientes)` : ""}
+                  </option>
+                ))}
               </select>
-              <button type="button" className="btn secondary" onClick={previewAudience}>
-                Contar público
-              </button>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                Segmentos combináveis (recorrentes, sem uso, inativos, tags como "comércio" etc.) são
+                criados na tela "Segmentos" e reaproveitados aqui.
+              </span>
             </div>
+
+            {!segmentId && (
+              <>
+                <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                  <input placeholder="Cidade" value={cidade} onChange={(e) => setCidade(e.target.value)} />
+                  <select value={faixaUso} onChange={(e) => setFaixaUso(e.target.value)}>
+                    <option value="">Qualquer faixa</option>
+                    <option value="NAO_UTILIZOU">Não utilizou</option>
+                    <option value="BAIXO_USO">Baixo uso</option>
+                    <option value="USO_INICIAL">Uso inicial</option>
+                    <option value="USO_INTERMEDIARIO">Uso intermediário</option>
+                    <option value="USO_ALTO">Uso alto</option>
+                    <option value="QUASE_COMPLETO">Quase completo</option>
+                    <option value="LIMITE_COMPLETO">Limite completo</option>
+                  </select>
+                  <select value={statusConta} onChange={(e) => setStatusConta(e.target.value)}>
+                    <option value="">Qualquer status</option>
+                    <option value="ATIVO">Ativo</option>
+                    <option value="INATIVO">Inativo</option>
+                  </select>
+                  <input
+                    type="number"
+                    min={0}
+                    placeholder="Sem usar há (dias)"
+                    style={{ width: 150 }}
+                    value={semUsoDiasMin}
+                    onChange={(e) => setSemUsoDiasMin(e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    min={0}
+                    placeholder="Usou nos últimos (dias)"
+                    style={{ width: 160 }}
+                    value={usadoNosUltimosDias}
+                    onChange={(e) => setUsadoNosUltimosDias(e.target.value)}
+                  />
+                  <button type="button" className="btn secondary" onClick={previewAudience}>
+                    Contar público
+                  </button>
+                </div>
+                <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                  Para combinações mais avançadas (grupos AND/OR) ou filtro por tag, salve um segmento em
+                  "Segmentos" e selecione-o acima.
+                </p>
+              </>
+            )}
+
             {audiencePreview !== null && (
               <p>
                 <strong>{audiencePreview}</strong> clientes elegíveis (opt-outs já excluídos automaticamente)
               </p>
             )}
-            <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
-              Para combinações mais avançadas (grupos AND/OR), salve um segmento em "Segmentos" e
-              use a API de campanhas com <code>segmentId</code>.
-            </p>
           </div>
         )}
 
@@ -226,7 +293,12 @@ export default function CampaignWizard() {
           <div>
             <p><strong>Nome:</strong> {name}</p>
             <p><strong>Canal:</strong> {channel}</p>
-            <p><strong>Público estimado:</strong> {audiencePreview ?? "não calculado"}</p>
+            <p>
+              <strong>Público:</strong>{" "}
+              {segmentId ? segments.find((s) => s.id === segmentId)?.name ?? "segmento salvo" : "filtros montados na hora"}
+              {" — "}
+              <strong>{audiencePreview ?? "não calculado"}</strong> clientes estimados
+            </p>
             <p><strong>Mensagem (A):</strong> {effectiveMessage}</p>
             {abEnabled && <p><strong>Mensagem (B):</strong> {messageTemplateB} — {variantSplitPercent}% do público</p>}
             <p><strong>Throttle:</strong> {throttlePerMin} msgs/min · Dedupe: {dedupeWindowHrs}h · Atribuição: {attributionDays} dias</p>

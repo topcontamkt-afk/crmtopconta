@@ -8,7 +8,8 @@ export interface SegmentFilters {
   faixaUso?: string[];
   statusConta?: string[];
   autorizacaoComunicacao?: boolean;
-  semUsoDiasMin?: number; // dataUltimaUtilizacao mais antiga que N dias (ou nunca usou)
+  semUsoDiasMin?: number; // dataUltimaUtilizacao mais antiga que N dias (ou nunca usou) — "sem uso"/"inativo"
+  usadoNosUltimosDias?: number; // dataUltimaUtilizacao dentro dos últimos N dias — "recorrente"/"ativo"
   tags?: string[];
   search?: string; // busca livre por nome/telefone
   clientIds?: string[]; // seleção explícita de clientes (usado pelo motor de automação)
@@ -41,6 +42,10 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
   if (filters.semUsoDiasMin !== undefined) {
     const cutoff = new Date(Date.now() - filters.semUsoDiasMin * 24 * 60 * 60 * 1000);
     and.push({ OR: [{ dataUltimaUtilizacao: null }, { dataUltimaUtilizacao: { lte: cutoff } }] });
+  }
+  if (filters.usadoNosUltimosDias !== undefined) {
+    const cutoff = new Date(Date.now() - filters.usadoNosUltimosDias * 24 * 60 * 60 * 1000);
+    and.push({ dataUltimaUtilizacao: { gte: cutoff } });
   }
   if (filters.search) {
     and.push({

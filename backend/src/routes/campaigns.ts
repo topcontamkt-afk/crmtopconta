@@ -41,6 +41,7 @@ const adHocFiltersSchema = z
     statusConta: z.array(z.string()).optional(),
     autorizacaoComunicacao: z.boolean().optional(),
     semUsoDiasMin: z.number().optional(),
+    usadoNosUltimosDias: z.number().optional(),
     tags: z.array(z.string()).optional(),
     search: z.string().optional(),
   })

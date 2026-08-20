@@ -38,6 +38,16 @@ describe("buildSegmentWhere", () => {
     expect(where.AND).toHaveLength(2);
   });
 
+  it("filtra por uso recente (usadoNosUltimosDias) — público 'recorrente'", () => {
+    const before = Date.now();
+    const where: any = buildSegmentWhere("t1", { usadoNosUltimosDias: 30 });
+    expect(where.tenantId).toBe("t1");
+    const cutoff = where.AND[0].dataUltimaUtilizacao.gte as Date;
+    // cutoff deve ser ~30 dias atrás (com folga de alguns ms pelo tempo de execução do teste)
+    expect(cutoff.getTime()).toBeGreaterThanOrEqual(before - 30 * 24 * 60 * 60 * 1000 - 1000);
+    expect(cutoff.getTime()).toBeLessThanOrEqual(before - 30 * 24 * 60 * 60 * 1000 + 1000);
+  });
+
   it("retorna apenas o filtro por tenant quando não há filtros", () => {
     expect(buildSegmentWhere("t1", undefined)).toEqual({ tenantId: "t1" });
     expect(buildSegmentWhere("t1", {})).toEqual({ tenantId: "t1" });
