@@ -1,0 +1,292 @@
+// CRM TopConta — Prisma schema
+// Modela as entidades principais descritas no PRD:
+// Tenant, User, Client, ImportJob, Movement, SegmentDefinition,
+// Campaign, MessageEvent, AutomationRule, AuditLog
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  OPERATOR
+  ANALYST
+  VIEWER
+}
+
+enum ClientStatus {
+  ATIVO
+  INATIVO
+  BLOQUEADO
+}
+
+enum UsageFaixa {
+  NAO_UTILIZOU
+  BAIXO_USO
+  USO_INICIAL
+  USO_INTERMEDIARIO
+  USO_ALTO
+  QUASE_COMPLETO
+  LIMITE_COMPLETO
+  INDEFINIDO // limite_total inválido/zero
+}
+
+enum Channel {
+  WHATSAPP
+  SMS
+}
+
+enum CampaignStatus {
+  RASCUNHO
+  AGENDADA
+  EM_EXECUCAO
+  PAUSADA
+  CONCLUIDA
+  CANCELADA
+}
+
+enum MessageStatus {
+  FILA
+  ENVIADO
+  ENTREGUE
+  LIDO
+  RESPONDIDO
+  FALHA
+  BLOQUEADO
+}
+
+enum ImportStatus {
+  PENDENTE
+  EM_EXECUCAO
+  CONCLUIDO
+  CONCLUIDO_COM_ERROS
+  FALHOU
+}
+
+model Tenant {
+  id                 String   @id @default(uuid())
+  name               String
+  cpfSalt            String   @default(uuid()) // salt por tenant para hash de CPF
+  retentionDays       Int      @default(1095) // 3 anos default (LGPD)
+  createdAt          DateTime @default(now())
+
+  users              User[]
+  clients            Client[]
+  importJobs         ImportJob[]
+  segments           SegmentDefinition[]
+  campaigns          Campaign[]
+  automationRules    AutomationRule[]
+  auditLogs          AuditLog[]
+  sheetConnections   SheetConnection[]
+  channelConfigs     ChannelConfig[]
+}
+
+model User {
+  id           String   @id @default(uuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id])
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(VIEWER)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  auditLogs    AuditLog[]
+}
+
+model Client {
+  id                     String       @id @default(uuid())
+  tenantId               String
+  tenant                 Tenant       @relation(fields: [tenantId], references: [id])
+
+  externalId             String? // id_cliente da planilha de origem
+  nome                   String
+  telefone               String // normalizado E.164
+  cpfHash                String // hash com salt do tenant — usado para dedupe
+  cpfMasked              String // ***.XXX.XXX-**
+  cidade                 String?
+
+  dataCadastro           DateTime?
+  dataAberturaConta      DateTime?
+  limiteTotal            Decimal      @default(0) @db.Decimal(14, 2)
+  valorUtilizado         Decimal      @default(0) @db.Decimal(14, 2)
+  saldoDisponivel        Decimal      @default(0) @db.Decimal(14, 2)
+  valorAntecipado        Decimal      @default(0) @db.Decimal(14, 2)
+  dataUltimaUtilizacao   DateTime?
+
+  percentualUtilizado    Decimal      @default(0) @db.Decimal(6, 2)
+  faixaUso               UsageFaixa   @default(NAO_UTILIZOU)
+
+  statusConta            ClientStatus @default(ATIVO)
+  origemCliente          String?
+  autorizacaoComunicacao Boolean      @default(false)
+  optOutAt               DateTime?
+
+  tags                   String[]     @default([])
+
+  createdAt              DateTime     @default(now())
+  updatedAt               DateTime     @updatedAt
+  lastImportJobId        String?
+
+  movements              Movement[]
+  messageEvents          MessageEvent[]
+
+  @@unique([tenantId, cpfHash])
+  @@index([tenantId, telefone])
+  @@index([tenantId, cidade])
+  @@index([tenantId, faixaUso])
+  @@index([tenantId, statusConta])
+}
+
+model ImportJob {
+  id           String       @id @default(uuid())
+  tenantId     String
+  tenant       Tenant       @relation(fields: [tenantId], references: [id])
+  source       String       @default("google_sheets") // google_sheets | csv
+  sheetId      String?
+  status       ImportStatus @default(PENDENTE)
+  totalRows    Int          @default(0)
+  addedCount   Int          @default(0)
+  updatedCount Int          @default(0)
+  errorCount   Int          @default(0)
+  errors       Json?        // lista de {row, motivo}
+  startedAt    DateTime     @default(now())
+  finishedAt   DateTime?
+  triggeredBy  String?      // userId ou "scheduler"
+}
+
+model Movement {
+  id        String   @id @default(uuid())
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id])
+  tipo      String   // ex: utilizacao, pagamento, antecipacao
+  valor     Decimal  @db.Decimal(14, 2)
+  data      DateTime
+  createdAt DateTime @default(now())
+
+  @@index([clientId, data])
+}
+
+model SegmentDefinition {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  name      String
+  filters   Json     // { cidade, faixaUso[], statusConta, autorizacao, semUsoDias, ... }
+  operator  String   @default("AND") // AND | OR entre grupos de filtro
+  lastCount Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaigns Campaign[]
+}
+
+model Campaign {
+  id              String         @id @default(uuid())
+  tenantId        String
+  tenant          Tenant         @relation(fields: [tenantId], references: [id])
+  name            String
+  objective       String?
+  channel         Channel
+  segmentId       String?
+  segment         SegmentDefinition? @relation(fields: [segmentId], references: [id])
+  adHocFilters    Json?          // filtros aplicados diretamente no wizard, se não usar segmento salvo
+  messageTemplate String         // corpo com placeholders {{nome}}, {{cidade}}, {{percentual}}...
+  status          CampaignStatus @default(RASCUNHO)
+
+  scheduledAt     DateTime?
+  throttlePerMin  Int            @default(60)
+  dedupeWindowHrs Int            @default(72) // janela mínima entre envios da mesma msg ao mesmo cliente
+  attributionDays Int            @default(7)
+  costPerMessage  Decimal        @default(0) @db.Decimal(10, 4)
+
+  audienceCount   Int?
+
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  messageEvents   MessageEvent[]
+}
+
+model MessageEvent {
+  id           String        @id @default(uuid())
+  campaignId   String
+  campaign     Campaign      @relation(fields: [campaignId], references: [id])
+  clientId     String
+  client       Client        @relation(fields: [clientId], references: [id])
+  channel      Channel
+  status       MessageStatus @default(FILA)
+  providerMsgId String?
+  cost         Decimal       @default(0) @db.Decimal(10, 4)
+  error        String?
+  queuedAt     DateTime      @default(now())
+  sentAt       DateTime?
+  deliveredAt  DateTime?
+  respondedAt  DateTime?
+  convertedAt  DateTime?     // primeira movimentação dentro da janela de atribuição
+
+  @@index([campaignId, status])
+  @@index([clientId])
+}
+
+model AutomationRule {
+  id         String   @id @default(uuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  name       String
+  trigger    String   // NOVO_CLIENTE_SEM_USO | INATIVO_30_DIAS | LIMITE_RENOVADO | ESTIMULO_FAIXA | OPT_OUT_TELEFONE_INVALIDO
+  condition  Json?
+  action     Json     // { type: 'campaign' | 'notification' | 'block', ... }
+  enabled    Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String
+  target    String?
+  targetId  String?
+  details   Json?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
+model SheetConnection {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  sheetId       String
+  sheetRange    String   @default("A1:Z")
+  authType      String   @default("service_account") // service_account | oauth2
+  columnMapping Json     // { "id_cliente": "A", "nome": "B", ... }
+  cronSchedule  String   @default("0 6 * * 1,4") // 2x/semana por padrão
+  lastSyncAt    DateTime?
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+}
+
+model ChannelConfig {
+  id         String   @id @default(uuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  channel    Channel
+  provider   String   // whatsapp_cloud_api | twilio | zenvia ...
+  credentials Json    // armazenado criptografado a nível de aplicação/KMS
+  webhookSecret String?
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  @@unique([tenantId, channel, provider])
+}

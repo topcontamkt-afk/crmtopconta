@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: crmtopconta
+      POSTGRES_PASSWORD: crmtopconta
+      POSTGRES_DB: crmtopconta
+    ports:
+      - "5432:5432"
+    volumes:
+      - crmtopconta_pgdata:/var/lib/postgresql/data
+
+volumes:
+  crmtopconta_pgdata:
