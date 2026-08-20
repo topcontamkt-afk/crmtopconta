@@ -2,6 +2,7 @@ import { PrismaClient } from "@prisma/client";
 import { computeUsage } from "./usage";
 import { digitsOnly, hashCPF, isValidCPF, maskCPF, normalizePhone } from "./masking";
 import { findExistingClient, IncomingClientRow } from "./dedupe";
+import { notify } from "./notifications";
 
 /**
  * Campos mínimos obrigatórios (PRD): id_cliente, nome, telefone, cpf, cidade,
@@ -178,6 +179,19 @@ export async function runImport(
 
       if (existing) {
         await prisma.client.update({ where: { id: existing.id }, data });
+        // Detecta renovação de limite (aumento de limiteTotal) para alimentar a automação
+        // LIMITE_RENOVADO — não há campo de histórico de limite dedicado, então o próprio
+        // aumento observado entre importações é registrado como Movement.
+        if (incoming.limiteTotal > Number(existing.limiteTotal)) {
+          await prisma.movement.create({
+            data: {
+              clientId: existing.id,
+              tipo: "renovacao_limite",
+              valor: incoming.limiteTotal - Number(existing.limiteTotal),
+              data: new Date(),
+            },
+          });
+        }
         updated++;
       } else {
         await prisma.client.create({ data });
@@ -201,6 +215,29 @@ export async function runImport(
       finishedAt: new Date(),
     },
   });
+
+  // Notificação operacional (Fase 2): alerta quando a sincronização falha totalmente ou
+  // termina com erros, para que o operador saiba corrigir a planilha sem precisar checar o
+  // histórico de importações proativamente.
+  if (status === "FALHOU") {
+    await notify(prisma, {
+      tenantId,
+      type: "IMPORT_FAILED",
+      severity: "ERRO",
+      message: `Sincronização (${source}) falhou: todas as ${rows.length} linhas tiveram erro de validação.`,
+      relatedType: "ImportJob",
+      relatedId: job.id,
+    });
+  } else if (status === "CONCLUIDO_COM_ERROS") {
+    await notify(prisma, {
+      tenantId,
+      type: "IMPORT_PARTIAL_ERRORS",
+      severity: "AVISO",
+      message: `Sincronização (${source}) concluída com ${errors.length} linha(s) com erro de ${rows.length} processadas.`,
+      relatedType: "ImportJob",
+      relatedId: job.id,
+    });
+  }
 
   return {
     importJobId: job.id,

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../api/client";
+import { api, downloadFile } from "../api/client";
 
 interface ClientRow {
   id: string;
@@ -56,6 +56,18 @@ export default function Clients() {
         </select>
         <button className="btn" onClick={() => { setPage(1); load(); }}>
           Filtrar
+        </button>
+        <button
+          className="btn secondary"
+          onClick={() => {
+            const params = new URLSearchParams();
+            if (search) params.set("search", search);
+            if (cidade) params.set("cidade", cidade);
+            if (faixaUso) params.set("faixaUso", faixaUso);
+            downloadFile(`/clients/export.csv?${params.toString()}`, "clientes.csv");
+          }}
+        >
+          Exportar CSV
         </button>
       </div>
 

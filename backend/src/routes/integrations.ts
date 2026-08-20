@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
+import { encryptSecret } from "../services/crypto";
 
 const router = Router();
 
@@ -41,31 +42,55 @@ router.put("/sheets", requireRole("ADMIN"), async (req, res) => {
 router.use("/channels", requireAuth);
 
 router.get("/channels", async (req, res) => {
-  const configs = await prisma.channelConfig.findMany({ where: { tenantId: req.user!.tenantId } });
-  // nunca retorna as credenciais brutas para o frontend
-  res.json(configs.map((c) => ({ id: c.id, channel: c.channel, provider: c.provider, active: c.active })));
+  const configs = await prisma.channelConfig.findMany({
+    where: { tenantId: req.user!.tenantId },
+    orderBy: [{ channel: "asc" }, { priority: "asc" }],
+  });
+  // nunca retorna as credenciais (mesmo cifradas) para o frontend
+  res.json(configs.map((c) => ({ id: c.id, channel: c.channel, provider: c.provider, priority: c.priority, active: c.active })));
 });
 
 const channelSchema = z.object({
   channel: z.enum(["WHATSAPP", "SMS"]),
   provider: z.string(),
   credentials: z.record(z.string()),
+  // Prioridade de fallback entre múltiplos provedores do mesmo canal (menor = tentado primeiro).
+  // Permite, por exemplo, cadastrar Twilio (priority 0) e Zenvia (priority 1) para SMS com failover.
+  priority: z.number().int().min(0).default(0),
 });
 
 router.put("/channels", requireRole("ADMIN"), async (req, res) => {
   const parsed = channelSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { tenantId, id: userId } = req.user!;
-  const { channel, provider, credentials } = parsed.data;
+  const { channel, provider, credentials, priority } = parsed.data;
+
+  const encrypted = encryptSecret(credentials);
 
   const config = await prisma.channelConfig.upsert({
     where: { tenantId_channel_provider: { tenantId, channel, provider } },
-    update: { credentials: credentials as any, active: true },
-    create: { tenantId, channel, provider, credentials: credentials as any, webhookSecret: crypto.randomBytes(16).toString("hex") },
+    update: { credentials: encrypted as any, active: true, priority },
+    create: {
+      tenantId,
+      channel,
+      provider,
+      credentials: encrypted as any,
+      priority,
+      webhookSecret: crypto.randomBytes(16).toString("hex"),
+    },
   });
 
-  await logAudit({ tenantId, userId, action: "CONFIGURE_CHANNEL", target: "ChannelConfig", targetId: config.id, details: { channel, provider } });
-  res.json({ id: config.id, channel: config.channel, provider: config.provider, active: config.active });
+  await logAudit({ tenantId, userId, action: "CONFIGURE_CHANNEL", target: "ChannelConfig", targetId: config.id, details: { channel, provider, priority } });
+  res.json({ id: config.id, channel: config.channel, provider: config.provider, priority: config.priority, active: config.active });
+});
+
+router.delete("/channels/:id", requireRole("ADMIN"), async (req, res) => {
+  const { tenantId, id: userId } = req.user!;
+  const config = await prisma.channelConfig.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!config) return res.status(404).json({ error: "Configuração não encontrada" });
+  await prisma.channelConfig.delete({ where: { id: config.id } });
+  await logAudit({ tenantId, userId, action: "DELETE_CHANNEL_CONFIG", target: "ChannelConfig", targetId: config.id });
+  res.status(204).send();
 });
 
 /** ---- Webhooks públicos de status (WhatsApp / SMS) ---- */

@@ -12,6 +12,9 @@ import automationRoutes from "./routes/automations";
 import integrationRoutes from "./routes/integrations";
 import auditRoutes from "./routes/audit";
 import userRoutes from "./routes/users";
+import templateRoutes from "./routes/templates";
+import notificationRoutes from "./routes/notifications";
+import tenantRoutes from "./routes/tenant";
 import { startScheduler } from "./services/scheduler";
 
 const app = express();
@@ -30,6 +33,9 @@ app.use("/api/automations", automationRoutes);
 app.use("/api/integrations", integrationRoutes);
 app.use("/api/audit-logs", auditRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/templates", templateRoutes);
+app.use("/api/notifications", notificationRoutes);
+app.use("/api/tenant", tenantRoutes);
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

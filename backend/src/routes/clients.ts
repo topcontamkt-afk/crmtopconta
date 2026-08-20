@@ -37,6 +37,50 @@ router.get("/", async (req, res) => {
   res.json({ items, total, page, pageSize });
 });
 
+/**
+ * GET /api/clients/export.csv — export restrito por papel (Fase 2 — Should have).
+ * Precisa vir antes de "/:id" para não ser capturada como um id de cliente.
+ */
+router.get("/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
+  const { tenantId, id: userId } = req.user!;
+  const where = buildSegmentWhere(tenantId, {
+    cidade: req.query.cidade ? String(req.query.cidade).split(",") : undefined,
+    faixaUso: req.query.faixaUso ? String(req.query.faixaUso).split(",") : undefined,
+    statusConta: req.query.statusConta ? String(req.query.statusConta).split(",") : undefined,
+    search: req.query.search ? String(req.query.search) : undefined,
+  });
+
+  const clients = await prisma.client.findMany({ where, orderBy: { nome: "asc" }, take: 50000 });
+
+  const header = "nome,telefone,cpf_mascarado,cidade,percentual_utilizado,faixa_uso,status,autorizacao_comunicacao\n";
+  const rows = clients
+    .map((c) =>
+      [
+        csvEscape(c.nome),
+        c.telefone,
+        c.cpfMasked,
+        csvEscape(c.cidade || ""),
+        Number(c.percentualUtilizado),
+        c.faixaUso,
+        c.statusConta,
+        c.autorizacaoComunicacao ? "sim" : "nao",
+      ].join(",")
+    )
+    .join("\n");
+
+  await logAudit({ tenantId, userId, action: "EXPORT_CLIENTS", target: "Client", details: { count: clients.length } });
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="clientes.csv"`);
+  res.send(header + rows);
+});
+
+function csvEscape(value: string): string {
+  if (value.includes(",") || value.includes('"') || value.includes("\n")) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
 router.get("/:id", async (req, res) => {
   const { tenantId } = req.user!;
   const client = await prisma.client.findFirst({

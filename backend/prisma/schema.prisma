@@ -68,11 +68,25 @@ enum ImportStatus {
   FALHOU
 }
 
+enum TemplateStatus {
+  RASCUNHO
+  PENDENTE_APROVACAO
+  APROVADO
+  REJEITADO
+}
+
+enum NotificationSeverity {
+  INFO
+  AVISO
+  ERRO
+}
+
 model Tenant {
   id                 String   @id @default(uuid())
   name               String
   cpfSalt            String   @default(uuid()) // salt por tenant para hash de CPF
   retentionDays       Int      @default(1095) // 3 anos default (LGPD)
+  maxMsgsPerMinute    Int      @default(600) // rate limit global do tenant, aplicado no dispatch de campanhas
   createdAt          DateTime @default(now())
 
   users              User[]
@@ -84,6 +98,8 @@ model Tenant {
   auditLogs          AuditLog[]
   sheetConnections   SheetConnection[]
   channelConfigs     ChannelConfig[]
+  messageTemplates   MessageTemplate[]
+  notifications      Notification[]
 }
 
 model User {
@@ -133,6 +149,7 @@ model Client {
   createdAt              DateTime     @default(now())
   updatedAt               DateTime     @updatedAt
   lastImportJobId        String?
+  anonymizedAt           DateTime? // preenchido pelo job de retenção/right-to-be-forgotten (LGPD)
 
   movements              Movement[]
   messageEvents          MessageEvent[]
@@ -174,15 +191,21 @@ model Movement {
 }
 
 model SegmentDefinition {
-  id        String   @id @default(uuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id])
-  name      String
-  filters   Json     // { cidade, faixaUso[], statusConta, autorizacao, semUsoDias, ... }
-  operator  String   @default("AND") // AND | OR entre grupos de filtro
-  lastCount Int?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id               String    @id @default(uuid())
+  tenantId         String
+  tenant           Tenant    @relation(fields: [tenantId], references: [id])
+  name             String
+  // Estrutura de grupos combináveis (AND/OR): { operator: 'AND'|'OR', conditions: SegmentFilters,
+  // groups?: SegmentGroup[] } — ver src/services/segments.ts. Mantido em Json para não exigir
+  // migração a cada novo campo de filtro suportado.
+  filters          Json
+  operator         String    @default("AND") // AND | OR entre grupos de filtro (legado/top-level)
+  lastCount        Int?
+  dynamic          Boolean   @default(true) // segmento dinâmico: recontagem periódica via scheduler
+  refreshCron      String    @default("0 * * * *") // a cada hora, por padrão
+  lastRefreshedAt  DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   campaigns Campaign[]
 }
@@ -197,8 +220,18 @@ model Campaign {
   segmentId       String?
   segment         SegmentDefinition? @relation(fields: [segmentId], references: [id])
   adHocFilters    Json?          // filtros aplicados diretamente no wizard, se não usar segmento salvo
-  messageTemplate String         // corpo com placeholders {{nome}}, {{cidade}}, {{percentual}}...
+
+  templateId      String?
+  template        MessageTemplate? @relation(fields: [templateId], references: [id])
+  messageTemplate String         // corpo com placeholders {{nome}}, {{cidade}}, {{percentual}}... (variante A, ou texto livre se sem templateId)
   status          CampaignStatus @default(RASCUNHO)
+
+  // A/B testing básico: quando variantSplitPercent está definido, uma fração do público
+  // recebe messageTemplateB no lugar de messageTemplate (variante A).
+  messageTemplateB     String?
+  variantSplitPercent  Int?      // 0-100, % do público que recebe a variante B
+
+  isSandbox       Boolean        @default(false) // campanhas de teste/QA não contam para relatórios agregados
 
   scheduledAt     DateTime?
   throttlePerMin  Int            @default(60)
@@ -222,6 +255,8 @@ model MessageEvent {
   client       Client        @relation(fields: [clientId], references: [id])
   channel      Channel
   status       MessageStatus @default(FILA)
+  variant      String        @default("A") // "A" ou "B" — usado quando a campanha tem A/B testing ativo
+  provider     String?       // provedor efetivamente usado (para failover multi-provider de SMS)
   providerMsgId String?
   cost         Decimal       @default(0) @db.Decimal(10, 4)
   error        String?
@@ -230,6 +265,7 @@ model MessageEvent {
   deliveredAt  DateTime?
   respondedAt  DateTime?
   convertedAt  DateTime?     // primeira movimentação dentro da janela de atribuição
+  convertedValue Decimal?    @db.Decimal(14, 2) // valor da movimentação que gerou a conversão (ROI)
 
   @@index([campaignId, status])
   @@index([clientId])
@@ -244,6 +280,7 @@ model AutomationRule {
   condition  Json?
   action     Json     // { type: 'campaign' | 'notification' | 'block', ... }
   enabled    Boolean  @default(false)
+  lastRunAt  DateTime? // usado para não reavaliar o mesmo evento repetidamente (janela desde a última execução)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 }
@@ -283,10 +320,50 @@ model ChannelConfig {
   tenant     Tenant   @relation(fields: [tenantId], references: [id])
   channel    Channel
   provider   String   // whatsapp_cloud_api | twilio | zenvia ...
-  credentials Json    // armazenado criptografado a nível de aplicação/KMS
+  // Envelope encryption: { iv, authTag, ciphertext } em base64, cifrado com AES-256-GCM usando
+  // a chave mestra da aplicação (env CREDENTIALS_ENCRYPTION_KEY — simula uma KMS externa).
+  // Nunca contém as credenciais em texto plano. Ver src/services/crypto.ts.
+  credentials Json
+  // Ordem de fallback entre múltiplos provedores do mesmo canal (menor = tentado primeiro).
+  // Usado principalmente para failover multi-provider de SMS.
+  priority   Int      @default(0)
   webhookSecret String?
   active     Boolean  @default(true)
   createdAt  DateTime @default(now())
 
   @@unique([tenantId, channel, provider])
+  @@index([tenantId, channel, priority])
+}
+
+model MessageTemplate {
+  id                String         @id @default(uuid())
+  tenantId          String
+  tenant            Tenant         @relation(fields: [tenantId], references: [id])
+  channel           Channel
+  name              String
+  body              String         // placeholders {{nome}}, {{cidade}}, {{percentual}}, ...
+  status            TemplateStatus @default(RASCUNHO)
+  providerTemplateId String?       // id do template aprovado no provedor (ex.: WhatsApp Business Template Name)
+  rejectionReason   String?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  campaigns Campaign[]
+
+  @@unique([tenantId, channel, name])
+}
+
+model Notification {
+  id          String                @id @default(uuid())
+  tenantId    String
+  tenant      Tenant                @relation(fields: [tenantId], references: [id])
+  severity    NotificationSeverity  @default(INFO)
+  type        String                // ex: IMPORT_FAILED, CAMPAIGN_BLOCKED, AUTOMATION_FIRED
+  message     String
+  relatedType String?
+  relatedId   String?
+  read        Boolean               @default(false)
+  createdAt   DateTime              @default(now())
+
+  @@index([tenantId, read, createdAt])
 }

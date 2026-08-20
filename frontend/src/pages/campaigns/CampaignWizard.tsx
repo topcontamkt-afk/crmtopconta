@@ -1,8 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../api/client";
 
 const STEPS = ["Nome/objetivo", "Público", "Canal & mensagem", "Agenda & throttling", "Confirmação"];
+
+interface Template {
+  id: string;
+  channel: "WHATSAPP" | "SMS";
+  name: string;
+  body: string;
+  status: string;
+}
 
 export default function CampaignWizard() {
   const navigate = useNavigate();
@@ -14,13 +22,28 @@ export default function CampaignWizard() {
   const [faixaUso, setFaixaUso] = useState("");
   const [audiencePreview, setAudiencePreview] = useState<number | null>(null);
   const [channel, setChannel] = useState<"WHATSAPP" | "SMS">("WHATSAPP");
+
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [templateId, setTemplateId] = useState("");
   const [messageTemplate, setMessageTemplate] = useState("Olá {{nome}}, você já utilizou {{percentual}}% do seu limite!");
+
+  const [abEnabled, setAbEnabled] = useState(false);
+  const [messageTemplateB, setMessageTemplateB] = useState("");
+  const [variantSplitPercent, setVariantSplitPercent] = useState(50);
+
+  const [isSandbox, setIsSandbox] = useState(false);
+
   const [throttlePerMin, setThrottlePerMin] = useState(60);
   const [dedupeWindowHrs, setDedupeWindowHrs] = useState(72);
   const [attributionDays, setAttributionDays] = useState(7);
   const [scheduledAt, setScheduledAt] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    api<Template[]>(`/templates?channel=${channel}&status=APROVADO`).then(setTemplates);
+    setTemplateId("");
+  }, [channel]);
 
   function adHocFilters() {
     return {
@@ -34,6 +57,8 @@ export default function CampaignWizard() {
     setAudiencePreview(resp.count);
   }
 
+  const effectiveMessage = templateId ? templates.find((t) => t.id === templateId)?.body || "" : messageTemplate;
+
   async function handleConfirm() {
     setSubmitting(true);
     setError(null);
@@ -45,7 +70,11 @@ export default function CampaignWizard() {
           objective,
           channel,
           adHocFilters: adHocFilters(),
-          messageTemplate,
+          templateId: templateId || undefined,
+          messageTemplate: templateId ? undefined : messageTemplate,
+          messageTemplateB: abEnabled ? messageTemplateB : undefined,
+          variantSplitPercent: abEnabled ? variantSplitPercent : undefined,
+          isSandbox,
           throttlePerMin,
           dedupeWindowHrs,
           attributionDays,
@@ -108,6 +137,10 @@ export default function CampaignWizard() {
                 <strong>{audiencePreview}</strong> clientes elegíveis (opt-outs já excluídos automaticamente)
               </p>
             )}
+            <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+              Para combinações mais avançadas (grupos AND/OR), salve um segmento em "Segmentos" e
+              use a API de campanhas com <code>segmentId</code>.
+            </p>
           </div>
         )}
 
@@ -120,14 +153,46 @@ export default function CampaignWizard() {
                 <option value="SMS">SMS</option>
               </select>
             </div>
+
             <div className="form-row">
-              <label>Mensagem (placeholders: {"{{nome}}"}, {"{{cidade}}"}, {"{{percentual}}"})</label>
-              <textarea rows={4} value={messageTemplate} onChange={(e) => setMessageTemplate(e.target.value)} />
+              <label>Template aprovado (opcional)</label>
+              <select value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
+                <option value="">— Texto livre —</option>
+                {templates.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
             </div>
+
+            {!templateId && (
+              <div className="form-row">
+                <label>Mensagem — variante A (placeholders: {"{{nome}}"}, {"{{cidade}}"}, {"{{percentual}}"})</label>
+                <textarea rows={4} value={messageTemplate} onChange={(e) => setMessageTemplate(e.target.value)} />
+              </div>
+            )}
+
             <div className="card" style={{ background: "var(--surface-alt)" }}>
-              <strong>Pré-visualização:</strong>
-              <p>{messageTemplate.replace("{{nome}}", "Maria").replace("{{cidade}}", cidade || "São Paulo").replace("{{percentual}}", "45")}</p>
+              <strong>Pré-visualização (variante A):</strong>
+              <p>{effectiveMessage.replace("{{nome}}", "Maria").replace("{{cidade}}", cidade || "São Paulo").replace("{{percentual}}", "45")}</p>
             </div>
+
+            <div className="form-row" style={{ marginTop: 10 }}>
+              <label>
+                <input type="checkbox" checked={abEnabled} onChange={(e) => setAbEnabled(e.target.checked)} /> Testar variante B (A/B testing)
+              </label>
+            </div>
+            {abEnabled && (
+              <>
+                <div className="form-row">
+                  <label>Mensagem — variante B</label>
+                  <textarea rows={3} value={messageTemplateB} onChange={(e) => setMessageTemplateB(e.target.value)} />
+                </div>
+                <div className="form-row">
+                  <label>% do público que recebe a variante B</label>
+                  <input type="number" min={0} max={100} value={variantSplitPercent} onChange={(e) => setVariantSplitPercent(Number(e.target.value))} />
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -149,6 +214,11 @@ export default function CampaignWizard() {
               <label>Janela de atribuição de conversão (dias)</label>
               <input type="number" value={attributionDays} onChange={(e) => setAttributionDays(Number(e.target.value))} />
             </div>
+            <div className="form-row">
+              <label>
+                <input type="checkbox" checked={isSandbox} onChange={(e) => setIsSandbox(e.target.checked)} /> Campanha de teste/sandbox (não conta para relatórios agregados)
+              </label>
+            </div>
           </div>
         )}
 
@@ -157,8 +227,13 @@ export default function CampaignWizard() {
             <p><strong>Nome:</strong> {name}</p>
             <p><strong>Canal:</strong> {channel}</p>
             <p><strong>Público estimado:</strong> {audiencePreview ?? "não calculado"}</p>
-            <p><strong>Mensagem:</strong> {messageTemplate}</p>
+            <p><strong>Mensagem (A):</strong> {effectiveMessage}</p>
+            {abEnabled && <p><strong>Mensagem (B):</strong> {messageTemplateB} — {variantSplitPercent}% do público</p>}
             <p><strong>Throttle:</strong> {throttlePerMin} msgs/min · Dedupe: {dedupeWindowHrs}h · Atribuição: {attributionDays} dias</p>
+            {isSandbox && <p><span className="badge warn">Sandbox</span> esta campanha é de teste</p>}
+            <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+              Após criar, você pode enviar uma amostra de teste (QA) antes de agendar para a base completa, na tela de relatório da campanha.
+            </p>
             {error && <div className="error-text">{error}</div>}
           </div>
         )}

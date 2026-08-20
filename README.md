@@ -41,6 +41,8 @@ docker compose up -d
 ```bash
 cd backend
 cp .env.example .env      # ajuste DATABASE_URL/credenciais conforme necessário
+# gere a chave de cifra das credenciais de canal (WhatsApp/SMS) e cole em CREDENTIALS_ENCRYPTION_KEY:
+openssl rand -base64 32
 npm install
 npx prisma migrate dev --name init
 npm run prisma:seed       # cria tenant + usuários + clientes de demonstração
@@ -102,8 +104,8 @@ Implementado, mapeando os itens **Must have** do PRD:
 - **Automação básica**: modelo de `AutomationRule` com os 5 gatilhos do PRD
   (ativação de cliente novo, reativação 30 dias, aviso de limite renovado,
   estímulo por faixa, bloqueio em opt-out/telefone inválido) — CRUD e
-  ativação/desativação prontos; a avaliação automática dos gatilhos por evento
-  fica descrita como próximo passo (ver Roadmap).
+  ativação/desativação prontos. **Avaliação automática implementada na Fase 2**
+  (ver abaixo).
 - **Segurança/LGPD**: CPF nunca armazenado em texto plano (hash HMAC com salt
   por tenant + versão mascarada), opt-out sticky (uma vez recusado, importação
   não reativa autorização sozinha), controle de acesso por papel (Admin,
@@ -111,16 +113,65 @@ Implementado, mapeando os itens **Must have** do PRD:
   sensíveis, isolamento de dados por tenant em todas as queries.
 - **Auth**: login com JWT, roles, tela de auditoria restrita a Admin/Analista.
 
-### Não incluído nesta entrega (roadmap explícito no PRD)
+## Escopo da Fase 2 (Robustez e Automação)
 
-Ver seção "Fase 2" e "Fase 3" do PRD original: segment builder avançado com
-combinação AND/OR visual, correção em massa de erros de importação, gerenciador
-de templates com aprovação WhatsApp, A/B testing, motor de recomendações,
-conversational inbox, conectores de BI, KMS/HSM para chaves, filas reais
-(RabbitMQ/Redis) em substituição à fila modelada em Postgres, testes de carga e
-observabilidade (Prometheus/ELK). O código já isola essas peças atrás de
-interfaces (`ChannelAdapter`, fila em `campaignQueue.ts`) para facilitar a
-evolução sem reescrita.
+Implementado, mapeando os itens **Should have** do PRD:
+
+- **Importação — qualidade e correção**: `GET /api/imports/quality` (registros
+  incompletos, motivos de erro mais recorrentes nos últimos 30 dias),
+  `POST /api/imports/:id/fix-errors` (reenvia só as linhas corrigidas pelo
+  mesmo pipeline de validação/dedupe) e notificações in-app quando uma
+  sincronização falha total ou parcialmente (`src/services/notifications.ts`).
+- **Segment builder avançado**: `buildSegmentWhere` agora aceita tanto o
+  formato simples (Fase 1) quanto grupos `{ operator: 'AND'|'OR', conditions,
+  groups[] }` combináveis recursivamente (`src/services/segments.ts`, com
+  testes unitários). Segmentos podem ser marcados `dynamic` e têm um
+  `refreshCron` próprio, recontados automaticamente pelo scheduler.
+- **Motor de automação real**: `src/services/automationEngine.ts` avalia as
+  `AutomationRule` ativas a cada 5 minutos, casando clientes por gatilho
+  (novo sem uso, inativo há N dias, limite renovado — detectado via `Movement`
+  criado no import quando `limiteTotal` aumenta —, faixa de uso, inconsistência
+  de opt-out) e executando a ação configurada: criar+disparar campanha,
+  notificar, ou bloquear diretamente. Reenvios ao mesmo cliente continuam
+  protegidos pela janela de dedupe existente (mesmo texto de mensagem entre
+  disparos automáticos).
+- **Templates com aprovação e preview**: `MessageTemplate` com `status`
+  (rascunho/pendente/aprovado/rejeitado — WhatsApp nasce pendente, SMS nasce
+  aprovado), reaprovação automática ao editar o corpo de um template já
+  aprovado, e endpoint de preview rico com placeholders substituídos.
+  Campanhas podem referenciar um `templateId` aprovado em vez de texto livre.
+- **Rate limiting + failover multi-provider (SMS)**: `Tenant.maxMsgsPerMinute`
+  limita o total de envios/minuto do tenant somando todas as campanhas
+  (`GET/PUT /api/tenant/settings`); `ChannelConfig.priority` permite cadastrar
+  múltiplos provedores do mesmo canal (ex.: Twilio + Zenvia para SMS) com
+  fallback automático quando o provedor de maior prioridade falha no envio.
+- **Relatórios avançados**: atribuição de conversão agora também soma o valor
+  da movimentação convertida (`convertedValue`), permitindo calcular ROI por
+  campanha; export CSV do relatório de campanha e da base de clientes,
+  restrito por papel (Admin/Operador/Analista).
+- **Sandbox de campanhas + A/B testing básico**: `POST /api/campaigns/:id/test-send`
+  envia a variante A para uma amostra de até 10 telefones sem tocar no público
+  real; campanhas podem ter `messageTemplateB` + `variantSplitPercent`, com o
+  público sorteado entre variante A/B no enfileiramento e o relatório
+  quebrado por variante.
+- **Segurança avançada**: credenciais de canal (`ChannelConfig.credentials`)
+  são cifradas em repouso com AES-256-GCM via envelope encryption
+  (`src/services/crypto.ts`, chave mestra simulando uma KMS externa — troca
+  direta por AWS/GCP/Azure KMS sem alterar o restante do fluxo); job diário de
+  retenção/anonimização (`src/services/retention.ts`) implementa o
+  right-to-be-forgotten da LGPD para clientes sem atividade além da política
+  do tenant (`Tenant.retentionDays`).
+
+### Não incluído nesta entrega (roadmap explícito no PRD — Fase 3)
+
+Motor de recomendações (ML) para segmentos e horário de envio, A/B testing
+completo com análise estatística, conversational inbox, conectores de BI
+(BigQuery/Data Studio), API pública, multi-tenant avançado com SLAs, filas
+reais (RabbitMQ/Redis/Kafka) em substituição à fila modelada em Postgres,
+observabilidade (Prometheus/ELK/Jaeger), testes de carga e chaos engineering,
+KMS/HSM real (hoje simulado por uma chave de aplicação). O código já isola
+essas peças atrás de interfaces (`ChannelAdapter`, fila em
+`campaignQueue.ts`, `crypto.ts`) para facilitar a evolução sem reescrita.
 
 ## Decisões técnicas relevantes
 

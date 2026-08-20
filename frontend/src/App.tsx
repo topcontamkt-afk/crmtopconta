@@ -11,6 +11,10 @@ import CampaignReport from "./pages/campaigns/CampaignReport";
 import Integrations from "./pages/Integrations";
 import Automations from "./pages/Automations";
 import AuditLog from "./pages/AuditLog";
+import Templates from "./pages/Templates";
+import Imports from "./pages/Imports";
+import Settings from "./pages/Settings";
+import NotificationBell from "./components/NotificationBell";
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   const { user } = useAuth();
@@ -29,15 +33,19 @@ function Layout({ children }: { children: JSX.Element }) {
           <NavLink to="/clients">Base de clientes</NavLink>
           <NavLink to="/segments">Segmentos</NavLink>
           <NavLink to="/campaigns">Campanhas</NavLink>
+          <NavLink to="/templates">Templates</NavLink>
           <NavLink to="/automations">Automações</NavLink>
+          <NavLink to="/imports">Importações</NavLink>
           <NavLink to="/integrations">Integrações</NavLink>
           <NavLink to="/audit">Auditoria</NavLink>
+          <NavLink to="/settings">Configurações</NavLink>
         </nav>
       </aside>
       <div className="main">
         <div className="topbar">
           <div />
-          <div>
+          <div style={{ display: "flex", alignItems: "center" }}>
+            <NotificationBell />
             <span style={{ marginRight: 12, fontSize: 14, color: "var(--text-muted)" }}>
               {user?.name} · {user?.role}
             </span>
@@ -69,9 +77,12 @@ export default function App() {
                 <Route path="/campaigns" element={<CampaignList />} />
                 <Route path="/campaigns/new" element={<CampaignWizard />} />
                 <Route path="/campaigns/:id/report" element={<CampaignReport />} />
+                <Route path="/templates" element={<Templates />} />
                 <Route path="/automations" element={<Automations />} />
+                <Route path="/imports" element={<Imports />} />
                 <Route path="/integrations" element={<Integrations />} />
                 <Route path="/audit" element={<AuditLog />} />
+                <Route path="/settings" element={<Settings />} />
               </Routes>
             </Layout>
           </RequireAuth>
