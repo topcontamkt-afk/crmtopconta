@@ -17,6 +17,23 @@ router.get("/sheets", async (req, res) => {
   res.json(conn);
 });
 
+/**
+ * GET /api/integrations/sheets/service-account — expõe só o e-mail da Service Account
+ * (não é segredo, é o identificador público que o cliente precisa saber para compartilhar a
+ * planilha), para a tela de Integrações guiar o usuário sem ele precisar abrir o JSON da
+ * credencial. Nunca retorna a private_key.
+ */
+router.get("/sheets/service-account", (_req, res) => {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!raw) return res.json({ configured: false });
+  try {
+    const { client_email } = JSON.parse(raw);
+    res.json({ configured: true, email: client_email as string });
+  } catch {
+    res.json({ configured: false, error: "GOOGLE_SERVICE_ACCOUNT_JSON inválido (não é um JSON válido)" });
+  }
+});
+
 const sheetConnSchema = z.object({
   sheetId: z.string(),
   sheetRange: z.string().default("A1:Z"),
