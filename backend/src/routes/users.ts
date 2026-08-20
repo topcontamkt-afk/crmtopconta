@@ -1,4 +1,5 @@
 import { Router } from "express";
+import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { prisma } from "../config/db";
@@ -47,6 +48,29 @@ router.patch("/:id", requireRole("ADMIN"), async (req, res) => {
   });
   await logAudit({ tenantId, userId: adminId, action: "UPDATE_USER", target: "User", targetId: target.id, details: req.body });
   res.json({ id: updated.id, role: updated.role, active: updated.active });
+});
+
+/**
+ * POST /api/users/:id/reset-password — reset por Admin, sem depender de envio de e-mail (não
+ * configurado no MVP). Gera uma senha temporária forte, força troca no próximo login e limpa
+ * qualquer bloqueio de rate limiting ativo na conta. A senha em texto plano só existe nesta
+ * resposta — o Admin repassa ao usuário por um canal fora do sistema (ex.: WhatsApp, presencial).
+ */
+router.post("/:id/reset-password", requireRole("ADMIN"), async (req, res) => {
+  const { tenantId, id: adminId } = req.user!;
+  const target = await prisma.user.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!target) return res.status(404).json({ error: "Usuário não encontrado" });
+
+  const tempPassword = crypto.randomBytes(9).toString("base64url");
+  const passwordHash = await bcrypt.hash(tempPassword, 10);
+
+  await prisma.user.update({
+    where: { id: target.id },
+    data: { passwordHash, mustChangePassword: true, failedLoginCount: 0, lockedUntil: null },
+  });
+  await logAudit({ tenantId, userId: adminId, action: "RESET_PASSWORD_ADMIN", target: "User", targetId: target.id });
+
+  res.json({ tempPassword });
 });
 
 export default router;

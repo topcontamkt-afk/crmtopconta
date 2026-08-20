@@ -7,13 +7,18 @@ export interface AuthUser {
   email: string;
   role: "ADMIN" | "OPERATOR" | "ANALYST" | "VIEWER";
   tenantId: string;
+  mustChangePassword?: boolean;
 }
+
+type LoginResult = { ok: true } | { requires2FA: true; tempToken: string };
 
 interface AuthContextValue {
   user: AuthUser | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<LoginResult>;
+  verifyTwoFactor: (tempToken: string, code: string) => Promise<void>;
   logout: () => void;
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -31,19 +36,47 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!getToken()) setUser(null);
   }, []);
 
-  async function login(email: string, password: string) {
+  function applySession(token: string, sessionUser: AuthUser) {
+    setToken(token);
+    localStorage.setItem(USER_KEY, JSON.stringify(sessionUser));
+    setUser(sessionUser);
+  }
+
+  async function login(email: string, password: string): Promise<LoginResult> {
     setLoading(true);
     try {
-      const resp = await api<{ token: string; user: AuthUser }>("/auth/login", {
-        method: "POST",
-        body: { email, password },
-      });
-      setToken(resp.token);
-      localStorage.setItem(USER_KEY, JSON.stringify(resp.user));
-      setUser(resp.user);
+      const resp = await api<{ token: string; user: AuthUser } | { requires2FA: true; tempToken: string }>(
+        "/auth/login",
+        { method: "POST", body: { email, password } }
+      );
+      if ("requires2FA" in resp) {
+        return resp;
+      }
+      applySession(resp.token, resp.user);
+      return { ok: true };
     } finally {
       setLoading(false);
     }
+  }
+
+  async function verifyTwoFactor(tempToken: string, code: string) {
+    setLoading(true);
+    try {
+      const resp = await api<{ token: string; user: AuthUser }>("/auth/2fa/verify", {
+        method: "POST",
+        body: { tempToken, code },
+      });
+      applySession(resp.token, resp.user);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function refreshUser() {
+    if (!getToken()) return;
+    const me = await api<AuthUser>("/auth/me");
+    localStorage.setItem(USER_KEY, JSON.stringify(me));
+    setUser(me);
   }
 
   function logout() {
@@ -52,7 +85,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }
 
-  return <AuthContext.Provider value={{ user, loading, login, logout }}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={{ user, loading, login, verifyTwoFactor, logout, refreshUser }}>
+      {children}
+    </AuthContext.Provider>
+  );
 }
 
 export function useAuth() {

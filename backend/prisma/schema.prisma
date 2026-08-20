@@ -122,6 +122,22 @@ model User {
   active       Boolean  @default(true)
   createdAt    DateTime @default(now())
 
+  // Segurança de login (rate limiting anti brute-force) — armazenado no banco (não em memória
+  // do processo) para funcionar de forma consistente entre invocações serverless distintas.
+  failedLoginCount   Int       @default(0)
+  lockedUntil        DateTime? // conta bloqueada para login até este instante
+
+  // Forçado após reset de senha por um Admin (sem fluxo de e-mail) — o próprio usuário troca no
+  // primeiro login seguinte.
+  mustChangePassword Boolean   @default(false)
+
+  // 2FA (TOTP, tipo Google Authenticator) — segredo cifrado em repouso (envelope encryption,
+  // mesma abordagem de ChannelConfig.credentials, ver services/crypto.ts). O segredo só é
+  // considerado válido para login quando twoFactorEnabled = true (setup não confirmado ainda
+  // não afeta o login).
+  twoFactorSecret    String?
+  twoFactorEnabled   Boolean   @default(false)
+
   auditLogs    AuditLog[]
 }
 

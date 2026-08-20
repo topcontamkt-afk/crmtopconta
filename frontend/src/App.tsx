@@ -14,11 +14,17 @@ import AuditLog from "./pages/AuditLog";
 import Templates from "./pages/Templates";
 import Imports from "./pages/Imports";
 import Settings from "./pages/Settings";
+import Account from "./pages/Account";
+import Users from "./pages/Users";
 import NotificationBell from "./components/NotificationBell";
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   const { user } = useAuth();
   if (!user) return <Navigate to="/login" replace />;
+  // Senha resetada por um Admin: força a troca antes de liberar o resto do sistema.
+  if (user.mustChangePassword && window.location.pathname !== "/account") {
+    return <Navigate to="/account" replace />;
+  }
   return children;
 }
 
@@ -38,7 +44,9 @@ function Layout({ children }: { children: JSX.Element }) {
           <NavLink to="/imports">Importações</NavLink>
           <NavLink to="/integrations">Integrações</NavLink>
           <NavLink to="/audit">Auditoria</NavLink>
+          {user?.role === "ADMIN" && <NavLink to="/users">Usuários</NavLink>}
           <NavLink to="/settings">Configurações</NavLink>
+          <NavLink to="/account">Minha conta</NavLink>
         </nav>
       </aside>
       <div className="main">
@@ -82,7 +90,9 @@ export default function App() {
                 <Route path="/imports" element={<Imports />} />
                 <Route path="/integrations" element={<Integrations />} />
                 <Route path="/audit" element={<AuditLog />} />
+                <Route path="/users" element={<Users />} />
                 <Route path="/settings" element={<Settings />} />
+                <Route path="/account" element={<Account />} />
               </Routes>
             </Layout>
           </RequireAuth>
