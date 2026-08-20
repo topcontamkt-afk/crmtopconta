@@ -1,0 +1,10 @@
+{
+  "rewrites": [{ "source": "/(.*)", "destination": "/api" }],
+  "crons": [
+    { "path": "/api/cron/dispatch", "schedule": "*/5 * * * *" },
+    { "path": "/api/cron/automations", "schedule": "*/30 * * * *" },
+    { "path": "/api/cron/segments-refresh", "schedule": "0 * * * *" },
+    { "path": "/api/cron/sheet-sync", "schedule": "0 6 * * *" },
+    { "path": "/api/cron/retention", "schedule": "0 3 * * *" }
+  ]
+}

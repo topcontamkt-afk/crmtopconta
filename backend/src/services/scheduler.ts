@@ -9,77 +9,66 @@ import { processQueueBatch } from "./campaignQueue";
 import { runRetentionSweep } from "./retention";
 
 /**
- * Orquestra os jobs periódicos do backend. Cada responsabilidade roda no seu próprio
- * cron.schedule para poder ter uma cadência independente (sync de planilha é configurável por
- * tenant; dispatch/automação precisam rodar com frequência; retenção roda uma vez por dia).
+ * Cada função abaixo é o "corpo" de um job periódico, desacoplada de *como* ela é disparada:
+ *  - localmente (dev/servidor de longa duração), `startScheduler()` as agenda com node-cron
+ *    rodando em processo, a cada minuto;
+ *  - em produção serverless (Vercel), os mesmos jobs são expostos como endpoints HTTP
+ *    (`/api/cron/*`, ver routes/cron.ts) disparados por Vercel Cron Jobs, já que uma função
+ *    serverless não mantém um loop `node-cron` vivo entre invocações.
  */
-export function startScheduler() {
-  startSheetSyncJob();
-  startSegmentRefreshJob();
-  startAutomationJob();
-  startCampaignDispatchSweep();
-  startRetentionJob();
-}
 
 /** Sincronização automática do Google Sheets (PRD — Must have), respeitando o cron por tenant. */
-function startSheetSyncJob() {
-  cron.schedule("* * * * *", async () => {
-    const connections = await prisma.sheetConnection.findMany({ where: { active: true } });
-    const now = new Date();
+export async function runSheetSyncJob() {
+  const connections = await prisma.sheetConnection.findMany({ where: { active: true } });
+  const now = new Date();
+  let synced = 0;
 
-    for (const conn of connections) {
-      if (!cronMatchesNow(conn.cronSchedule, now)) continue;
-      try {
-        const rows = await fetchSheetRows(conn.sheetId, conn.sheetRange, (conn.columnMapping as any) || DEFAULT_COLUMN_MAPPING);
-        await runImport(prisma, conn.tenantId, rows, "scheduler", "google_sheets", conn.sheetId);
-        await prisma.sheetConnection.update({ where: { id: conn.id }, data: { lastSyncAt: now } });
-      } catch (e: any) {
-        // Falhas de sincronização automática ficam registradas no ImportJob (status FALHOU)
-        // quando o erro ocorre durante o processamento das linhas; falhas de conexão (antes de
-        // existir um job) são notificadas diretamente aqui.
-        console.error(`[scheduler] Falha ao sincronizar SheetConnection ${conn.id}:`, e);
-        await notify(prisma, {
-          tenantId: conn.tenantId,
-          type: "IMPORT_FAILED",
-          severity: "ERRO",
-          message: `Sincronização automática da planilha ${conn.sheetId} falhou: ${e.message}`,
-        });
-      }
+  for (const conn of connections) {
+    if (!cronMatchesNow(conn.cronSchedule, now)) continue;
+    try {
+      const rows = await fetchSheetRows(conn.sheetId, conn.sheetRange, (conn.columnMapping as any) || DEFAULT_COLUMN_MAPPING);
+      await runImport(prisma, conn.tenantId, rows, "scheduler", "google_sheets", conn.sheetId);
+      await prisma.sheetConnection.update({ where: { id: conn.id }, data: { lastSyncAt: now } });
+      synced++;
+    } catch (e: any) {
+      console.error(`[scheduler] Falha ao sincronizar SheetConnection ${conn.id}:`, e);
+      await notify(prisma, {
+        tenantId: conn.tenantId,
+        type: "IMPORT_FAILED",
+        severity: "ERRO",
+        message: `Sincronização automática da planilha ${conn.sheetId} falhou: ${e.message}`,
+      });
     }
-  });
+  }
+  return { checked: connections.length, synced };
 }
 
 /** Recontagem periódica de segmentos dinâmicos (Fase 2), cada um no seu próprio refreshCron. */
-function startSegmentRefreshJob() {
-  cron.schedule("* * * * *", async () => {
-    const segments = await prisma.segmentDefinition.findMany({ where: { dynamic: true } });
-    const now = new Date();
+export async function runSegmentRefreshJob() {
+  const segments = await prisma.segmentDefinition.findMany({ where: { dynamic: true } });
+  const now = new Date();
+  let refreshed = 0;
 
-    for (const segment of segments) {
-      if (!cronMatchesNow(segment.refreshCron, now)) continue;
-      try {
-        const where = buildSegmentWhere(segment.tenantId, segment.filters as any);
-        const count = await prisma.client.count({ where });
-        await prisma.segmentDefinition.update({
-          where: { id: segment.id },
-          data: { lastCount: count, lastRefreshedAt: now },
-        });
-      } catch (e) {
-        console.error(`[scheduler] Falha ao atualizar segmento dinâmico ${segment.id}:`, e);
-      }
+  for (const segment of segments) {
+    if (!cronMatchesNow(segment.refreshCron, now)) continue;
+    try {
+      const where = buildSegmentWhere(segment.tenantId, segment.filters as any);
+      const count = await prisma.client.count({ where });
+      await prisma.segmentDefinition.update({
+        where: { id: segment.id },
+        data: { lastCount: count, lastRefreshedAt: now },
+      });
+      refreshed++;
+    } catch (e) {
+      console.error(`[scheduler] Falha ao atualizar segmento dinâmico ${segment.id}:`, e);
     }
-  });
+  }
+  return { checked: segments.length, refreshed };
 }
 
-/** Motor de automação (Fase 2) — avalia gatilhos e dispara ações a cada 5 minutos. */
-function startAutomationJob() {
-  cron.schedule("*/5 * * * *", async () => {
-    try {
-      await evaluateAutomationRules(prisma);
-    } catch (e) {
-      console.error("[scheduler] Falha ao avaliar automações:", e);
-    }
-  });
+/** Motor de automação (Fase 2) — avalia gatilhos e dispara ações. */
+export async function runAutomationJob() {
+  return evaluateAutomationRules(prisma);
 }
 
 /**
@@ -87,35 +76,26 @@ function startAutomationJob() {
  * criadas manualmente (wizard) quanto as disparadas pelo motor de automação, respeitando sempre
  * o throttle da campanha e o rate limit global do tenant.
  */
-function startCampaignDispatchSweep() {
-  cron.schedule("* * * * *", async () => {
-    const pendingCampaigns = await prisma.campaign.findMany({
-      where: { status: { in: ["AGENDADA", "EM_EXECUCAO"] } },
-      select: { id: true },
-    });
-
-    for (const c of pendingCampaigns) {
-      try {
-        await processQueueBatch(prisma, c.id, 100);
-      } catch (e) {
-        console.error(`[scheduler] Falha ao processar fila da campanha ${c.id}:`, e);
-      }
-    }
+export async function runCampaignDispatchJob() {
+  const pendingCampaigns = await prisma.campaign.findMany({
+    where: { status: { in: ["AGENDADA", "EM_EXECUCAO"] } },
+    select: { id: true },
   });
+
+  const results = [];
+  for (const c of pendingCampaigns) {
+    try {
+      results.push({ campaignId: c.id, ...(await processQueueBatch(prisma, c.id, 100)) });
+    } catch (e) {
+      console.error(`[scheduler] Falha ao processar fila da campanha ${c.id}:`, e);
+    }
+  }
+  return { checked: pendingCampaigns.length, results };
 }
 
-/** Política de retenção/anonimização (LGPD) — roda uma vez por dia. */
-function startRetentionJob() {
-  cron.schedule("0 3 * * *", async () => {
-    try {
-      const result = await runRetentionSweep(prisma);
-      if (result.totalAnonymized > 0) {
-        console.log(`[scheduler] Retenção: ${result.totalAnonymized} cliente(s) anonimizado(s).`);
-      }
-    } catch (e) {
-      console.error("[scheduler] Falha no job de retenção:", e);
-    }
-  });
+/** Política de retenção/anonimização (LGPD) — normalmente 1x/dia. */
+export async function runRetentionJob() {
+  return runRetentionSweep(prisma);
 }
 
 function cronMatchesNow(expr: string, date: Date): boolean {
@@ -129,4 +109,17 @@ function cronMatchesNow(expr: string, date: Date): boolean {
     matches(month, date.getMonth() + 1) &&
     matches(dow, date.getDay())
   );
+}
+
+/**
+ * Orquestra os jobs periódicos via node-cron, em processo — usado apenas no servidor de longa
+ * duração (dev local ou um host tipo Railway/Render). Em serverless (Vercel), NÃO é chamada;
+ * os mesmos jobs rodam via Vercel Cron Jobs batendo em /api/cron/* (ver routes/cron.ts).
+ */
+export function startScheduler() {
+  cron.schedule("* * * * *", () => runSheetSyncJob().catch((e) => console.error("[scheduler] sheet-sync:", e)));
+  cron.schedule("* * * * *", () => runSegmentRefreshJob().catch((e) => console.error("[scheduler] segments-refresh:", e)));
+  cron.schedule("*/5 * * * *", () => runAutomationJob().catch((e) => console.error("[scheduler] automations:", e)));
+  cron.schedule("* * * * *", () => runCampaignDispatchJob().catch((e) => console.error("[scheduler] dispatch:", e)));
+  cron.schedule("0 3 * * *", () => runRetentionJob().catch((e) => console.error("[scheduler] retention:", e)));
 }

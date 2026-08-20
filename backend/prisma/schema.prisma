@@ -4,12 +4,21 @@
 // Campaign, MessageEvent, AutomationRule, AuditLog
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // "native" para dev local; "rhel-openssl-3.0.x" é o runtime das Lambdas da Vercel/AWS.
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  // Em serverless (Vercel), aponte para o connection pooler do Supabase (porta 6543,
+  // "Transaction" mode) — evita esgotar as conexões diretas do Postgres a cada invocação de
+  // função. Em servidor de longa duração (dev local, Railway/Render), a conexão direta (5432)
+  // funciona igualmente bem.
+  url       = env("DATABASE_URL")
+  // Conexão direta (porta 5432), usada apenas por `prisma migrate`/`prisma db push` — nunca em
+  // runtime. Pode apontar para o mesmo valor de DATABASE_URL quando não se usa pooler.
+  directUrl = env("DIRECT_URL")
 }
 
 enum Role {
