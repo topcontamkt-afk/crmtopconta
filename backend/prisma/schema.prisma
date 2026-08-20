@@ -176,7 +176,8 @@ model Client {
 
   // Cartão/conta vinculado a convênio (folha de pagamento): nome e cidade da empresa
   // conveniada, e vínculo empregatício do titular — usados para segmentar campanhas por
-  // convênio (ex.: "só servidores efetivos da Prefeitura de Lagarto").
+  // convênio (ex.: "só servidores efetivos da Prefeitura de Lagarto"). Preenchidos apenas
+  // pelo formato de importação que os traz (nem toda planilha real tem essas colunas).
   empresaConveniada       String?
   cidadeEmpresaConveniada String?
   vinculoEmpregaticio     String?
@@ -187,6 +188,18 @@ model Client {
   encerradoEm             DateTime?
   motivoEncerramento      String?
   obsEncerramento         String?
+
+  // Campos da aba "SaldoCartao" (fonte real mais completa, confirmada com o cliente) — nem
+  // toda planilha real traz isso, por isso tudo opcional.
+  razaoSocial             String? // razão social da promotora/associação que administra o cartão
+  lotacao                 String? // departamento/unidade de trabalho do titular (servidor público)
+  dataValidadeCartao      DateTime?
+  dataNascimento          DateTime?
+  sexo                    String?
+  remuneracaoBruta        Decimal?     @db.Decimal(14, 2)
+  remuneracaoLiquida      Decimal?     @db.Decimal(14, 2)
+  bonus                   Decimal?     @db.Decimal(14, 2)
+  saldoLiquidoSaque       Decimal?     @db.Decimal(14, 2)
 
   tags                   String[]     @default([])
 
