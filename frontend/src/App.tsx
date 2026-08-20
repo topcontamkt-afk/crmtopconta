@@ -1,4 +1,20 @@
-import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import {
+  LayoutDashboard,
+  Users as UsersIcon,
+  Layers,
+  Megaphone,
+  FileText,
+  Zap,
+  Upload,
+  Plug,
+  History,
+  UserCog,
+  Settings as SettingsIcon,
+  UserCircle,
+  LogOut,
+  Search,
+} from "lucide-react";
 import { useAuth } from "./context/AuthContext";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
@@ -17,6 +33,7 @@ import Settings from "./pages/Settings";
 import Account from "./pages/Account";
 import Users from "./pages/Users";
 import NotificationBell from "./components/NotificationBell";
+import { SidebarNav, type NavGroupData, type NavItemData } from "./components/ui/dashboard-sidebar";
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   const { user } = useAuth();
@@ -30,25 +47,82 @@ function RequireAuth({ children }: { children: JSX.Element }) {
 
 function Layout({ children }: { children: JSX.Element }) {
   const { user, logout } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  const groups: NavGroupData[] = [
+    {
+      items: [
+        { id: "dashboard", title: "Dashboard", icon: LayoutDashboard, path: "/" },
+        { id: "search", title: "Buscar", icon: Search, shortcut: "⌘K" },
+      ],
+    },
+    {
+      heading: "Relacionamento",
+      items: [
+        { id: "clients", title: "Base de clientes", icon: UsersIcon, path: "/clients" },
+        { id: "segments", title: "Segmentos", icon: Layers, path: "/segments" },
+      ],
+    },
+    {
+      heading: "Comunicação",
+      items: [
+        { id: "campaigns", title: "Campanhas", icon: Megaphone, path: "/campaigns" },
+        { id: "templates", title: "Templates", icon: FileText, path: "/templates" },
+        { id: "automations", title: "Automações", icon: Zap, path: "/automations" },
+      ],
+    },
+    {
+      heading: "Dados",
+      items: [
+        { id: "imports", title: "Importações", icon: Upload, path: "/imports" },
+        { id: "integrations", title: "Integrações", icon: Plug, path: "/integrations" },
+        { id: "audit", title: "Auditoria", icon: History, path: "/audit" },
+      ],
+    },
+  ];
+
+  if (user?.role === "ADMIN") {
+    groups.push({
+      heading: "Administração",
+      items: [{ id: "users", title: "Usuários", icon: UserCog, path: "/users" }],
+    });
+  }
+
+  const bottomItems: NavItemData[] = [
+    { id: "account", title: "Minha conta", icon: UserCircle, path: "/account" },
+    { id: "settings", title: "Configurações", icon: SettingsIcon, path: "/settings" },
+    { id: "logout", title: "Sair", icon: LogOut },
+  ];
+
+  const allItems = [...groups.flatMap((g) => g.items), ...bottomItems];
+  const activeId =
+    allItems
+      .filter((i) => i.path)
+      .sort((a, b) => (b.path as string).length - (a.path as string).length)
+      .find((i) => i.path === "/" ? location.pathname === "/" : location.pathname.startsWith(i.path as string))
+      ?.id ?? "dashboard";
+
+  function handleSelect(item: NavItemData) {
+    if (item.id === "logout") {
+      logout();
+      return;
+    }
+    if (item.path) navigate(item.path);
+  }
+
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <h1>CRM TopConta</h1>
-        <nav>
-          <NavLink to="/">Dashboard</NavLink>
-          <NavLink to="/clients">Base de clientes</NavLink>
-          <NavLink to="/segments">Segmentos</NavLink>
-          <NavLink to="/campaigns">Campanhas</NavLink>
-          <NavLink to="/templates">Templates</NavLink>
-          <NavLink to="/automations">Automações</NavLink>
-          <NavLink to="/imports">Importações</NavLink>
-          <NavLink to="/integrations">Integrações</NavLink>
-          <NavLink to="/audit">Auditoria</NavLink>
-          {user?.role === "ADMIN" && <NavLink to="/users">Usuários</NavLink>}
-          <NavLink to="/settings">Configurações</NavLink>
-          <NavLink to="/account">Minha conta</NavLink>
-        </nav>
-      </aside>
+      <div className="dsb-sidebar-wrap">
+        <SidebarNav
+          groups={groups}
+          bottomItems={bottomItems}
+          activeId={activeId}
+          onSelect={handleSelect}
+          brandTitle="CRM TopConta"
+          brandSubtitle={user?.name}
+        />
+      </div>
       <div className="main">
         <div className="topbar">
           <div />
