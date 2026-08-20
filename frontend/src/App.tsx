@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -17,7 +18,6 @@ import {
 } from "lucide-react";
 import { useAuth } from "./context/AuthContext";
 import Login from "./pages/Login";
-import Dashboard from "./pages/Dashboard";
 import Clients from "./pages/Clients";
 import ClientProfile from "./pages/ClientProfile";
 import Segments from "./pages/Segments";
@@ -34,6 +34,10 @@ import Account from "./pages/Account";
 import Users from "./pages/Users";
 import NotificationBell from "./components/NotificationBell";
 import { SidebarNav, type NavGroupData, type NavItemData } from "./components/ui/dashboard-sidebar";
+
+// Carregado sob demanda: é a única tela que usa a lib de gráficos (recharts), que sozinha
+// pesa mais que o resto do bundle inteiro — não faz sentido baixá-la em toda página do app.
+const Dashboard = lazy(() => import("./pages/Dashboard"));
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   const { user } = useAuth();
@@ -152,7 +156,14 @@ export default function App() {
           <RequireAuth>
             <Layout>
               <Routes>
-                <Route path="/" element={<Dashboard />} />
+                <Route
+                  path="/"
+                  element={
+                    <Suspense fallback={<div>Carregando...</div>}>
+                      <Dashboard />
+                    </Suspense>
+                  }
+                />
                 <Route path="/clients" element={<Clients />} />
                 <Route path="/clients/:id" element={<ClientProfile />} />
                 <Route path="/segments" element={<Segments />} />

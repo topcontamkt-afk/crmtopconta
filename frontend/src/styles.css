@@ -360,6 +360,62 @@ a { color: var(--primary); }
   letter-spacing: 0.04em;
 }
 
+/* ---- Dashboard: gráficos (Recharts) ---- */
+
+@keyframes kpiFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.kpi-animate {
+  animation: kpiFadeIn 0.45s ease both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kpi-animate {
+    animation: none;
+  }
+}
+
+.chart-card h3 {
+  margin-top: 0;
+  margin-bottom: 4px;
+}
+
+.chart-tooltip {
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+
+.chart-tooltip-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 2px;
+}
+
+.chart-tooltip-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.chart-tooltip-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

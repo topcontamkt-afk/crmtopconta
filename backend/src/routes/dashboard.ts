@@ -69,6 +69,55 @@ router.get("/summary", async (req, res) => {
   });
 });
 
+/**
+ * GET /api/dashboard/uso-mensal — taxa de uso do limite pela base de clientes, mês a mês.
+ *
+ * Definição: para cada cliente, `dataUltimaUtilizacao` guarda apenas a data da última
+ * utilização (a planilha de origem não traz histórico completo de uso, só o snapshot mais
+ * recente — ver importService.ts). Por isso a "taxa de uso do mês" aqui é: dos clientes da
+ * base hoje, quantos % tiveram sua ÚLTIMA utilização registrada dentro daquele mês. É uma boa
+ * aproximação de atividade mensal (mês corrente = "usou este mês"), mas não captura clientes
+ * que usaram mais de uma vez no período — para isso seria necessário um histórico de
+ * transações (Movement), que hoje só é populado para renovação de limite.
+ */
+router.get("/uso-mensal", async (req, res) => {
+  const { tenantId } = req.user!;
+
+  const [totalClientes, porMesRaw] = await Promise.all([
+    prisma.client.count({ where: { tenantId } }),
+    prisma.$queryRawUnsafe<Array<{ mes: Date; usados: bigint }>>(
+      `SELECT date_trunc('month', "dataUltimaUtilizacao") AS mes, COUNT(*)::bigint AS usados
+       FROM "Client"
+       WHERE "tenantId" = $1
+         AND "dataUltimaUtilizacao" IS NOT NULL
+         AND "dataUltimaUtilizacao" >= date_trunc('month', now()) - interval '11 months'
+       GROUP BY mes ORDER BY mes ASC`,
+      tenantId
+    ),
+  ]);
+
+  const usadosPorMes = new Map<string, number>();
+  for (const row of porMesRaw) {
+    usadosPorMes.set(row.mes.toISOString().slice(0, 7), Number(row.usados));
+  }
+
+  const meses: Array<{ mes: string; label: string; usados: number; percent: number }> = [];
+  const now = new Date();
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    const key = d.toISOString().slice(0, 7);
+    const usados = usadosPorMes.get(key) || 0;
+    meses.push({
+      mes: key,
+      label: d.toLocaleDateString("pt-BR", { month: "short", year: "2-digit", timeZone: "UTC" }),
+      usados,
+      percent: totalClientes ? Number(((usados / totalClientes) * 100).toFixed(1)) : 0,
+    });
+  }
+
+  res.json({ totalClientes, taxaMesAtual: meses[meses.length - 1]?.percent ?? 0, meses });
+});
+
 /** GET /api/dashboard/evolucao — série temporal simples de novos clientes por semana/mês */
 router.get("/evolucao", async (req, res) => {
   const { tenantId } = req.user!;
