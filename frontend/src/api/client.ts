@@ -1,4 +1,5 @@
 const TOKEN_KEY = "crmtopconta_token";
+const USER_KEY = "crmtopconta_user";
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -15,6 +16,17 @@ export class ApiError extends Error {
   }
 }
 
+// Token expirado (12h) ou inválido: a sessão local não serve mais para nada. Em vez de deixar a
+// tela presa mostrando o erro cru "Token inválido ou expirado", limpa a sessão e manda direto
+// para o login — o usuário só precisa entrar de novo.
+function handleExpiredSession() {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+  if (window.location.pathname !== "/login") {
+    window.location.assign("/login");
+  }
+}
+
 export async function api<T = unknown>(
   path: string,
   options: { method?: string; body?: unknown } = {}
@@ -28,6 +40,13 @@ export async function api<T = unknown>(
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
+
+  if (resp.status === 401 && token) {
+    handleExpiredSession();
+    // A navegação para /login já foi disparada; rejeita para interromper o fluxo atual sem
+    // deixar a página tentar renderizar dados de uma resposta de erro.
+    throw new ApiError(401, "Sessão expirada");
+  }
 
   if (resp.status === 204) return undefined as T;
 
@@ -48,6 +67,10 @@ export async function downloadFile(path: string, filename: string): Promise<void
   const resp = await fetch(`/api${path}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
+  if (resp.status === 401 && token) {
+    handleExpiredSession();
+    throw new ApiError(401, "Sessão expirada");
+  }
   if (!resp.ok) {
     const json = await resp.json().catch(() => ({}));
     throw new ApiError(resp.status, json.error ? JSON.stringify(json.error) : "Erro ao exportar arquivo");
