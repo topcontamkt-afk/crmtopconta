@@ -7,6 +7,7 @@ import { buildSegmentWhere } from "./segments";
 import { evaluateAutomationRules } from "./automationEngine";
 import { processQueueBatch } from "./campaignQueue";
 import { runRetentionSweep } from "./retention";
+import { exportAllTenantsSummary } from "./biExport";
 
 /**
  * Cada função abaixo é o "corpo" de um job periódico, desacoplada de *como* ela é disparada:
@@ -98,6 +99,11 @@ export async function runRetentionJob() {
   return runRetentionSweep(prisma);
 }
 
+/** Conector BI leve (Fase 3) — escreve o resumo diário na planilha de cada tenant conectado. */
+export async function runBiExportJob() {
+  return exportAllTenantsSummary(prisma);
+}
+
 function cronMatchesNow(expr: string, date: Date): boolean {
   // Comparação simples campo a campo (minuto hora dia-mês mês dia-semana) — sem libs extras.
   const [min, hour, dom, month, dow] = expr.split(" ");
@@ -122,4 +128,5 @@ export function startScheduler() {
   cron.schedule("*/5 * * * *", () => runAutomationJob().catch((e) => console.error("[scheduler] automations:", e)));
   cron.schedule("* * * * *", () => runCampaignDispatchJob().catch((e) => console.error("[scheduler] dispatch:", e)));
   cron.schedule("0 3 * * *", () => runRetentionJob().catch((e) => console.error("[scheduler] retention:", e)));
+  cron.schedule("0 4 * * *", () => runBiExportJob().catch((e) => console.error("[scheduler] bi-export:", e)));
 }

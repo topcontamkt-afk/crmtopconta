@@ -11,6 +11,7 @@ import {
   processQueueBatch,
   sendTestMessages,
 } from "../services/campaignQueue";
+import { computeABSignificance } from "../services/statistics";
 
 const router = Router();
 router.use(requireAuth);
@@ -190,6 +191,7 @@ router.get("/:id/report", async (req, res) => {
   const valorGerado = Number(valueAgg._sum.convertedValue || 0);
 
   let variantBreakdown = null;
+  let abSignificance = null;
   if (porVariante) {
     const conversoesPorVariante = await prisma.messageEvent.groupBy({
       by: ["variant"],
@@ -200,6 +202,20 @@ router.get("/:id/report", async (req, res) => {
       const conv = conversoesPorVariante.find((c) => c.variant === v.variant)?._count || 0;
       return { variant: v.variant, enviados: v._count, conversoes: conv, taxaConversao: v._count ? ((conv / v._count) * 100).toFixed(2) : "0.00" };
     });
+
+    // Significância estatística (Fase 3 — recorte leve): só calculável com as duas variantes.
+    const a = porVariante.find((v) => v.variant === "A");
+    const b = porVariante.find((v) => v.variant === "B");
+    if (a && b) {
+      const convA = conversoesPorVariante.find((c) => c.variant === "A")?._count || 0;
+      const convB = conversoesPorVariante.find((c) => c.variant === "B")?._count || 0;
+      const result = computeABSignificance(a._count, convA, b._count, convB);
+      abSignificance = {
+        ...result,
+        pValue: result.pValue !== null ? Number(result.pValue.toFixed(4)) : null,
+        zScore: result.zScore !== null ? Number(result.zScore.toFixed(3)) : null,
+      };
+    }
   }
 
   res.json({
@@ -214,6 +230,7 @@ router.get("/:id/report", async (req, res) => {
     roi: custoTotal > 0 ? (((valorGerado - custoTotal) / custoTotal) * 100).toFixed(2) : null,
     janelaAtribuicaoDias: campaign.attributionDays,
     variantBreakdown,
+    abSignificance,
   });
 });
 

@@ -55,6 +55,16 @@ export default function Integrations() {
     }
   }
 
+  async function exportBiNow() {
+    setStatus("Exportando resumo...");
+    try {
+      const resp = await api<{ exported: boolean; reason?: string }>("/integrations/sheets/export-now", { method: "POST" });
+      setStatus(resp.exported ? "Resumo exportado para a aba \"CRM_Export\" da planilha." : `Não foi possível exportar: ${resp.reason}`);
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Erro ao exportar resumo");
+    }
+  }
+
   return (
     <div>
       <h2>Integrações</h2>
@@ -74,8 +84,14 @@ export default function Integrations() {
           <input value={cronSchedule} onChange={(e) => setCronSchedule(e.target.value)} />
         </div>
         <button className="btn" type="submit">Salvar conexão</button>{" "}
-        <button className="btn secondary" type="button" onClick={syncNow}>Sincronizar agora</button>
+        <button className="btn secondary" type="button" onClick={syncNow}>Sincronizar agora</button>{" "}
+        <button className="btn secondary" type="button" onClick={exportBiNow}>Exportar resumo (BI)</button>
         {status && <p style={{ marginTop: 10 }}>{status}</p>}
+        <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
+          "Exportar resumo (BI)" escreve os KPIs do dashboard + últimas campanhas numa aba
+          "CRM_Export" dessa mesma planilha — roda automaticamente 1x/dia, e dá pra conectar
+          Google Data Studio/Looker Studio direto nela como fonte de dados.
+        </p>
       </form>
 
       <div className="card">

@@ -23,7 +23,9 @@ function getAuth() {
   const credentials = JSON.parse(raw);
   return new google.auth.GoogleAuth({
     credentials,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+    // Escopo de leitura+escrita: além de importar a base (Fase 1), a Service Account também
+    // escreve o export/resumo agendado de volta na planilha (Fase 3 — conector BI leve).
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
 }
 
@@ -63,6 +65,41 @@ export async function fetchSheetRows(
       if (field) (row as any)[field] = cell;
     });
     return row;
+  });
+}
+
+/**
+ * Conector BI leve (Fase 3): escreve um resumo tabular numa aba dedicada da mesma planilha
+ * usada para importação, substituindo o conteúdo anterior a cada execução (snapshot do dia).
+ * Serve como alternativa simples a conectores de BI mais pesados (BigQuery/Data Studio), sem
+ * exigir infraestrutura nova — reaproveita a Service Account já configurada.
+ */
+export async function writeSheetSummary(
+  sheetId: string,
+  tabName: string,
+  rows: (string | number)[][]
+): Promise<void> {
+  const auth = getAuth();
+  const sheets = google.sheets({ version: "v4", auth });
+
+  // Garante que a aba de export existe antes de escrever nela.
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: sheetId });
+  const exists = meta.data.sheets?.some((s) => s.properties?.title === tabName);
+  if (!exists) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: sheetId,
+      requestBody: { requests: [{ addSheet: { properties: { title: tabName } } }] },
+    });
+  }
+
+  // Limpa o conteúdo anterior e escreve o snapshot atual — mantém a aba sempre com o resumo
+  // mais recente, sem acumular histórico infinito de linhas.
+  await sheets.spreadsheets.values.clear({ spreadsheetId: sheetId, range: tabName });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: sheetId,
+    range: `${tabName}!A1`,
+    valueInputOption: "RAW",
+    requestBody: { values: rows },
   });
 }
 

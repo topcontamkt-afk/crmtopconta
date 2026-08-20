@@ -2,6 +2,7 @@ import { Router } from "express";
 import { requireCronSecret } from "../middleware/cronAuth";
 import {
   runAutomationJob,
+  runBiExportJob,
   runCampaignDispatchJob,
   runRetentionJob,
   runSegmentRefreshJob,
@@ -38,6 +39,10 @@ router.all("/dispatch", async (_req, res) => {
 
 router.all("/retention", async (_req, res) => {
   res.json(await runRetentionJob());
+});
+
+router.all("/bi-export", async (_req, res) => {
+  res.json(await runBiExportJob());
 });
 
 export default router;

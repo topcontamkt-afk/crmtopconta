@@ -14,6 +14,14 @@ interface Report {
   roi: string | null;
   janelaAtribuicaoDias: number;
   variantBreakdown: { variant: string; enviados: number; conversoes: number; taxaConversao: string }[] | null;
+  abSignificance: {
+    conversionRateA: number;
+    conversionRateB: number;
+    pValue: number | null;
+    zScore: number | null;
+    significant95: boolean;
+    insufficientData: boolean;
+  } | null;
 }
 
 export default function CampaignReport() {
@@ -26,6 +34,17 @@ export default function CampaignReport() {
     if (id) api<Report>(`/campaigns/${id}/report`).then(setReport);
   }
   useEffect(load, [id]);
+
+  // Near-real-time (Fase 3 — recorte leve): sem WebSocket, mas a página se atualiza sozinha a
+  // cada 20s enquanto a campanha ainda tem envios em andamento (evita ficar apertando F5).
+  useEffect(() => {
+    if (!id) return;
+    const stillRunning = report ? report.porStatus.some((s) => s.status === "FILA") : true;
+    if (!stillRunning) return;
+    const interval = setInterval(load, 20000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, report?.porStatus]);
 
   async function sendTest() {
     if (!id) return;
@@ -105,6 +124,24 @@ export default function CampaignReport() {
                 ))}
               </tbody>
             </table>
+            {report.abSignificance && (
+              <div style={{ marginTop: 10, fontSize: 13 }}>
+                {report.abSignificance.insufficientData ? (
+                  <span style={{ color: "var(--text-muted)" }}>
+                    Amostra ainda pequena (mín. 30 envios por variante) para uma conclusão estatística confiável.
+                  </span>
+                ) : (
+                  <>
+                    <span className={`badge ${report.abSignificance.significant95 ? "ok" : ""}`}>
+                      {report.abSignificance.significant95 ? "Diferença estatisticamente significativa" : "Sem diferença significativa"}
+                    </span>{" "}
+                    <span style={{ color: "var(--text-muted)" }}>
+                      (p-valor {report.abSignificance.pValue}, 95% de confiança)
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -5,6 +5,7 @@ import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { encryptSecret } from "../services/crypto";
+import { exportTenantSummaryToSheet } from "../services/biExport";
 
 const router = Router();
 
@@ -36,6 +37,19 @@ router.put("/sheets", requireRole("ADMIN"), async (req, res) => {
 
   await logAudit({ tenantId, userId, action: "CONFIGURE_SHEETS_CONNECTION", target: "SheetConnection", targetId: conn.id });
   res.json(conn);
+});
+
+/**
+ * POST /api/integrations/sheets/export-now — conector BI leve (Fase 3): dispara sob demanda o
+ * mesmo export que roda 1x/dia via Vercel Cron Job, escrevendo o resumo na aba "CRM_Export".
+ */
+router.post("/sheets/export-now", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
+  const { tenantId, id: userId } = req.user!;
+  const result = await exportTenantSummaryToSheet(prisma, tenantId);
+  if (result.exported) {
+    await logAudit({ tenantId, userId, action: "BI_EXPORT", target: "SheetConnection" });
+  }
+  res.json(result);
 });
 
 /** ---- Configuração de canais (WhatsApp/SMS) ---- */

@@ -24,7 +24,14 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    api<Summary>("/dashboard/summary").then(setSummary).catch((e) => setError(e.message));
+    function load() {
+      api<Summary>("/dashboard/summary").then(setSummary).catch((e) => setError(e.message));
+    }
+    load();
+    // Near-real-time (Fase 3 — recorte leve): sem WebSocket/streaming, mas o dashboard se
+    // atualiza sozinho a cada 30s para refletir importações/campanhas em andamento.
+    const interval = setInterval(load, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   if (error) return <div className="error-text">{error}</div>;

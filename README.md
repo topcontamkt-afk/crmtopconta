@@ -218,16 +218,45 @@ Implementado, mapeando os itens **Should have** do PRD:
   right-to-be-forgotten da LGPD para clientes sem atividade além da política
   do tenant (`Tenant.retentionDays`).
 
-### Não incluído nesta entrega (roadmap explícito no PRD — Fase 3)
+## Escopo da Fase 3 (recorte leve, compatível com a infra atual)
 
-Motor de recomendações (ML) para segmentos e horário de envio, A/B testing
-completo com análise estatística, conversational inbox, conectores de BI
+A Fase 3 do PRD (Inteligência e Escala) foi desenhada para 6-9 meses e
+pressupõe infraestrutura incompatível com o deploy atual (Vercel serverless +
+Supabase): Kubernetes, RabbitMQ, Elastic Stack, HSM, "milhões de mensagens/mês".
+Em vez de trocar de arquitetura, foi implementado um recorte que entrega valor
+real da Fase 3 sem sair do que já está no ar:
+
+- **A/B testing com significância estatística**: `src/services/statistics.ts`
+  implementa um teste de duas proporções (two-proportion z-test, sem
+  dependências externas — função erro aproximada por Abramowitz & Stegun) que
+  calcula p-valor e decide significância a 95% entre as variantes A/B de uma
+  campanha, com testes unitários. Exibido no relatório da campanha; amostras
+  abaixo de 30 envios por variante são sinalizadas como "dado insuficiente"
+  em vez de uma conclusão precipitada.
+- **Conector BI leve (Google Sheets em vez de BigQuery/Data Studio)**:
+  `src/services/biExport.ts` escreve diariamente (cron) — ou sob demanda,
+  botão "Exportar resumo (BI)" em Integrações — um snapshot dos KPIs do
+  dashboard e das últimas campanhas na aba `CRM_Export` da mesma planilha
+  usada para importação. Serve como fonte de dados para Google Data
+  Studio/Looker Studio sem precisar provisionar BigQuery.
+- **Atualizações quase em tempo real via polling**: sem WebSocket/streaming,
+  o Dashboard e o relatório de campanha (enquanto ainda há envios em fila) se
+  atualizam sozinhos a cada 20-30s.
+
+### Não incluído (roadmap explícito no PRD — Fase 3 completa)
+
+Motor de recomendações (ML) para segmentos e horário de envio, A/B testing com
+análise estatística mais sofisticada (ex.: testes sequenciais, correção para
+múltiplas comparações), conversational inbox, conectores de BI nativos
 (BigQuery/Data Studio), API pública, multi-tenant avançado com SLAs, filas
 reais (RabbitMQ/Redis/Kafka) em substituição à fila modelada em Postgres,
-observabilidade (Prometheus/ELK/Jaeger), testes de carga e chaos engineering,
-KMS/HSM real (hoje simulado por uma chave de aplicação). O código já isola
-essas peças atrás de interfaces (`ChannelAdapter`, fila em
-`campaignQueue.ts`, `crypto.ts`) para facilitar a evolução sem reescrita.
+eventos em tempo real via WebSocket (hoje via polling), observabilidade
+(Prometheus/ELK/Jaeger), testes de carga e chaos engineering, KMS/HSM real
+(hoje simulado por uma chave de aplicação). Migrar para esses itens
+implicaria trocar a hospedagem serverless atual por uma com processos de
+longa duração (Railway/Render/Kubernetes). O código já isola as peças mais
+prováveis de evoluir atrás de interfaces (`ChannelAdapter`, fila em
+`campaignQueue.ts`, `crypto.ts`) para facilitar essa migração sem reescrita.
 
 ## Decisões técnicas relevantes
 
