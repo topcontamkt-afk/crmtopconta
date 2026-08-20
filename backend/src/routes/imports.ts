@@ -4,6 +4,7 @@ import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { runImport, RawSheetRow } from "../services/importService";
+import { runCardAccountImport, CardAccountRow } from "../services/cardAccountImport";
 import { DEFAULT_COLUMN_MAPPING, fetchSheetRows } from "../services/googleSheets";
 import { notify } from "../services/notifications";
 
@@ -156,6 +157,31 @@ router.post("/csv", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
     "csv"
   );
   await logAudit({ tenantId, userId, action: "IMPORT_CSV", target: "ImportJob", targetId: importJobId, details: result });
+  res.json({ importJobId, ...result });
+});
+
+/**
+ * POST /api/imports/cartoes — upload direto de arquivo (CSV) no formato real de "Cartões e
+ * contas" (cadastro/ativação de cartão vinculado a convênio). O mapeamento cabeçalho da
+ * planilha -> campo canônico é feito no frontend (tela de upload); aqui as linhas já chegam
+ * no formato de CardAccountRow. Ver services/cardAccountImport.ts.
+ */
+const cardAccountSchema = z.object({
+  rows: z.array(z.record(z.any())).min(1),
+});
+
+router.post("/cartoes", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const parsed = cardAccountSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { tenantId, id: userId } = req.user!;
+
+  const { importJobId, result } = await runCardAccountImport(
+    prisma,
+    tenantId,
+    parsed.data.rows as CardAccountRow[],
+    userId
+  );
+  await logAudit({ tenantId, userId, action: "IMPORT_CARTOES_CONTAS", target: "ImportJob", targetId: importJobId, details: result });
   res.json({ importJobId, ...result });
 });
 

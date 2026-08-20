@@ -1,4 +1,14 @@
-import { hashCPF, isValidCPF, maskCPF, maskPhone, normalizePhone } from "./masking";
+import {
+  detectDocumentType,
+  hashCPF,
+  isValidCNPJ,
+  isValidCPF,
+  isValidDocument,
+  maskCPF,
+  maskDocument,
+  maskPhone,
+  normalizePhone,
+} from "./masking";
 
 describe("isValidCPF", () => {
   it("aceita CPFs válidos", () => {
@@ -28,6 +38,39 @@ describe("hashCPF", () => {
     expect(h1).toBe(h2);
     expect(h1).not.toBe(h3);
     expect(h1).not.toContain("52998224725");
+  });
+});
+
+describe("isValidCNPJ", () => {
+  it("aceita CNPJs válidos", () => {
+    expect(isValidCNPJ("11.222.333/0001-81")).toBe(true);
+  });
+
+  it("rejeita CNPJs com dígito verificador inválido", () => {
+    expect(isValidCNPJ("11.222.333/0001-80")).toBe(false);
+  });
+
+  it("rejeita CNPJs com todos os dígitos iguais", () => {
+    expect(isValidCNPJ("11.111.111/1111-11")).toBe(false);
+  });
+});
+
+describe("detectDocumentType / isValidDocument / maskDocument", () => {
+  it("detecta CPF (11 dígitos) e CNPJ (14 dígitos)", () => {
+    expect(detectDocumentType("529.982.247-25")).toBe("CPF");
+    expect(detectDocumentType("11.222.333/0001-81")).toBe("CNPJ");
+    expect(detectDocumentType("123")).toBeNull();
+  });
+
+  it("isValidDocument aceita CPF ou CNPJ válidos e rejeita o resto", () => {
+    expect(isValidDocument("529.982.247-25")).toBe(true);
+    expect(isValidDocument("11.222.333/0001-81")).toBe(true);
+    expect(isValidDocument("11.222.333/0001-80")).toBe(false);
+    expect(isValidDocument("123")).toBe(false);
+  });
+
+  it("maskDocument mascara CNPJ mantendo só alguns dígitos visíveis", () => {
+    expect(maskDocument("11222333000181")).toBe("**.***.333/****-81");
   });
 });
 

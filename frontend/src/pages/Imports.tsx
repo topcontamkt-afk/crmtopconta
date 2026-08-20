@@ -1,7 +1,14 @@
 import { ChangeEvent, Fragment, useEffect, useState } from "react";
 import { api } from "../api/client";
 import { parseCsv } from "../utils/csv";
-import { autoMapColumns, IMPORT_FIELDS } from "../utils/importFields";
+import { autoMapColumns, CARD_ACCOUNT_FIELDS, IMPORT_FIELDS, ImportFieldDef } from "../utils/importFields";
+
+type UploadFormat = "cartoes" | "generico";
+
+const FORMAT_CONFIG: Record<UploadFormat, { label: string; fields: ImportFieldDef[]; endpoint: string }> = {
+  cartoes: { label: "Cartões e contas (cadastro/ativação de cartão)", fields: CARD_ACCOUNT_FIELDS, endpoint: "/imports/cartoes" },
+  generico: { label: "Genérico (id_cliente, status_conta, autorização LGPD...)", fields: IMPORT_FIELDS, endpoint: "/imports/csv" },
+};
 
 interface Quality {
   totalClientes: number;
@@ -28,6 +35,7 @@ export default function Imports() {
   const [jobs, setJobs] = useState<ImportJob[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
 
+  const [format, setFormat] = useState<UploadFormat>("cartoes");
   const [fileName, setFileName] = useState<string | null>(null);
   const [headers, setHeaders] = useState<string[]>([]);
   const [dataRows, setDataRows] = useState<string[][]>([]);
@@ -36,11 +44,18 @@ export default function Imports() {
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
+  const activeFields = FORMAT_CONFIG[format].fields;
+
   function load() {
     api<Quality>("/imports/quality").then(setQuality);
     api<ImportJob[]>("/imports").then(setJobs);
   }
   useEffect(load, []);
+
+  function changeFormat(next: UploadFormat) {
+    setFormat(next);
+    resetUpload();
+  }
 
   async function handleFile(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -58,7 +73,7 @@ export default function Imports() {
       setFileName(file.name);
       setHeaders(header);
       setDataRows(body);
-      setMapping(autoMapColumns(header));
+      setMapping(autoMapColumns(header, activeFields));
     } catch {
       setUploadError("Não consegui ler esse arquivo. Confirme que é um .csv válido.");
     } finally {
@@ -75,7 +90,7 @@ export default function Imports() {
     setUploadError(null);
   }
 
-  const requiredMissing = IMPORT_FIELDS.filter((f) => f.required && mapping[f.key] === undefined);
+  const requiredMissing = activeFields.filter((f) => f.required && mapping[f.key] === undefined);
 
   async function handleImport() {
     setImporting(true);
@@ -84,18 +99,18 @@ export default function Imports() {
     try {
       const rows = dataRows.map((row) => {
         const obj: Record<string, string> = {};
-        for (const field of IMPORT_FIELDS) {
+        for (const field of activeFields) {
           const idx = mapping[field.key];
           if (idx !== undefined) obj[field.key] = (row[idx] ?? "").trim();
         }
         return obj;
       });
-      const resp = await api<{ addedCount: number; updatedCount: number; errorCount: number }>("/imports/csv", {
-        method: "POST",
-        body: { rows },
-      });
+      const resp = await api<{ addedCount: number; updatedCount: number; errorCount: number }>(
+        FORMAT_CONFIG[format].endpoint,
+        { method: "POST", body: { rows } }
+      );
       setUploadStatus(
-        `Importado: ${resp.addedCount} novos, ${resp.updatedCount} atualizados, ${resp.errorCount} com erro.` +
+        `Importado: ${resp.addedCount} novos, ${resp.updatedCount} atualizados, ${resp.errorCount} com erro/aviso.` +
           (resp.errorCount > 0 ? " Veja o detalhe no histórico abaixo." : "")
       );
       resetUpload();
@@ -119,6 +134,14 @@ export default function Imports() {
           opcional. Se preferir manter a planilha sempre no Google Sheets com sincronização
           automática, use a tela <strong>Integrações</strong> em vez deste upload.
         </p>
+        <div className="form-row">
+          <label>Formato da planilha</label>
+          <select value={format} onChange={(e) => changeFormat(e.target.value as UploadFormat)}>
+            {(Object.keys(FORMAT_CONFIG) as UploadFormat[]).map((key) => (
+              <option key={key} value={key}>{FORMAT_CONFIG[key].label}</option>
+            ))}
+          </select>
+        </div>
         <input type="file" accept=".csv,text/csv" onChange={handleFile} />
         {uploadError && <p className="error-text" style={{ marginTop: 8 }}>{uploadError}</p>}
         {uploadStatus && <p style={{ marginTop: 8 }}>{uploadStatus}</p>}
@@ -134,7 +157,7 @@ export default function Imports() {
                 <tr><th>Campo do sistema</th><th>Coluna da planilha</th></tr>
               </thead>
               <tbody>
-                {IMPORT_FIELDS.map((field) => (
+                {activeFields.map((field) => (
                   <tr key={field.key}>
                     <td>{field.label}{field.required && " *"}</td>
                     <td>

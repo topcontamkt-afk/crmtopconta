@@ -149,8 +149,13 @@ model Client {
   externalId             String? // id_cliente da planilha de origem
   nome                   String
   telefone               String // normalizado E.164
-  cpfHash                String // hash com salt do tenant — usado para dedupe
-  cpfMasked              String // ***.XXX.XXX-**
+  email                  String?
+  // cpfHash/cpfMasked guardam CPF (pessoa física) OU CNPJ (pessoa jurídica) — a coluna de
+  // origem real ("CpfCnpjCliente") traz os dois; documentoTipo diferencia qual é qual.
+  // Ver services/masking.ts (isValidDocument/hashDocument/maskDocument).
+  cpfHash                String
+  cpfMasked              String
+  documentoTipo          String? // "CPF" | "CNPJ"
   cidade                 String?
 
   dataCadastro           DateTime?
@@ -168,6 +173,20 @@ model Client {
   origemCliente          String?
   autorizacaoComunicacao Boolean      @default(false)
   optOutAt               DateTime?
+
+  // Cartão/conta vinculado a convênio (folha de pagamento): nome e cidade da empresa
+  // conveniada, e vínculo empregatício do titular — usados para segmentar campanhas por
+  // convênio (ex.: "só servidores efetivos da Prefeitura de Lagarto").
+  empresaConveniada       String?
+  cidadeEmpresaConveniada String?
+  vinculoEmpregaticio     String?
+  statusValidacaoCadastro String? // eixo de validação de cadastro, separado do statusConta (ex.: "APROVADO")
+
+  // Encerramento de conta — distinto de statusConta=BLOQUEADO (que é uma trava ativa); conta
+  // encerrada é tratada como INATIVA na importação, mas mantém o motivo para consulta.
+  encerradoEm             DateTime?
+  motivoEncerramento      String?
+  obsEncerramento         String?
 
   tags                   String[]     @default([])
 
