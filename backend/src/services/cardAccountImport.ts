@@ -1,7 +1,6 @@
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { computeUsage } from "./usage";
 import { hashDocument, isValidDocument, maskDocument, detectDocumentType, normalizePhone } from "./masking";
-import { findExistingClient, IncomingClientRow } from "./dedupe";
 import { notify } from "./notifications";
 import { ImportRunResult } from "./importService";
 
@@ -20,6 +19,15 @@ import { ImportRunResult } from "./importService";
  *    se já houve uso do saldo —, mas traz saldo utilizado direto (sem precisar calcular),
  *    razão social, lotação, dados de RH (salário, nascimento, sexo) e dois flags de bloqueio
  *    (CartaoBloqueado/ContaBloqueada, tratados como equivalentes por decisão do cliente).
+ *
+ * Desempenho (2026-08-20): a versão original fazia 2-3 idas ao banco por linha, uma linha de
+ * cada vez (achar existente, depois criar/atualizar) — uma planilha de milhares de linhas
+ * levava minutos. Esta versão faz 1 consulta em lote pra achar quem já existe (por CPF/CNPJ),
+ * e depois grava várias linhas em paralelo com `upsert` (uma ida ao banco por linha, e a
+ * decisão criar-ou-atualizar fica atômica no Postgres via INSERT ... ON CONFLICT). Isso troca o
+ * fallback de dedupe por telefone (usado no formato genérico, para planilhas sem um identificador
+ * estável) por dedupe só por CPF/CNPJ — aceitável aqui porque, neste formato, o documento É o
+ * identificador estável confirmado com o cliente; o telefone muda com mais frequência.
  */
 export interface CardAccountRow {
   documento?: string; // CPF (11 dígitos) ou CNPJ (14 dígitos) — coluna "CpfCnpjCliente"
@@ -77,6 +85,24 @@ const STATUS_CARTAO_MAP: Record<string, "ATIVO" | "INATIVO"> = {
   NAO_PODE_TER: "INATIVO",
 };
 
+// Concorrência limitada em vez de Promise.all irrestrito: grava várias linhas ao mesmo tempo
+// (rápido), sem abrir mais consultas simultâneas do que o pool de conexões do Prisma suporta
+// (ver connection_limit em config/db.ts) nem sobrecarregar o pooler do Supabase.
+const CONCURRENCY = 8;
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 function parseDate(v?: string): Date | undefined {
   if (!v) return undefined;
   const d = new Date(v);
@@ -109,6 +135,116 @@ function validateRow(row: CardAccountRow, rowNumber: number): RowError | null {
   return null;
 }
 
+interface PreparedRow {
+  rowNumber: number;
+  cpfHash: string;
+  limiteTotal: number;
+  data: Prisma.ClientCreateInput;
+}
+
+/** Fase 1 (sem banco): valida e transforma cada linha crua no formato de gravação. */
+function prepareRow(raw: CardAccountRow, rowNumber: number, tenantCpfSalt: string, jobId: string, tenantId: string, errors: RowError[]): PreparedRow | null {
+  const err = validateRow(raw, rowNumber);
+  if (err) {
+    errors.push(err);
+    return null;
+  }
+
+  const phone = normalizePhone(raw.telefone!);
+  if (!phone) {
+    errors.push({ row: rowNumber, motivo: "Telefone inválido" });
+    return null;
+  }
+
+  const limiteTotal = parseNumber(raw.limite) ?? 0;
+  const saldoDisponivel = parseNumber(raw.saldo_disponivel) ?? 0;
+  // "SaldoCartao" já traz o valor utilizado pronto; formatos sem essa coluna (ex.: "Cartões e
+  // contas") calculam como limite - saldo disponível.
+  const valorUtilizado = parseNumber(raw.valor_utilizado) ?? Math.max(0, limiteTotal - saldoDisponivel);
+
+  const statusCartaoKey = (raw.status_cartao || "").trim().toUpperCase();
+  const statusCartaoRecognized = statusCartaoKey in STATUS_CARTAO_MAP;
+  const statusCadastroKey = (raw.status_cadastro || "").trim().toUpperCase();
+
+  let statusConta: "ATIVO" | "INATIVO" | "BLOQUEADO";
+  let isReprovado = false;
+
+  if (statusCartaoKey && statusCartaoRecognized) {
+    statusConta = STATUS_CARTAO_MAP[statusCartaoKey];
+    isReprovado = statusCartaoKey === "NAO_PODE_TER";
+  } else if (statusCartaoKey) {
+    errors.push({ row: rowNumber, motivo: `Aviso: STATUS "${raw.status_cartao}" desconhecido — importado como Inativo` });
+    statusConta = "INATIVO";
+    isReprovado = true;
+  } else if (statusCadastroKey === "APROVADO") {
+    statusConta = valorUtilizado > 0 ? "ATIVO" : "INATIVO";
+  } else if (statusCadastroKey) {
+    errors.push({ row: rowNumber, motivo: `Aviso: StatusCadastro "${raw.status_cadastro}" desconhecido — importado como Inativo` });
+    statusConta = "INATIVO";
+    isReprovado = true;
+  } else {
+    statusConta = "INATIVO";
+  }
+
+  const encerrado = parseBool(raw.encerrado);
+  const bloqueado = parseBool(raw.bloqueado) || parseBool(raw.cartao_bloqueado) || parseBool(raw.conta_bloqueada);
+  if (encerrado) statusConta = "INATIVO";
+  if (bloqueado) statusConta = "BLOQUEADO"; // trava independente, tem prioridade máxima
+
+  const { percentual, faixa } = computeUsage(limiteTotal, valorUtilizado);
+
+  const documentoTipo = detectDocumentType(raw.documento!);
+  const cpfHash = hashDocument(raw.documento!, tenantCpfSalt);
+  const cpfMasked = maskDocument(raw.documento!);
+
+  const data: Prisma.ClientCreateInput = {
+    tenant: { connect: { id: tenantId } },
+    externalId: raw.id_cartao?.trim() || undefined,
+    nome: raw.nome!.trim(),
+    telefone: phone,
+    cpfHash,
+    cpfMasked,
+    documentoTipo,
+    email: raw.email?.trim() || undefined,
+    cidade: raw.cidade?.trim(),
+    dataCadastro: parseDate(raw.data_cadastro),
+    dataAberturaConta: parseDate(raw.data_ativacao),
+    limiteTotal,
+    valorUtilizado,
+    saldoDisponivel,
+    valorAntecipado: 0,
+    dataUltimaUtilizacao: statusConta === "ATIVO" ? parseDate(raw.data_ativacao) : undefined,
+    percentualUtilizado: percentual,
+    faixaUso: faixa,
+    statusConta,
+    origemCliente: isReprovado ? "comercio" : undefined,
+    empresaConveniada: raw.empresa_conveniada?.trim() || undefined,
+    cidadeEmpresaConveniada: raw.cidade_empresa_conveniada?.trim() || undefined,
+    vinculoEmpregaticio: raw.vinculo_empregaticio?.trim() || undefined,
+    statusValidacaoCadastro: raw.status_cadastro?.trim() || undefined,
+    encerradoEm: encerrado ? new Date() : undefined,
+    motivoEncerramento: raw.motivo_encerramento?.trim() || undefined,
+    obsEncerramento: raw.obs_encerramento?.trim() || undefined,
+    razaoSocial: raw.razao_social?.trim() || undefined,
+    lotacao: raw.lotacao?.trim() || undefined,
+    dataValidadeCartao: parseDate(raw.data_validade_cartao),
+    dataNascimento: parseDate(raw.data_nascimento),
+    sexo: raw.sexo?.trim() || undefined,
+    remuneracaoBruta: parseNumber(raw.remuneracao_bruta),
+    remuneracaoLiquida: parseNumber(raw.remuneracao_liquida),
+    bonus: parseNumber(raw.bonus),
+    saldoLiquidoSaque: parseNumber(raw.saldo_liquido_saque),
+    // Base legal: aceite no contrato/abertura de conta (confirmado com o cliente) — todo
+    // cadastro aprovado é considerado autorizado por padrão; reprovados nunca tiveram contrato
+    // aceito, então ficam sem autorização. Sobrescrito por optOutAt sticky mais abaixo, se
+    // a linha já existir e tiver optado por sair.
+    autorizacaoComunicacao: !isReprovado,
+    lastImportJobId: jobId,
+  };
+
+  return { rowNumber, cpfHash, limiteTotal, data };
+}
+
 /**
  * Importa o lote já mapeado para o vocabulário canônico (ver CardAccountRow). Aplica: validação
  * de CPF/CNPJ, normalização de telefone, determinação de status/autorização a partir do sinal
@@ -129,158 +265,62 @@ export async function runCardAccountImport(
   });
 
   const errors: RowError[] = [];
+
+  // Fase 1: validação/transformação em memória, sem banco.
+  const prepared: PreparedRow[] = [];
+  rows.forEach((raw, i) => {
+    const p = prepareRow(raw, i + 2, tenant.cpfSalt, job.id, tenantId, errors);
+    if (p) prepared.push(p);
+  });
+
+  // Fase 2: uma única consulta pra descobrir quem já existe no lote inteiro (em vez de uma
+  // consulta por linha) — dá pra saber criado-vs-atualizado e aplicar o opt-out sticky e o
+  // registro de renovação de limite sem precisar reconsultar linha a linha.
+  const existingByCpfHash = new Map<string, { id: string; limiteTotal: Prisma.Decimal; optOutAt: Date | null }>();
+  if (prepared.length > 0) {
+    const existing = await prisma.client.findMany({
+      where: { tenantId, cpfHash: { in: prepared.map((p) => p.cpfHash) } },
+      select: { id: true, cpfHash: true, limiteTotal: true, optOutAt: true },
+    });
+    for (const c of existing) existingByCpfHash.set(c.cpfHash, c);
+  }
+
+  // Fase 3: grava em paralelo (upsert — INSERT ... ON CONFLICT no Postgres, atômico mesmo com
+  // documentos duplicados dentro do mesmo lote rodando ao mesmo tempo).
   let added = 0;
   let updated = 0;
+  const movementsToCreate: { clientId: string; valor: number }[] = [];
 
-  for (let i = 0; i < rows.length; i++) {
-    const raw = rows[i];
-    const rowNumber = i + 2; // linha 1 = cabeçalho
-    const err = validateRow(raw, rowNumber);
-    if (err) {
-      errors.push(err);
-      continue;
-    }
-
-    const phone = normalizePhone(raw.telefone!);
-    if (!phone) {
-      errors.push({ row: rowNumber, motivo: "Telefone inválido" });
-      continue;
-    }
-
-    const limiteTotal = parseNumber(raw.limite) ?? 0;
-    const saldoDisponivel = parseNumber(raw.saldo_disponivel) ?? 0;
-    // "SaldoCartao" já traz o valor utilizado pronto; formatos sem essa coluna (ex.: "Cartões e
-    // contas") calculam como limite - saldo disponível.
-    const valorUtilizado = parseNumber(raw.valor_utilizado) ?? Math.max(0, limiteTotal - saldoDisponivel);
-
-    const statusCartaoKey = (raw.status_cartao || "").trim().toUpperCase();
-    const statusCartaoRecognized = statusCartaoKey in STATUS_CARTAO_MAP;
-    const statusCadastroKey = (raw.status_cadastro || "").trim().toUpperCase();
-
-    let statusConta: "ATIVO" | "INATIVO" | "BLOQUEADO";
-    let isReprovado = false;
-
-    if (statusCartaoKey && statusCartaoRecognized) {
-      statusConta = STATUS_CARTAO_MAP[statusCartaoKey];
-      isReprovado = statusCartaoKey === "NAO_PODE_TER";
-    } else if (statusCartaoKey) {
-      // STATUS presente mas desconhecido — não descarta a linha, importa conservador e sinaliza.
-      errors.push({ row: rowNumber, motivo: `Aviso: STATUS "${raw.status_cartao}" desconhecido — importado como Inativo` });
-      statusConta = "INATIVO";
-      isReprovado = true;
-    } else if (statusCadastroKey === "APROVADO") {
-      statusConta = valorUtilizado > 0 ? "ATIVO" : "INATIVO";
-    } else if (statusCadastroKey) {
-      // StatusCadastro presente mas não é "APROVADO" — trata como reprovado/pendente até
-      // sabermos o vocabulário completo, e sinaliza pra revisão.
-      errors.push({ row: rowNumber, motivo: `Aviso: StatusCadastro "${raw.status_cadastro}" desconhecido — importado como Inativo` });
-      statusConta = "INATIVO";
-      isReprovado = true;
-    } else {
-      // Nenhum sinal de status na planilha — conservador, sem sinalizar (campo simplesmente ausente).
-      statusConta = "INATIVO";
-    }
-
-    const encerrado = parseBool(raw.encerrado);
-    // CartaoBloqueado e ContaBloqueada tratados como equivalentes (decisão do cliente,
-    // 2026-08-20) — qualquer um dos três sinais de bloqueio já basta.
-    const bloqueado = parseBool(raw.bloqueado) || parseBool(raw.cartao_bloqueado) || parseBool(raw.conta_bloqueada);
-    if (encerrado) statusConta = "INATIVO";
-    if (bloqueado) statusConta = "BLOQUEADO"; // trava independente, tem prioridade máxima
-
-    const { percentual, faixa } = computeUsage(limiteTotal, valorUtilizado);
-
-    const documentoTipo = detectDocumentType(raw.documento!);
-    const cpfHash = hashDocument(raw.documento!, tenant.cpfSalt);
-    const cpfMasked = maskDocument(raw.documento!);
-
-    const incoming: IncomingClientRow = {
-      externalId: raw.id_cartao?.trim() || undefined,
-      nome: raw.nome!.trim(),
-      telefone: phone,
-      cpfHash,
-      cpfMasked,
-      cidade: raw.cidade?.trim(),
-      dataCadastro: parseDate(raw.data_cadastro),
-      dataAberturaConta: parseDate(raw.data_ativacao),
-      limiteTotal,
-      valorUtilizado,
-      saldoDisponivel,
-      valorAntecipado: 0,
-      dataUltimaUtilizacao: statusConta === "ATIVO" ? parseDate(raw.data_ativacao) : undefined,
-      statusConta,
-      origemCliente: isReprovado ? "comercio" : undefined,
-      // Base legal: aceite no contrato/abertura de conta (confirmado com o cliente) — todo
-      // cadastro aprovado é considerado autorizado por padrão; reprovados nunca tiveram
-      // contrato aceito, então ficam sem autorização.
-      autorizacaoComunicacao: !isReprovado,
-    };
-
+  await mapWithConcurrency(prepared, CONCURRENCY, async (p) => {
+    const existing = existingByCpfHash.get(p.cpfHash);
+    const data = { ...p.data, autorizacaoComunicacao: existing?.optOutAt ? false : p.data.autorizacaoComunicacao };
     try {
-      const existing = await findExistingClient(prisma, tenantId, incoming);
-
-      const data = {
-        externalId: incoming.externalId,
-        nome: incoming.nome,
-        telefone: incoming.telefone,
-        cpfHash: incoming.cpfHash,
-        cpfMasked: incoming.cpfMasked,
-        documentoTipo,
-        email: raw.email?.trim() || undefined,
-        cidade: incoming.cidade,
-        dataCadastro: incoming.dataCadastro,
-        dataAberturaConta: incoming.dataAberturaConta,
-        limiteTotal: incoming.limiteTotal,
-        valorUtilizado: incoming.valorUtilizado,
-        saldoDisponivel: incoming.saldoDisponivel,
-        valorAntecipado: incoming.valorAntecipado,
-        dataUltimaUtilizacao: incoming.dataUltimaUtilizacao,
-        percentualUtilizado: percentual,
-        faixaUso: faixa,
-        statusConta: incoming.statusConta,
-        origemCliente: incoming.origemCliente,
-        empresaConveniada: raw.empresa_conveniada?.trim() || undefined,
-        cidadeEmpresaConveniada: raw.cidade_empresa_conveniada?.trim() || undefined,
-        vinculoEmpregaticio: raw.vinculo_empregaticio?.trim() || undefined,
-        statusValidacaoCadastro: raw.status_cadastro?.trim() || undefined,
-        encerradoEm: encerrado ? new Date() : undefined,
-        motivoEncerramento: raw.motivo_encerramento?.trim() || undefined,
-        obsEncerramento: raw.obs_encerramento?.trim() || undefined,
-        razaoSocial: raw.razao_social?.trim() || undefined,
-        lotacao: raw.lotacao?.trim() || undefined,
-        dataValidadeCartao: parseDate(raw.data_validade_cartao),
-        dataNascimento: parseDate(raw.data_nascimento),
-        sexo: raw.sexo?.trim() || undefined,
-        remuneracaoBruta: parseNumber(raw.remuneracao_bruta),
-        remuneracaoLiquida: parseNumber(raw.remuneracao_liquida),
-        bonus: parseNumber(raw.bonus),
-        saldoLiquidoSaque: parseNumber(raw.saldo_liquido_saque),
-        // opt-out é sticky: uma vez recusado, importação nunca reativa a autorização sozinha
-        autorizacaoComunicacao: existing?.optOutAt ? false : incoming.autorizacaoComunicacao,
-        lastImportJobId: job.id,
-        tenantId,
-      };
-
+      await prisma.client.upsert({
+        where: { tenantId_cpfHash: { tenantId, cpfHash: p.cpfHash } },
+        create: data,
+        update: data,
+      });
       if (existing) {
-        await prisma.client.update({ where: { id: existing.id }, data });
-        if (incoming.limiteTotal > Number(existing.limiteTotal)) {
-          await prisma.movement.create({
-            data: {
-              clientId: existing.id,
-              tipo: "renovacao_limite",
-              valor: incoming.limiteTotal - Number(existing.limiteTotal),
-              data: new Date(),
-            },
-          });
-        }
         updated++;
+        if (p.limiteTotal > Number(existing.limiteTotal)) {
+          movementsToCreate.push({ clientId: existing.id, valor: p.limiteTotal - Number(existing.limiteTotal) });
+        }
       } else {
-        await prisma.client.create({ data });
         added++;
       }
     } catch (e: any) {
-      errors.push({ row: rowNumber, motivo: `Erro ao gravar registro: ${e.message}` });
+      errors.push({ row: p.rowNumber, motivo: `Erro ao gravar registro: ${e.message}` });
     }
+  });
+
+  // Renovações de limite (Movement) — não bloqueiam a resposta principal; erro aqui não deve
+  // derrubar a importação em si, só fica sem o registro de automação LIMITE_RENOVADO.
+  if (movementsToCreate.length > 0) {
+    await prisma.movement
+      .createMany({
+        data: movementsToCreate.map((m) => ({ clientId: m.clientId, tipo: "renovacao_limite", valor: m.valor, data: new Date() })),
+      })
+      .catch(() => {});
   }
 
   const hardErrors = errors.filter((e) => !e.motivo.startsWith("Aviso:"));

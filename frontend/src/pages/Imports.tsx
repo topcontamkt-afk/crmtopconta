@@ -92,12 +92,11 @@ export default function Imports() {
 
   const requiredMissing = activeFields.filter((f) => f.required && mapping[f.key] === undefined);
 
-  // Cada linha faz várias consultas ao banco no back-end (não é uma inserção em lote) — uma
-  // planilha grande numa única requisição corre risco real de estourar o tempo máximo de
-  // execução da função serverless, travando a tela sem dizer se terminou, parou na metade ou
-  // falhou. Envia em lotes menores e sequenciais em vez de tudo de uma vez: cada lote fica bem
-  // dentro do limite de tempo, e a pessoa acompanha o progresso em vez de uma barra travada.
-  const BATCH_SIZE = 150;
+  // Ainda envia em lotes (não tudo numa requisição só) por segurança — mesmo com a importação
+  // no back-end agora gravando em paralelo e em lote (bem mais rápida), uma única requisição
+  // gigante continua arriscando estourar o tempo máximo de execução da função serverless. O
+  // valor subiu de 150 pra 400 porque cada linha ficou bem mais barata de processar.
+  const BATCH_SIZE = 400;
 
   async function handleImport() {
     setImporting(true);
