@@ -7,6 +7,12 @@ interface ServiceAccountStatus {
   error?: string;
 }
 
+interface SheetConnection {
+  sheetId: string;
+  sheetRange: string;
+  cronSchedule: string;
+}
+
 /**
  * Aceita tanto o link completo do Google Sheets (https://docs.google.com/spreadsheets/d/ID/edit#gid=0)
  * quanto o ID "cru" — extrai o ID em ambos os casos, para o usuário poder simplesmente colar o
@@ -27,6 +33,15 @@ export default function Integrations() {
 
   useEffect(() => {
     api<ServiceAccountStatus>("/integrations/sheets/service-account").then(setServiceAccount);
+    // Bug: a tela nunca recarregava a conexão já salva ao abrir/atualizar a página — o "Salvar
+    // conexão" funcionava (fica no banco), mas os campos voltavam ao valor padrão a cada reload,
+    // dando a impressão de que o link "sumia" mesmo estando salvo.
+    api<SheetConnection | null>("/integrations/sheets").then((conn) => {
+      if (!conn) return;
+      setSheetId(conn.sheetId);
+      setSheetRange(conn.sheetRange);
+      setCronSchedule(conn.cronSchedule);
+    });
   }, []);
 
   function handleSheetIdChange(value: string) {
