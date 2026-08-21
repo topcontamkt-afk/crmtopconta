@@ -112,7 +112,11 @@ function parseDate(v?: string): Date | undefined {
 function parseNumber(v?: string | number): number | undefined {
   if (v === undefined || v === null || v === "") return undefined;
   if (typeof v === "number") return v;
-  const n = Number(String(v).replace(/\./g, "").replace(",", "."));
+  // Colunas de valor na planilha real vêm formatadas como moeda (ex.: "R$ 500,00", "R$ -" pra
+  // zero, "R$ 0,34") — remove o símbolo antes de converter, e trata "-" isolado como zero.
+  let s = String(v).trim().replace(/^R\$\s*/i, "").trim();
+  if (s === "-" || s === "") return 0;
+  const n = Number(s.replace(/\./g, "").replace(",", "."));
   return isNaN(n) ? undefined : n;
 }
 

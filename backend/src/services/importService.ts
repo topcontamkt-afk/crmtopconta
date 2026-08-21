@@ -49,7 +49,11 @@ function parseDate(v?: string): Date | undefined {
 function parseNumber(v?: string | number): number {
   if (v === undefined || v === null || v === "") return 0;
   if (typeof v === "number") return v;
-  const n = Number(String(v).replace(/\./g, "").replace(",", "."));
+  // Algumas planilhas exportam valores já formatados como moeda (ex.: "R$ 500,00", "R$ -" pra
+  // zero) — remove o símbolo antes de converter, e trata "-" isolado como zero.
+  const s = String(v).trim().replace(/^R\$\s*/i, "").trim();
+  if (s === "-" || s === "") return 0;
+  const n = Number(s.replace(/\./g, "").replace(",", "."));
   return isNaN(n) ? 0 : n;
 }
 
