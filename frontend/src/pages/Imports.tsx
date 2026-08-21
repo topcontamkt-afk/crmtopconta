@@ -92,31 +92,57 @@ export default function Imports() {
 
   const requiredMissing = activeFields.filter((f) => f.required && mapping[f.key] === undefined);
 
+  // Cada linha faz várias consultas ao banco no back-end (não é uma inserção em lote) — uma
+  // planilha grande numa única requisição corre risco real de estourar o tempo máximo de
+  // execução da função serverless, travando a tela sem dizer se terminou, parou na metade ou
+  // falhou. Envia em lotes menores e sequenciais em vez de tudo de uma vez: cada lote fica bem
+  // dentro do limite de tempo, e a pessoa acompanha o progresso em vez de uma barra travada.
+  const BATCH_SIZE = 150;
+
   async function handleImport() {
     setImporting(true);
     setUploadStatus(null);
     setUploadError(null);
+
+    const rows = dataRows.map((row) => {
+      const obj: Record<string, string> = {};
+      for (const field of activeFields) {
+        const idx = mapping[field.key];
+        if (idx !== undefined) obj[field.key] = (row[idx] ?? "").trim();
+      }
+      return obj;
+    });
+
+    const totalBatches = Math.ceil(rows.length / BATCH_SIZE) || 1;
+    let added = 0;
+    let updated = 0;
+    let errors = 0;
+
     try {
-      const rows = dataRows.map((row) => {
-        const obj: Record<string, string> = {};
-        for (const field of activeFields) {
-          const idx = mapping[field.key];
-          if (idx !== undefined) obj[field.key] = (row[idx] ?? "").trim();
-        }
-        return obj;
-      });
-      const resp = await api<{ addedCount: number; updatedCount: number; errorCount: number }>(
-        FORMAT_CONFIG[format].endpoint,
-        { method: "POST", body: { rows } }
-      );
+      for (let i = 0; i < totalBatches; i++) {
+        const batch = rows.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE);
+        setUploadStatus(`Importando lote ${i + 1} de ${totalBatches} (${added + updated} de ${rows.length} processados até agora)...`);
+        const resp = await api<{ addedCount: number; updatedCount: number; errorCount: number }>(
+          FORMAT_CONFIG[format].endpoint,
+          { method: "POST", body: { rows: batch } }
+        );
+        added += resp.addedCount;
+        updated += resp.updatedCount;
+        errors += resp.errorCount;
+      }
       setUploadStatus(
-        `Importado: ${resp.addedCount} novos, ${resp.updatedCount} atualizados, ${resp.errorCount} com erro/aviso.` +
-          (resp.errorCount > 0 ? " Veja o detalhe no histórico abaixo." : "")
+        `Importado: ${added} novos, ${updated} atualizados, ${errors} com erro/aviso.` +
+          (errors > 0 ? " Veja o detalhe no histórico abaixo." : "")
       );
       resetUpload();
       load();
     } catch (e) {
+      setUploadStatus(
+        `Parou no meio do caminho: ${added} novos, ${updated} atualizados, ${errors} com erro/aviso até aqui. ` +
+          "As linhas já processadas ficam salvas — corrija o problema e importe de novo (linhas já existentes só atualizam, não duplicam)."
+      );
       setUploadError(e instanceof Error ? e.message : "Erro ao importar planilha");
+      load();
     } finally {
       setImporting(false);
     }
