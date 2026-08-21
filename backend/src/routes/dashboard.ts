@@ -35,13 +35,24 @@ router.get("/summary", async (req, res) => {
     }),
     prisma.client.count({ where: { tenantId, faixaUso: "NAO_UTILIZOU" } }),
     prisma.importJob.findFirst({ where: { tenantId }, orderBy: { startedAt: "desc" } }),
-    prisma.client.groupBy({
-      by: ["cidade"],
-      where: { tenantId, cidade: { not: null } },
-      _count: true,
-      orderBy: { _count: { cidade: "desc" } },
-      take: 10,
-    }),
+    // Ranking de cidades enriquecido (não só contagem): também traz quantos estão ativos e o
+    // valor utilizado somado por cidade, pra alimentar a taxa de ativação e o valor por cidade
+    // no Dashboard — groupBy do Prisma não permite contar sob uma condição (statusConta=ATIVO)
+    // dentro do mesmo agrupamento, por isso SQL raw.
+    prisma.$queryRawUnsafe<
+      Array<{ cidade: string; total: bigint; ativos: bigint; valor_utilizado: number | null }>
+    >(
+      `SELECT "cidade",
+              COUNT(*)::bigint AS total,
+              COUNT(*) FILTER (WHERE "statusConta" = 'ATIVO')::bigint AS ativos,
+              COALESCE(SUM("valorUtilizado"), 0)::float AS valor_utilizado
+       FROM "Client"
+       WHERE "tenantId" = $1 AND "cidade" IS NOT NULL
+       GROUP BY "cidade"
+       ORDER BY total DESC
+       LIMIT 10`,
+      tenantId
+    ),
   ]);
 
   const porFaixa = porFaixaRaw.map((f) => ({
@@ -58,7 +69,12 @@ router.get("/summary", async (req, res) => {
     ativos,
     inativos,
     porFaixa,
-    ranking_cidades: cidadesRaw.map((c) => ({ cidade: c.cidade, count: c._count })),
+    ranking_cidades: cidadesRaw.map((c) => ({
+      cidade: c.cidade,
+      count: Number(c.total),
+      ativos: Number(c.ativos),
+      valorUtilizado: c.valor_utilizado || 0,
+    })),
     limiteTotalLiberado: agregados._sum.limiteTotal || 0,
     valorUtilizadoTotal: agregados._sum.valorUtilizado || 0,
     saldoDisponivelTotal: agregados._sum.saldoDisponivel || 0,

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api, downloadFile } from "../api/client";
 
 interface ClientRow {
@@ -14,11 +14,15 @@ interface ClientRow {
 }
 
 export default function Clients() {
+  // Filtros iniciais podem vir por link (ex.: cards de "Oportunidades" no Dashboard, que
+  // apontam pra cá com ?faixaUso=... ou ?statusConta=... já preenchidos).
+  const [searchParams] = useSearchParams();
   const [items, setItems] = useState<ClientRow[]>([]);
   const [total, setTotal] = useState(0);
-  const [search, setSearch] = useState("");
-  const [cidade, setCidade] = useState("");
-  const [faixaUso, setFaixaUso] = useState("");
+  const [search, setSearch] = useState(searchParams.get("search") || "");
+  const [cidade, setCidade] = useState(searchParams.get("cidade") || "");
+  const [faixaUso, setFaixaUso] = useState(searchParams.get("faixaUso") || "");
+  const [statusConta, setStatusConta] = useState(searchParams.get("statusConta") || "");
   const [page, setPage] = useState(1);
 
   async function load() {
@@ -26,6 +30,7 @@ export default function Clients() {
     if (search) params.set("search", search);
     if (cidade) params.set("cidade", cidade);
     if (faixaUso) params.set("faixaUso", faixaUso);
+    if (statusConta) params.set("statusConta", statusConta);
     params.set("page", String(page));
 
     const resp = await api<{ items: ClientRow[]; total: number }>(`/clients?${params.toString()}`);
@@ -54,6 +59,12 @@ export default function Clients() {
           <option value="QUASE_COMPLETO">Quase completo</option>
           <option value="LIMITE_COMPLETO">Limite completo</option>
         </select>
+        <select value={statusConta} onChange={(e) => setStatusConta(e.target.value)}>
+          <option value="">Todos os status</option>
+          <option value="ATIVO">Ativo</option>
+          <option value="INATIVO">Inativo</option>
+          <option value="BLOQUEADO">Bloqueado</option>
+        </select>
         <button className="btn" onClick={() => { setPage(1); load(); }}>
           Filtrar
         </button>
@@ -64,6 +75,7 @@ export default function Clients() {
             if (search) params.set("search", search);
             if (cidade) params.set("cidade", cidade);
             if (faixaUso) params.set("faixaUso", faixaUso);
+            if (statusConta) params.set("statusConta", statusConta);
             downloadFile(`/clients/export.csv?${params.toString()}`, "clientes.csv");
           }}
         >
