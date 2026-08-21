@@ -1,4 +1,4 @@
-import { Router } from "express";
+import express, { Router } from "express";
 import crypto from "crypto";
 import { z } from "zod";
 import { prisma } from "../config/db";
@@ -6,6 +6,9 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { encryptSecret } from "../services/crypto";
 import { exportTenantSummaryToSheet } from "../services/biExport";
+import { env } from "../config/env";
+import { verifyTwilioSignature, verifyWhatsAppSignature } from "../services/webhookAuth";
+import { webhookLimiter } from "../middleware/rateLimit";
 
 const router = Router();
 
@@ -125,7 +128,14 @@ router.delete("/channels/:id", requireRole("ADMIN"), async (req, res) => {
 });
 
 /** ---- Webhooks públicos de status (WhatsApp / SMS) ---- */
-// Sem requireAuth: validados por assinatura/token do provedor. Idempotentes por providerMsgId.
+// Sem requireAuth (não há sessão de usuário aqui): a origem é validada por assinatura própria de
+// cada provedor, verificada abaixo em cada handler POST — X-Hub-Signature-256 (WhatsApp/Meta,
+// HMAC-SHA256 sobre o corpo bruto com WHATSAPP_APP_SECRET) e X-Twilio-Signature (SMS/Twilio,
+// HMAC-SHA1 sobre a URL + params com TWILIO_AUTH_TOKEN). A verificação do WhatsApp é condicional:
+// enquanto WHATSAPP_APP_SECRET não estiver configurado (segredo novo, pode não ter sido
+// provisionado ainda em produção), o handler aceita a requisição sem checar a assinatura, mas
+// registra um warning a cada chamada — ver verifyWhatsAppSignature/verifyTwilioSignature em
+// services/webhookAuth.ts. Idempotentes por providerMsgId.
 
 router.get("/webhooks/whatsapp", (req, res) => {
   // Verificação de challenge do Meta (hub.challenge) na configuração do webhook
@@ -136,7 +146,22 @@ router.get("/webhooks/whatsapp", (req, res) => {
   res.sendStatus(403);
 });
 
-router.post("/webhooks/whatsapp", async (req, res) => {
+router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
+  const appSecret = process.env.WHATSAPP_APP_SECRET;
+  const signature = req.headers["x-hub-signature-256"] as string | undefined;
+
+  if (appSecret) {
+    if (!req.rawBody || !verifyWhatsAppSignature(req.rawBody, signature, appSecret)) {
+      return res.sendStatus(401);
+    }
+  } else {
+    console.warn(
+      "[webhooks/whatsapp] WHATSAPP_APP_SECRET não configurado — verificação da assinatura " +
+        "X-Hub-Signature-256 está DESATIVADA e qualquer requisição é aceita sem autenticação. " +
+        "Configure WHATSAPP_APP_SECRET (ver backend/.env.example) para habilitar a verificação."
+    );
+  }
+
   try {
     const entries = req.body?.entry || [];
     for (const entry of entries) {
@@ -152,7 +177,35 @@ router.post("/webhooks/whatsapp", async (req, res) => {
   }
 });
 
-router.post("/webhooks/sms/:provider", async (req, res) => {
+// Twilio assina o corpo form-encoded (application/x-www-form-urlencoded) da requisição — o
+// parser global do app é express.json() (app.ts), que não popula req.body para esse
+// content-type. express.urlencoded() é montado só nesta rota para não afetar as demais.
+router.post("/webhooks/sms/:provider", webhookLimiter, express.urlencoded({ extended: false }), async (req, res) => {
+  if (req.params.provider === "twilio") {
+    const signature = req.headers["x-twilio-signature"] as string | undefined;
+    const authToken = env.TWILIO_AUTH_TOKEN;
+    if (!authToken) {
+      console.warn(
+        "[webhooks/sms/twilio] TWILIO_AUTH_TOKEN não configurado — não é possível verificar a " +
+          "assinatura X-Twilio-Signature. Requisição rejeitada."
+      );
+      return res.sendStatus(401);
+    }
+
+    // Reconstrói a URL pública exatamente como a Twilio a assinou. Respeita X-Forwarded-*
+    // (a app roda atrás do proxy da Vercel) sem alterar a configuração global de trust proxy,
+    // que é responsabilidade de outra frente de trabalho.
+    const forwardedProto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0];
+    const forwardedHost = req.headers["x-forwarded-host"] as string | undefined;
+    const proto = forwardedProto || req.protocol;
+    const host = forwardedHost || req.get("host") || "";
+    const fullUrl = `${proto}://${host}${req.originalUrl}`;
+
+    if (!verifyTwilioSignature(fullUrl, req.body as Record<string, string>, signature, authToken)) {
+      return res.sendStatus(401);
+    }
+  }
+
   // Formato varia por provedor (Twilio/Zenvia); normaliza para {providerMsgId, status}
   const { MessageSid, MessageStatus, sid, status } = req.body;
   const providerMsgId = MessageSid || sid;

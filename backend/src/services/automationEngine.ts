@@ -1,7 +1,8 @@
-import { PrismaClient } from "@prisma/client";
+import { AppPrismaClient } from "../config/db";
 import { logAudit } from "../middleware/audit";
 import { notify } from "./notifications";
 import { enqueueCampaign, processQueueBatch } from "./campaignQueue";
+import { withCrossTenantAccess } from "../config/tenantGuard";
 
 /**
  * Motor de automação (Fase 2): avalia periodicamente as AutomationRule ativas de cada tenant
@@ -29,7 +30,7 @@ interface MatchResult {
   clientIds: string[];
 }
 
-async function matchClients(prisma: PrismaClient, tenantId: string, trigger: string, condition: any): Promise<MatchResult> {
+async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: string, condition: any): Promise<MatchResult> {
   switch (trigger) {
     case "NOVO_CLIENTE_SEM_USO": {
       const dias = condition?.diasDesdeCadastro ?? 7;
@@ -105,12 +106,16 @@ async function matchClients(prisma: PrismaClient, tenantId: string, trigger: str
   }
 }
 
-async function executeAction(prisma: PrismaClient, tenantId: string, ruleId: string, ruleName: string, action: any, clientIds: string[]) {
+async function executeAction(prisma: AppPrismaClient, tenantId: string, ruleId: string, ruleName: string, action: any, clientIds: string[]) {
   if (clientIds.length === 0) return { executed: false, reason: "sem clientes elegíveis" };
 
   if (action.type === "block") {
+    // clientIds already came from a tenantId-scoped matchClients() query above, but the
+    // updateMany itself is re-scoped by tenantId too (defense in depth — see tenantGuard.ts):
+    // a future change to matchClients()/executeAction() that lets clientIds come from
+    // somewhere else shouldn't silently become a cross-tenant bulk mutation.
     await prisma.client.updateMany({
-      where: { id: { in: clientIds } },
+      where: { id: { in: clientIds }, tenantId },
       data: { autorizacaoComunicacao: false, optOutAt: new Date() },
     });
     await logAudit({ tenantId, action: "AUTOMATION_BLOCK", target: "Client", details: { ruleId, ruleName, count: clientIds.length } });
@@ -183,8 +188,11 @@ async function executeAction(prisma: PrismaClient, tenantId: string, ruleId: str
   return { executed: false, reason: `tipo de ação desconhecido: ${action.type}` };
 }
 
-export async function evaluateAutomationRules(prisma: PrismaClient) {
-  const rules = await prisma.automationRule.findMany({ where: { enabled: true } });
+export async function evaluateAutomationRules(prisma: AppPrismaClient) {
+  // Genuinely cross-tenant by design: this is the periodic scheduler entry point (see
+  // services/scheduler.ts runAutomationJob) that evaluates every enabled AutomationRule across
+  // every tenant in one sweep. Every query inside the loop below re-scopes by rule.tenantId.
+  const rules = await withCrossTenantAccess(() => prisma.automationRule.findMany({ where: { enabled: true } }));
   const results = [];
 
   for (const rule of rules) {

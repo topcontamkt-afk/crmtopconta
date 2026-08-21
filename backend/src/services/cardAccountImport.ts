@@ -1,4 +1,5 @@
-import { Prisma, PrismaClient } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import { AppPrismaClient } from "../config/db";
 import { computeUsage } from "./usage";
 import { hashDocument, isValidDocument, maskDocument, detectDocumentType, normalizePhone } from "./masking";
 import { notify } from "./notifications";
@@ -257,7 +258,7 @@ function prepareRow(raw: CardAccountRow, rowNumber: number, tenantCpfSalt: strin
  * legal: aceite no contrato de abertura de conta) exceto para cadastros reprovados.
  */
 export async function runCardAccountImport(
-  prisma: PrismaClient,
+  prisma: AppPrismaClient,
   tenantId: string,
   rows: CardAccountRow[],
   triggeredBy: string

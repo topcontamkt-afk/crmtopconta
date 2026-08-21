@@ -8,6 +8,7 @@ import { evaluateAutomationRules } from "./automationEngine";
 import { processQueueBatch } from "./campaignQueue";
 import { runRetentionSweep } from "./retention";
 import { exportAllTenantsSummary } from "./biExport";
+import { withCrossTenantAccess } from "../config/tenantGuard";
 
 /**
  * Cada função abaixo é o "corpo" de um job periódico, desacoplada de *como* ela é disparada:
@@ -20,7 +21,11 @@ import { exportAllTenantsSummary } from "./biExport";
 
 /** Sincronização automática do Google Sheets (PRD — Must have), respeitando o cron por tenant. */
 export async function runSheetSyncJob() {
-  const connections = await prisma.sheetConnection.findMany({ where: { active: true } });
+  // Genuinely cross-tenant by design: sweeps every tenant's active SheetConnection to check
+  // whose cron is due right now. Each row is re-scoped to its own tenant below (conn.tenantId).
+  const connections = await withCrossTenantAccess(() =>
+    prisma.sheetConnection.findMany({ where: { active: true } })
+  );
   const now = new Date();
   let synced = 0;
 
@@ -46,7 +51,11 @@ export async function runSheetSyncJob() {
 
 /** Recontagem periódica de segmentos dinâmicos (Fase 2), cada um no seu próprio refreshCron. */
 export async function runSegmentRefreshJob() {
-  const segments = await prisma.segmentDefinition.findMany({ where: { dynamic: true } });
+  // Genuinely cross-tenant by design: sweeps every tenant's dynamic segments to check whose
+  // refreshCron is due right now. Each row is re-scoped via buildSegmentWhere(segment.tenantId).
+  const segments = await withCrossTenantAccess(() =>
+    prisma.segmentDefinition.findMany({ where: { dynamic: true } })
+  );
   const now = new Date();
   let refreshed = 0;
 
@@ -78,10 +87,14 @@ export async function runAutomationJob() {
  * o throttle da campanha e o rate limit global do tenant.
  */
 export async function runCampaignDispatchJob() {
-  const pendingCampaigns = await prisma.campaign.findMany({
-    where: { status: { in: ["AGENDADA", "EM_EXECUCAO"] } },
-    select: { id: true },
-  });
+  // Genuinely cross-tenant by design: sweeps every tenant's in-flight campaigns to drain queued
+  // messages. processQueueBatch() re-derives and re-scopes by the campaign's own tenantId.
+  const pendingCampaigns = await withCrossTenantAccess(() =>
+    prisma.campaign.findMany({
+      where: { status: { in: ["AGENDADA", "EM_EXECUCAO"] } },
+      select: { id: true },
+    })
+  );
 
   const results = [];
   for (const c of pendingCampaigns) {

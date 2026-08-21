@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import { AppPrismaClient } from "../config/db";
 import { ChannelAdapter, SendResult } from "./channels/types";
 import { MockSMSAdapter, TwilioSMSAdapter, ZenviaSMSAdapter } from "./channels/sms";
 import { MockWhatsAppAdapter, WhatsAppCloudAdapter } from "./channels/whatsapp";
@@ -44,7 +44,7 @@ function instantiateAdapter(channel: "WHATSAPP" | "SMS", provider: string, creds
  * e na ausência total de credenciais usa o adaptador mock.
  */
 async function resolveProviders(
-  prisma: PrismaClient,
+  prisma: AppPrismaClient,
   tenantId: string,
   channel: "WHATSAPP" | "SMS"
 ): Promise<ResolvedProvider[]> {
@@ -105,7 +105,7 @@ export function renderTemplate(template: string, client: Record<string, any>): s
 }
 
 /** Monta o público da campanha a partir do segmento salvo ou de filtros ad-hoc, sempre excluindo opt-outs. */
-export async function buildAudience(prisma: PrismaClient, tenantId: string, campaignId: string) {
+export async function buildAudience(prisma: AppPrismaClient, tenantId: string, campaignId: string) {
   const campaign = await prisma.campaign.findUniqueOrThrow({
     where: { id: campaignId },
     include: { segment: true },
@@ -129,7 +129,7 @@ export async function buildAudience(prisma: PrismaClient, tenantId: string, camp
  * Enfileira MessageEvents (status FILA) para todos os clientes elegíveis, aplicando a janela de
  * dedupe e sorteando a variante A/B quando a campanha tem variantSplitPercent configurado.
  */
-export async function enqueueCampaign(prisma: PrismaClient, tenantId: string, campaignId: string) {
+export async function enqueueCampaign(prisma: AppPrismaClient, tenantId: string, campaignId: string) {
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
   const audience = await buildAudience(prisma, tenantId, campaignId);
 
@@ -174,7 +174,7 @@ export async function enqueueCampaign(prisma: PrismaClient, tenantId: string, ca
 }
 
 /** Quantas mensagens já foram enviadas pelo tenant no último minuto (para o rate limit global). */
-async function sentInLastMinute(prisma: PrismaClient, tenantId: string): Promise<number> {
+async function sentInLastMinute(prisma: AppPrismaClient, tenantId: string): Promise<number> {
   const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
   return prisma.messageEvent.count({
     where: { campaign: { tenantId }, sentAt: { gte: oneMinuteAgo } },
@@ -185,7 +185,7 @@ async function sentInLastMinute(prisma: PrismaClient, tenantId: string): Promise
  * Processa até `limit` mensagens em FILA respeitando o throttle da campanha E o rate limit
  * global do tenant (Tenant.maxMsgsPerMinute), com failover entre provedores do canal.
  */
-export async function processQueueBatch(prisma: PrismaClient, campaignId: string, limit = 50) {
+export async function processQueueBatch(prisma: AppPrismaClient, campaignId: string, limit = 50) {
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
   const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: campaign.tenantId } });
   const providers = await resolveProviders(prisma, campaign.tenantId, campaign.channel);
@@ -253,7 +253,7 @@ export async function processQueueBatch(prisma: PrismaClient, campaignId: string
  * — útil para QA antes de agendar a campanha para a base completa.
  */
 export async function sendTestMessages(
-  prisma: PrismaClient,
+  prisma: AppPrismaClient,
   tenantId: string,
   campaignId: string,
   phones: string[]
@@ -278,7 +278,7 @@ export async function sendTestMessages(
  * primeira movimentação dentro da janela conta como conversão; o valor dessa movimentação é
  * guardado em convertedValue para cálculo de ROI (Fase 2).
  */
-export async function computeAttribution(prisma: PrismaClient, campaignId: string) {
+export async function computeAttribution(prisma: AppPrismaClient, campaignId: string) {
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
   const events = await prisma.messageEvent.findMany({
     where: { campaignId, status: { in: ["ENVIADO", "ENTREGUE", "LIDO", "RESPONDIDO"] }, convertedAt: null },

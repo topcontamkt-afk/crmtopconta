@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import { AppPrismaClient } from "../config/db";
 import { computeUsage } from "./usage";
 import { digitsOnly, hashCPF, isValidCPF, maskCPF, normalizePhone } from "./masking";
 import { findExistingClient, IncomingClientRow } from "./dedupe";
@@ -97,7 +97,7 @@ export interface ImportRunResult {
  * cálculo de percentual_utilizado e faixa de uso.
  */
 export async function runImport(
-  prisma: PrismaClient,
+  prisma: AppPrismaClient,
   tenantId: string,
   rows: RawSheetRow[],
   triggeredBy: string,

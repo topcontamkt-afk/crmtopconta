@@ -7,6 +7,7 @@ import { runImport, RawSheetRow } from "../services/importService";
 import { runCardAccountImport, CardAccountRow } from "../services/cardAccountImport";
 import { DEFAULT_COLUMN_MAPPING, fetchSheetRows } from "../services/googleSheets";
 import { notify } from "../services/notifications";
+import { importLimiter } from "../middleware/rateLimit";
 
 const router = Router();
 router.use(requireAuth);
@@ -80,7 +81,7 @@ const sheetsSchema = z.object({
   columnMapping: z.record(z.string()).optional(),
 });
 
-router.post("/google-sheets", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+router.post("/google-sheets", importLimiter, requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const parsed = sheetsSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { tenantId, id: userId } = req.user!;
@@ -92,6 +93,10 @@ router.post("/google-sheets", requireRole("ADMIN", "OPERATOR"), async (req, res)
     await logAudit({ tenantId, userId, action: "IMPORT_GOOGLE_SHEETS", target: "ImportJob", targetId: importJobId, details: result });
     res.json({ importJobId, ...result });
   } catch (e: any) {
+    // Detalhe completo do erro só vai para o log do servidor e para a notificação interna do
+    // tenant (abaixo) — nunca é devolvido ao chamador HTTP, para não vazar internals do
+    // Prisma/Google Sheets API. Ver o mesmo padrão no error handler global de app.ts.
+    console.error(e);
     // Falha antes mesmo de criar o ImportJob (ex.: credencial/planilha inválida) — não há
     // job para carregar o status FALHOU, então a notificação é o único rastro operacional.
     await notify(prisma, {
@@ -100,7 +105,7 @@ router.post("/google-sheets", requireRole("ADMIN", "OPERATOR"), async (req, res)
       severity: "ERRO",
       message: `Não foi possível conectar à planilha ${sheetId}: ${e.message}`,
     });
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: "Erro interno do servidor" });
   }
 });
 
@@ -113,7 +118,7 @@ const fixErrorsSchema = z.object({
  * reenvia apenas as linhas corrigidas (tipicamente as que constam em ImportJob.errors) pelo
  * mesmo pipeline de validação/dedupe, gerando um novo ImportJob de correção.
  */
-router.post("/:id/fix-errors", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+router.post("/:id/fix-errors", importLimiter, requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const parsed = fixErrorsSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { tenantId, id: userId } = req.user!;
@@ -144,7 +149,7 @@ const csvSchema = z.object({
   rows: z.array(z.record(z.any())).min(1),
 });
 
-router.post("/csv", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+router.post("/csv", importLimiter, requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const parsed = csvSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { tenantId, id: userId } = req.user!;
@@ -170,7 +175,7 @@ const cardAccountSchema = z.object({
   rows: z.array(z.record(z.any())).min(1),
 });
 
-router.post("/cartoes", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+router.post("/cartoes", importLimiter, requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const parsed = cardAccountSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { tenantId, id: userId } = req.user!;

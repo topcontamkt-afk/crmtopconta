@@ -1,7 +1,10 @@
 import { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
+import { env } from "../config/env";
 
-const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
+// Sem fallback: config/env.ts já falha o boot do processo se JWT_SECRET estiver ausente, então
+// nunca existe um caminho de execução em que este valor não esteja definido.
+const JWT_SECRET = env.JWT_SECRET;
 
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;

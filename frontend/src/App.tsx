@@ -16,7 +16,7 @@ import {
   LogOut,
   Search,
 } from "lucide-react";
-import { useAuth } from "./context/AuthContext";
+import { useAuth, type AuthUser } from "./context/AuthContext";
 import Login from "./pages/Login";
 import Clients from "./pages/Clients";
 import ClientProfile from "./pages/ClientProfile";
@@ -46,6 +46,18 @@ function RequireAuth({ children }: { children: JSX.Element }) {
   if (user.mustChangePassword && window.location.pathname !== "/account") {
     return <Navigate to="/account" replace />;
   }
+  return children;
+}
+
+/**
+ * Espelha no frontend um `requireRole(...)` já existente no backend para a rota
+ * correspondente — pura defesa em profundidade / UX (o backend já recusa a chamada com 403;
+ * isso só evita que quem não tem o papel chegue a uma tela quebrada por acesso direto à URL).
+ * Nunca introduz uma restrição de papel que não exista no backend.
+ */
+function RoleGate({ allowedRoles, children }: { allowedRoles: AuthUser["role"][]; children: JSX.Element }) {
+  const { user } = useAuth();
+  if (!user || !allowedRoles.includes(user.role)) return <Navigate to="/" replace />;
   return children;
 }
 
@@ -174,8 +186,22 @@ export default function App() {
                 <Route path="/automations" element={<Automations />} />
                 <Route path="/imports" element={<Imports />} />
                 <Route path="/integrations" element={<Integrations />} />
-                <Route path="/audit" element={<AuditLog />} />
-                <Route path="/users" element={<Users />} />
+                <Route
+                  path="/audit"
+                  element={
+                    <RoleGate allowedRoles={["ADMIN", "ANALYST"]}>
+                      <AuditLog />
+                    </RoleGate>
+                  }
+                />
+                <Route
+                  path="/users"
+                  element={
+                    <RoleGate allowedRoles={["ADMIN"]}>
+                      <Users />
+                    </RoleGate>
+                  }
+                />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/account" element={<Account />} />
               </Routes>

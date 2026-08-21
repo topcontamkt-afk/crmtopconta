@@ -1,4 +1,5 @@
 import { PrismaClient } from "@prisma/client";
+import { tenantGuardExtension } from "./tenantGuard";
 
 // DATABASE_URL aponta para o connection pooler do Supabase (PgBouncer, porta 6543, modo
 // "transaction" — ver schema.prisma). Nesse modo o pooler não garante a mesma conexão física
@@ -18,6 +19,17 @@ function poolerSafeDatabaseUrl(): string | undefined {
   return `${raw}${separator}pgbouncer=true&connection_limit=5`;
 }
 
+// tenantGuardExtension: compensating control for tenant isolation, since RLS is enabled with
+// zero policies on every table and the app's DB role bypasses RLS anyway (see
+// src/config/tenantGuard.ts for the full writeup). Applied here so every caller of this shared
+// client — routes and services alike — gets the guard automatically; there is no other place in
+// the codebase that constructs a PrismaClient.
 export const prisma = new PrismaClient({
   datasources: { db: { url: poolerSafeDatabaseUrl() } },
-});
+}).$extends(tenantGuardExtension);
+
+// Prisma's `$extends()` return type intentionally drops `$on`/`$use` (extensions replace the
+// old middleware API), so it isn't assignable to the plain `PrismaClient` type. Every service
+// function that receives the shared client as a parameter should be typed with this alias
+// instead of importing `PrismaClient` from "@prisma/client" directly.
+export type AppPrismaClient = typeof prisma;

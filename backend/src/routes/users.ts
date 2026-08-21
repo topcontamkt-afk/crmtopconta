@@ -46,7 +46,17 @@ router.patch("/:id", requireRole("ADMIN"), async (req, res) => {
     where: { id: target.id },
     data: { role: req.body.role ?? target.role, active: req.body.active ?? target.active },
   });
-  await logAudit({ tenantId, userId: adminId, action: "UPDATE_USER", target: "User", targetId: target.id, details: req.body });
+  // Não loga req.body bruto: só os dois campos realmente aplicados acima, ambos não-PII
+  // (enum de papel e flag booleana) — evita persistir indefinidamente no AuditLog qualquer
+  // campo extra que o cliente HTTP venha a incluir no payload no futuro.
+  await logAudit({
+    tenantId,
+    userId: adminId,
+    action: "UPDATE_USER",
+    target: "User",
+    targetId: target.id,
+    details: { role: updated.role, active: updated.active },
+  });
   res.json({ id: updated.id, role: updated.role, active: updated.active });
 });
 
