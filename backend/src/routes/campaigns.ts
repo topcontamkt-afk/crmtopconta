@@ -123,7 +123,33 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
     },
   });
 
-  await logAudit({ tenantId, userId, action: "CREATE_CAMPAIGN", target: "Campaign", targetId: campaign.id, details: d });
+  // Não loga `d` bruto: adHocFilters.search é busca livre por nome/telefone (ver
+  // services/segments.ts buildSegmentWhere) — um operador pode digitar o nome ou telefone
+  // exato de um cliente ali para montar um público ad hoc, o que gravaria PII no AuditLog.
+  // messageTemplate/messageTemplateB também ficam de fora (conteúdo de mensagem, não
+  // metadado da campanha). Só o que descreve a configuração da campanha em si é logado.
+  await logAudit({
+    tenantId,
+    userId,
+    action: "CREATE_CAMPAIGN",
+    target: "Campaign",
+    targetId: campaign.id,
+    details: {
+      name: d.name,
+      channel: d.channel,
+      segmentId: d.segmentId,
+      hasAdHocFilters: !!d.adHocFilters,
+      templateId: d.templateId,
+      usesFreeTextMessage: !d.templateId,
+      isSandbox: d.isSandbox,
+      scheduledAt: d.scheduledAt,
+      throttlePerMin: d.throttlePerMin,
+      dedupeWindowHrs: d.dedupeWindowHrs,
+      attributionDays: d.attributionDays,
+      costPerMessage: d.costPerMessage,
+      estimatedAudience,
+    },
+  });
   res.status(201).json(campaign);
 });
 
@@ -165,7 +191,17 @@ router.post("/:id/test-send", requireRole("ADMIN", "OPERATOR"), async (req, res)
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
 
   const result = await sendTestMessages(prisma, tenantId, campaign.id, parsed.data.phones);
-  await logAudit({ tenantId, userId, action: "TEST_SEND_CAMPAIGN", target: "Campaign", targetId: campaign.id, details: { phones: parsed.data.phones } });
+  // Loga só a quantidade, nunca os números de telefone em si — não são deriváveis de um
+  // Client existente (é um envio de teste ad hoc do operador), então não têm targetId para o
+  // cascade de anonimização do retention.ts alcançar depois; a única defesa é não gravar.
+  await logAudit({
+    tenantId,
+    userId,
+    action: "TEST_SEND_CAMPAIGN",
+    target: "Campaign",
+    targetId: campaign.id,
+    details: { phoneCount: parsed.data.phones.length },
+  });
   res.json(result);
 });
 

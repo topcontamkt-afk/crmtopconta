@@ -1,6 +1,12 @@
 import "dotenv/config";
+// Validação fail-fast de variáveis de ambiente — precisa ser o próximo import depois de
+// "dotenv/config" (que carrega o .env local) e antes de qualquer outro módulo que leia
+// process.env (rotas, serviços), para travar o processo/cold-start imediatamente com uma
+// mensagem clara em vez de falhar de forma obscura só quando a rota afetada for chamada.
+import { env } from "./config/env";
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
 // Faz o Express encaminhar automaticamente rejeições de Promise não tratadas dentro de rotas
 // async para o error handler abaixo. Sem isso, um erro assíncrono (ex.: falha do Prisma) nunca
 // gera resposta — a requisição fica "pendurada" no cliente até a função serverless estourar o
@@ -28,8 +34,35 @@ import cronRoutes from "./routes/cron";
  * serverless da Vercel (api/index.ts, na raiz do pacote backend).
  */
 const app = express();
-app.use(cors());
-app.use(express.json({ limit: "5mb" }));
+// CORS restrito à allow-list resolvida em config/env.ts (env.ALLOWED_ORIGINS) — nunca reflete
+// qualquer origem por padrão. Requisições sem header Origin (server-to-server, curl, apps
+// mobile) são permitidas, já que não há origem de navegador a validar.
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || env.ALLOWED_ORIGINS.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error("Origem não permitida pelo CORS"));
+    },
+  })
+);
+// Cabeçalhos de segurança HTTP. API somente-JSON, sem renderização de HTML — a configuração
+// padrão do helmet (sem CSP customizada) já cobre o que importa aqui (X-Content-Type-Options,
+// HSTS, etc.), então não há necessidade de uma política própria.
+app.use(helmet());
+app.use(
+  express.json({
+    limit: "5mb",
+    // Guarda os bytes brutos do corpo em req.rawBody antes do parse — necessário para o webhook
+    // do WhatsApp (routes/integrations.ts) recomputar o HMAC de X-Hub-Signature-256 sobre o
+    // corpo exatamente como recebido (a assinatura da Meta é sobre os bytes crus, não sobre o
+    // objeto já parseado/serializado de volta). Não afeta o parse normal de nenhuma outra rota.
+    verify: (req, _res, buf) => {
+      (req as express.Request).rawBody = buf;
+    },
+  })
+);
 
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
 

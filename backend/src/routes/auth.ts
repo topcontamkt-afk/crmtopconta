@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, signPending2FAToken, signToken, verifyPending2FAToken } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
+import { twoFactorVerifyLimiter } from "../middleware/rateLimit";
 import {
   isLocked,
   lockedMinutesRemaining,
@@ -75,7 +76,7 @@ const verify2faSchema = z.object({
 });
 
 /** POST /api/auth/2fa/verify — segunda etapa do login quando o usuário tem 2FA ativo. */
-router.post("/2fa/verify", async (req, res) => {
+router.post("/2fa/verify", twoFactorVerifyLimiter, async (req, res) => {
   const parsed = verify2faSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Dados inválidos" });
 

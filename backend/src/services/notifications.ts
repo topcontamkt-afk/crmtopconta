@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import { AppPrismaClient } from "../config/db";
 
 /**
  * Notificações operacionais (Fase 2 — Should have): "sincronização falhou",
@@ -6,7 +6,7 @@ import { PrismaClient } from "@prisma/client";
  * consistência de tipo/severidade entre os pontos de disparo (import, scheduler, campanhas).
  */
 export async function notify(
-  prisma: PrismaClient,
+  prisma: AppPrismaClient,
   params: {
     tenantId: string;
     type: string;

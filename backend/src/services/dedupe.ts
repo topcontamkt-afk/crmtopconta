@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import { AppPrismaClient } from "../config/db";
 
 /**
  * Deduplicação por CPF (hash) e telefone.
@@ -27,7 +27,7 @@ export interface IncomingClientRow {
 }
 
 export async function findExistingClient(
-  prisma: PrismaClient,
+  prisma: AppPrismaClient,
   tenantId: string,
   row: IncomingClientRow
 ) {

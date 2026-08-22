@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import { AppPrismaClient } from "../config/db";
 import { writeSheetSummary } from "./googleSheets";
 import { FAIXA_LABELS } from "./usage";
 
@@ -7,7 +7,7 @@ import { FAIXA_LABELS } from "./usage";
  * e escreve na aba "CRM_Export" da mesma planilha usada para importação — dá pra conectar Google
  * Data Studio/Looker Studio direto nessa planilha como fonte, sem precisar de BigQuery.
  */
-export async function exportTenantSummaryToSheet(prisma: PrismaClient, tenantId: string): Promise<{ exported: boolean; reason?: string }> {
+export async function exportTenantSummaryToSheet(prisma: AppPrismaClient, tenantId: string): Promise<{ exported: boolean; reason?: string }> {
   const connection = await prisma.sheetConnection.findFirst({ where: { tenantId, active: true } });
   if (!connection) return { exported: false, reason: "sem conexão de planilha ativa" };
 
@@ -52,7 +52,7 @@ export async function exportTenantSummaryToSheet(prisma: PrismaClient, tenantId:
   return { exported: true };
 }
 
-export async function exportAllTenantsSummary(prisma: PrismaClient) {
+export async function exportAllTenantsSummary(prisma: AppPrismaClient) {
   const tenants = await prisma.tenant.findMany({ select: { id: true } });
   const results = [];
   for (const t of tenants) {

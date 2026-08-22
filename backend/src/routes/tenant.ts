@@ -9,10 +9,13 @@ router.use(requireAuth);
 
 /** GET /api/tenant/settings — configurações operacionais do tenant. */
 router.get("/settings", async (req, res) => {
-  const tenant = await prisma.tenant.findUniqueOrThrow({
+  // findUnique (não findUniqueOrThrow) — um tenantId de um JWT válido para um tenant já
+  // removido não deve gerar um P2025 não tratado (500 cru), e sim um 404 genérico.
+  const tenant = await prisma.tenant.findUnique({
     where: { id: req.user!.tenantId },
     select: { id: true, name: true, retentionDays: true, maxMsgsPerMinute: true },
   });
+  if (!tenant) return res.status(404).json({ error: "Tenant não encontrado" });
   res.json(tenant);
 });
 

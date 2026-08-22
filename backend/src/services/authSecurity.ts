@@ -1,4 +1,5 @@
-import { PrismaClient, User } from "@prisma/client";
+import { User } from "@prisma/client";
+import { AppPrismaClient } from "../config/db";
 
 /**
  * Rate limiting anti brute-force para login — armazenado no banco (não em memória do processo),
@@ -18,7 +19,7 @@ export function lockedMinutesRemaining(user: Pick<User, "lockedUntil">): number 
 }
 
 /** Chamado após uma senha incorreta: incrementa o contador e bloqueia a conta se atingir o limite. */
-export async function registerFailedLogin(prisma: PrismaClient, userId: string, currentCount: number) {
+export async function registerFailedLogin(prisma: AppPrismaClient, userId: string, currentCount: number) {
   const count = currentCount + 1;
   const data: { failedLoginCount: number; lockedUntil?: Date } = { failedLoginCount: count };
   if (count >= MAX_FAILED_ATTEMPTS) {
@@ -28,6 +29,6 @@ export async function registerFailedLogin(prisma: PrismaClient, userId: string, 
 }
 
 /** Chamado após um login bem-sucedido: zera o contador e qualquer bloqueio ativo. */
-export async function resetFailedLogins(prisma: PrismaClient, userId: string) {
+export async function resetFailedLogins(prisma: AppPrismaClient, userId: string) {
   await prisma.user.update({ where: { id: userId }, data: { failedLoginCount: 0, lockedUntil: null } });
 }

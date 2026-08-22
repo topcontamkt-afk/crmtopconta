@@ -122,13 +122,16 @@ router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   }
 
   const updated = await prisma.client.update({ where: { id: existing.id }, data });
+  // Não loga parsed.data bruto: pode incluir nome/cidade do cliente (PII). Só registra quais
+  // campos mudaram — o valor em si já vive na linha do Client (que a rotina de retenção em
+  // services/retention.ts anonimiza quando aplicável), não precisa ser duplicado aqui.
   await logAudit({
     tenantId,
     userId,
     action: "UPDATE_CLIENT",
     target: "Client",
     targetId: existing.id,
-    details: parsed.data,
+    details: { fieldsChanged: Object.keys(parsed.data) },
   });
   res.json(updated);
 });

@@ -50,7 +50,17 @@ router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
     where: { id: rule.id },
     data: { enabled: req.body.enabled ?? rule.enabled, name: req.body.name ?? rule.name },
   });
-  await logAudit({ tenantId, userId, action: "UPDATE_AUTOMATION", target: "AutomationRule", targetId: rule.id, details: req.body });
+  // Não loga req.body bruto (sem schema de validação nesta rota, então poderia carregar
+  // qualquer campo): só os dois campos realmente aplicados acima — nome da regra e flag de
+  // ativação, nenhum dos dois é PII de cliente.
+  await logAudit({
+    tenantId,
+    userId,
+    action: "UPDATE_AUTOMATION",
+    target: "AutomationRule",
+    targetId: rule.id,
+    details: { name: updated.name, enabled: updated.enabled },
+  });
   res.json(updated);
 });
 
