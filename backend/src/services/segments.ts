@@ -12,7 +12,9 @@ export interface SegmentFilters {
   usadoNosUltimosDias?: number; // dataUltimaUtilizacao dentro dos últimos N dias — "recorrente"/"ativo"
   tags?: string[];
   search?: string; // busca livre por nome/telefone
-  clientIds?: string[]; // seleção explícita de clientes (usado pelo motor de automação)
+  clientIds?: string[]; // seleção explícita de clientes (usado pelo motor de automação e por
+  // públicos pré-montados no Dashboard, ex.: aniversariantes do mês)
+  empresaConveniada?: string[]; // convênio/secretaria de vínculo (só populado no formato "Cartões e contas"/"SaldoCartao")
 }
 
 /**
@@ -33,6 +35,7 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
 
   if (filters.clientIds?.length) where.id = { in: filters.clientIds };
   if (filters.cidade?.length) where.cidade = { in: filters.cidade };
+  if (filters.empresaConveniada?.length) where.empresaConveniada = { in: filters.empresaConveniada };
   if (filters.faixaUso?.length) where.faixaUso = { in: filters.faixaUso as any };
   if (filters.statusConta?.length) where.statusConta = { in: filters.statusConta as any };
   if (filters.autorizacaoComunicacao !== undefined) {

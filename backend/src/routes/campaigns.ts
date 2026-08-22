@@ -44,6 +44,10 @@ const adHocFiltersSchema = z
     usadoNosUltimosDias: z.number().optional(),
     tags: z.array(z.string()).optional(),
     search: z.string().optional(),
+    empresaConveniada: z.array(z.string()).optional(),
+    // Lista explícita de clientes (ex.: "aniversariantes do mês" montado no Dashboard) — o
+    // wizard usa isso como um público alternativo a segmento salvo/filtros manuais.
+    clientIds: z.array(z.string()).optional(),
   })
   .passthrough(); // aceita também o formato de grupo AND/OR (Fase 2), validado no builder de segmentos
 

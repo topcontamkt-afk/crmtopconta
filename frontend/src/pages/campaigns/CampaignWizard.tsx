@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../../api/client";
 
 const STEPS = ["Nome/objetivo", "Público", "Canal & mensagem", "Agenda & throttling", "Confirmação"];
@@ -18,9 +18,21 @@ interface Segment {
   lastCount: number | null;
 }
 
+interface PresetAudienceState {
+  presetClientIds?: string[];
+  presetLabel?: string;
+}
+
 export default function CampaignWizard() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [step, setStep] = useState(0);
+
+  // Público pré-montado vindo de outra tela (ex.: card "Aniversariantes do mês" no Dashboard,
+  // que já sabe exatamente quais clientes quer atingir) — chega via router state, não URL, pra
+  // não precisar serializar uma lista de ids na querystring.
+  const preset = (location.state as PresetAudienceState | null) || null;
+  const [usePreset, setUsePreset] = useState(!!preset?.presetClientIds?.length);
 
   const [name, setName] = useState("");
   const [objective, setObjective] = useState("");
@@ -31,7 +43,9 @@ export default function CampaignWizard() {
   const [statusConta, setStatusConta] = useState("");
   const [semUsoDiasMin, setSemUsoDiasMin] = useState("");
   const [usadoNosUltimosDias, setUsadoNosUltimosDias] = useState("");
-  const [audiencePreview, setAudiencePreview] = useState<number | null>(null);
+  const [audiencePreview, setAudiencePreview] = useState<number | null>(
+    usePreset ? preset!.presetClientIds!.length : null
+  );
   const [channel, setChannel] = useState<"WHATSAPP" | "SMS">("WHATSAPP");
 
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -61,6 +75,9 @@ export default function CampaignWizard() {
   }, []);
 
   function adHocFilters() {
+    if (usePreset && preset?.presetClientIds) {
+      return { clientIds: preset.presetClientIds };
+    }
     return {
       cidade: cidade ? [cidade] : undefined,
       faixaUso: faixaUso ? [faixaUso] : undefined,
@@ -71,6 +88,12 @@ export default function CampaignWizard() {
   }
 
   async function previewAudience() {
+    // A lista pré-selecionada já vem com a contagem conhecida (é a própria lista de ids) — não
+    // precisa recontar no servidor.
+    if (usePreset) {
+      setAudiencePreview(preset?.presetClientIds?.length ?? 0);
+      return;
+    }
     const resp = await api<{ count: number }>("/segments/preview", { method: "POST", body: adHocFilters() });
     setAudiencePreview(resp.count);
   }
@@ -79,6 +102,11 @@ export default function CampaignWizard() {
     setSegmentId(id);
     const seg = segments.find((s) => s.id === id);
     setAudiencePreview(seg?.lastCount ?? null);
+  }
+
+  function voltarParaPublicoManual() {
+    setUsePreset(false);
+    setAudiencePreview(null);
   }
 
   const effectiveMessage = templateId ? templates.find((t) => t.id === templateId)?.body || "" : messageTemplate;
@@ -93,8 +121,8 @@ export default function CampaignWizard() {
           name,
           objective,
           channel,
-          segmentId: segmentId || undefined,
-          adHocFilters: segmentId ? undefined : adHocFilters(),
+          segmentId: !usePreset && segmentId ? segmentId : undefined,
+          adHocFilters: !usePreset && segmentId ? undefined : adHocFilters(),
           templateId: templateId || undefined,
           messageTemplate: templateId ? undefined : messageTemplate,
           messageTemplateB: abEnabled ? messageTemplateB : undefined,
@@ -141,23 +169,47 @@ export default function CampaignWizard() {
 
         {step === 1 && (
           <div>
-            <div className="form-row">
-              <label>Segmento salvo (opcional)</label>
-              <select value={segmentId} onChange={(e) => selectSegment(e.target.value)}>
-                <option value="">— Montar público na hora (abaixo) —</option>
-                {segments.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name} {s.lastCount !== null ? `(${s.lastCount} clientes)` : ""}
-                  </option>
-                ))}
-              </select>
-              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                Segmentos combináveis (recorrentes, sem uso, inativos, tags como "comércio" etc.) são
-                criados na tela "Segmentos" e reaproveitados aqui.
-              </span>
-            </div>
+            {preset?.presetClientIds?.length ? (
+              <div className="card" style={{ background: "var(--surface-alt)", marginBottom: 14 }}>
+                {usePreset ? (
+                  <>
+                    <span className="badge ok">Lista pré-selecionada</span>
+                    <p style={{ marginBottom: 8 }}>
+                      <strong>{preset.presetLabel || "Público pré-selecionado"}</strong> —{" "}
+                      <strong>{preset.presetClientIds.length}</strong> clientes específicos, já escolhidos
+                      na tela de origem.
+                    </p>
+                    <button type="button" className="btn secondary" onClick={voltarParaPublicoManual}>
+                      Usar outro público em vez desse
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" className="btn secondary" onClick={() => { setUsePreset(true); setSegmentId(""); setAudiencePreview(preset.presetClientIds!.length); }}>
+                    Voltar a usar a lista pré-selecionada ({preset.presetLabel}, {preset.presetClientIds.length} clientes)
+                  </button>
+                )}
+              </div>
+            ) : null}
 
-            {!segmentId && (
+            {!usePreset && (
+              <div className="form-row">
+                <label>Segmento salvo (opcional)</label>
+                <select value={segmentId} onChange={(e) => selectSegment(e.target.value)}>
+                  <option value="">— Montar público na hora (abaixo) —</option>
+                  {segments.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} {s.lastCount !== null ? `(${s.lastCount} clientes)` : ""}
+                    </option>
+                  ))}
+                </select>
+                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                  Segmentos combináveis (recorrentes, sem uso, inativos, tags como "comércio" etc.) são
+                  criados na tela "Segmentos" e reaproveitados aqui.
+                </span>
+              </div>
+            )}
+
+            {!usePreset && !segmentId && (
               <>
                 <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                   <input placeholder="Cidade" value={cidade} onChange={(e) => setCidade(e.target.value)} />
@@ -295,7 +347,11 @@ export default function CampaignWizard() {
             <p><strong>Canal:</strong> {channel}</p>
             <p>
               <strong>Público:</strong>{" "}
-              {segmentId ? segments.find((s) => s.id === segmentId)?.name ?? "segmento salvo" : "filtros montados na hora"}
+              {usePreset
+                ? preset?.presetLabel || "lista pré-selecionada"
+                : segmentId
+                ? segments.find((s) => s.id === segmentId)?.name ?? "segmento salvo"
+                : "filtros montados na hora"}
               {" — "}
               <strong>{audiencePreview ?? "não calculado"}</strong> clientes estimados
             </p>

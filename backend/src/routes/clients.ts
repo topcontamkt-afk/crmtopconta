@@ -22,6 +22,7 @@ router.get("/", async (req, res) => {
       req.query.autorizacao !== undefined ? req.query.autorizacao === "true" : undefined,
     semUsoDiasMin: req.query.semUsoDiasMin ? Number(req.query.semUsoDiasMin) : undefined,
     search: req.query.search ? String(req.query.search) : undefined,
+    empresaConveniada: req.query.empresaConveniada ? String(req.query.empresaConveniada).split(",") : undefined,
   });
 
   const [items, total] = await Promise.all([
@@ -48,6 +49,7 @@ router.get("/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (re
     faixaUso: req.query.faixaUso ? String(req.query.faixaUso).split(",") : undefined,
     statusConta: req.query.statusConta ? String(req.query.statusConta).split(",") : undefined,
     search: req.query.search ? String(req.query.search) : undefined,
+    empresaConveniada: req.query.empresaConveniada ? String(req.query.empresaConveniada).split(",") : undefined,
   });
 
   const clients = await prisma.client.findMany({ where, orderBy: { nome: "asc" }, take: 50000 });

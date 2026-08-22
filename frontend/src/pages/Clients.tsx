@@ -21,6 +21,7 @@ export default function Clients() {
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState(searchParams.get("search") || "");
   const [cidade, setCidade] = useState(searchParams.get("cidade") || "");
+  const [empresaConveniada, setEmpresaConveniada] = useState(searchParams.get("empresaConveniada") || "");
   const [faixaUso, setFaixaUso] = useState(searchParams.get("faixaUso") || "");
   const [statusConta, setStatusConta] = useState(searchParams.get("statusConta") || "");
   const [page, setPage] = useState(1);
@@ -29,6 +30,7 @@ export default function Clients() {
     const params = new URLSearchParams();
     if (search) params.set("search", search);
     if (cidade) params.set("cidade", cidade);
+    if (empresaConveniada) params.set("empresaConveniada", empresaConveniada);
     if (faixaUso) params.set("faixaUso", faixaUso);
     if (statusConta) params.set("statusConta", statusConta);
     params.set("page", String(page));
@@ -49,6 +51,7 @@ export default function Clients() {
       <div className="card" style={{ marginBottom: 16, display: "flex", gap: 8 }}>
         <input placeholder="Buscar por nome/telefone" value={search} onChange={(e) => setSearch(e.target.value)} />
         <input placeholder="Cidade" value={cidade} onChange={(e) => setCidade(e.target.value)} />
+        <input placeholder="Secretaria/convênio" value={empresaConveniada} onChange={(e) => setEmpresaConveniada(e.target.value)} />
         <select value={faixaUso} onChange={(e) => setFaixaUso(e.target.value)}>
           <option value="">Todas as faixas</option>
           <option value="NAO_UTILIZOU">Não utilizou</option>
@@ -74,6 +77,7 @@ export default function Clients() {
             const params = new URLSearchParams();
             if (search) params.set("search", search);
             if (cidade) params.set("cidade", cidade);
+            if (empresaConveniada) params.set("empresaConveniada", empresaConveniada);
             if (faixaUso) params.set("faixaUso", faixaUso);
             if (statusConta) params.set("statusConta", statusConta);
             downloadFile(`/clients/export.csv?${params.toString()}`, "clientes.csv");

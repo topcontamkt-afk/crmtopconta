@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   Area,
   AreaChart,
@@ -12,7 +12,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Wallet, TrendingUp, PiggyBank, Users, RefreshCw } from "lucide-react";
+import { Wallet, TrendingUp, PiggyBank, Users, RefreshCw, Cake, Megaphone } from "lucide-react";
 import { api } from "../api/client";
 
 interface Summary {
@@ -22,6 +22,7 @@ interface Summary {
   inativos: number;
   porFaixa: { faixa: string; label: string; count: number }[];
   ranking_cidades: { cidade: string; count: number; ativos: number; valorUtilizado: number }[];
+  ranking_secretarias: { empresaConveniada: string; count: number; ativos: number; valorUtilizado: number }[];
   limiteTotalLiberado: number;
   valorUtilizadoTotal: number;
   saldoDisponivelTotal: number;
@@ -42,6 +43,21 @@ interface Encerramentos {
   taxaMesAtual: number;
   meses: { mes: string; label: string; encerrados: number; percent: number }[];
   motivos: { motivo: string; count: number }[];
+}
+
+interface Engajamento {
+  niveis: { nivel: string; label: string; count: number }[];
+  aniversariantes: {
+    mesLabel: string;
+    total: number;
+    itens: { id: string; nome: string; telefone: string; cidade: string | null; dia: number }[];
+  };
+}
+
+interface Perfil {
+  faixaEtaria: { faixa: string; count: number }[];
+  porSexo: { sexo: string; count: number }[];
+  faixaRenda: { faixa: string; count: number }[];
 }
 
 const currency = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
@@ -67,9 +83,12 @@ const FAIXA_ORDER = [
 ];
 
 export default function Dashboard() {
+  const navigate = useNavigate();
   const [summary, setSummary] = useState<Summary | null>(null);
   const [usoMensal, setUsoMensal] = useState<UsoMensal | null>(null);
   const [encerramentos, setEncerramentos] = useState<Encerramentos | null>(null);
+  const [engajamento, setEngajamento] = useState<Engajamento | null>(null);
+  const [perfil, setPerfil] = useState<Perfil | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -79,14 +98,28 @@ export default function Dashboard() {
       api<Summary>("/dashboard/summary"),
       api<UsoMensal>("/dashboard/uso-mensal"),
       api<Encerramentos>("/dashboard/encerramentos"),
+      api<Engajamento>("/dashboard/engajamento"),
+      api<Perfil>("/dashboard/perfil"),
     ])
-      .then(([s, u, e]) => {
+      .then(([s, u, e, en, p]) => {
         setSummary(s);
         setUsoMensal(u);
         setEncerramentos(e);
+        setEngajamento(en);
+        setPerfil(p);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
+  }
+
+  function criarCampanhaAniversariantes() {
+    if (!engajamento) return;
+    navigate("/campaigns/new", {
+      state: {
+        presetClientIds: engajamento.aniversariantes.itens.map((i) => i.id),
+        presetLabel: `Aniversariantes de ${engajamento.aniversariantes.mesLabel}`,
+      },
+    });
   }
 
   useEffect(() => {
@@ -97,7 +130,7 @@ export default function Dashboard() {
   }, []);
 
   if (error) return <div className="error-text">{error}</div>;
-  if (!summary || !usoMensal || !encerramentos) return <div>Carregando...</div>;
+  if (!summary || !usoMensal || !encerramentos || !engajamento || !perfil) return <div>Carregando...</div>;
 
   const mesAtualLabel = usoMensal.meses[usoMensal.meses.length - 1]?.label ?? "";
   const temDadosEncerramento = encerramentos.meses.some((m) => m.encerrados > 0);
@@ -356,7 +389,136 @@ export default function Dashboard() {
         )}
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+      <div className="section-title">Engajamento da base</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: 16, marginBottom: 16 }}>
+        <div className="card chart-card">
+          <h3 style={{ marginBottom: 2 }}>Níveis de engajamento de uso do recurso</h3>
+          <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2, marginBottom: 12 }}>
+            Cruza status da conta com % de uso do limite — quanto mais alto o nível, mais a base
+            está de fato usando o benefício.
+          </p>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart
+              data={engajamento.niveis}
+              layout="vertical"
+              margin={{ top: 4, right: 20, left: 8, bottom: 4 }}
+              barCategoryGap={10}
+            >
+              <CartesianGrid stroke={CHART_GRID} horizontal={false} />
+              <XAxis type="number" tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={{ stroke: CHART_GRID }} tickLine={false} allowDecimals={false} />
+              <YAxis type="category" dataKey="label" tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={false} tickLine={false} width={140} />
+              <Tooltip content={<ChartTooltip countLabel="clientes" />} />
+              <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={22} animationDuration={700} animationEasing="ease-out">
+                {engajamento.niveis.map((n) => (
+                  <Cell key={n.nivel} fill={n.nivel === "bloqueado" ? CHART_DANGER : CHART_COLOR} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="card">
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+            <Cake size={18} color="var(--accent)" />
+            <h3 style={{ margin: 0 }}>Aniversariantes de {engajamento.aniversariantes.mesLabel}</h3>
+          </div>
+          <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2, marginBottom: 12 }}>
+            <strong style={{ color: "var(--text)" }}>{engajamento.aniversariantes.total}</strong> clientes fazem
+            aniversário este mês — boa oportunidade de campanha de relacionamento.
+          </p>
+          {engajamento.aniversariantes.itens.length === 0 ? (
+            <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
+              Sem data de nascimento cadastrada na base ainda (só disponível para clientes
+              importados no formato "SaldoCartao").
+            </p>
+          ) : (
+            <>
+              <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 12 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Dia</th>
+                      <th>Nome</th>
+                      <th>Cidade</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {engajamento.aniversariantes.itens.map((a) => (
+                      <tr key={a.id}>
+                        <td>{a.dia}</td>
+                        <td>
+                          <Link to={`/clients/${a.id}`}>{a.nome}</Link>
+                        </td>
+                        <td>{a.cidade || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <button className="btn" onClick={criarCampanhaAniversariantes} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <Megaphone size={14} />
+                Criar campanha para aniversariantes
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="section-title">Perfil demográfico e financeiro</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
+        <div className="card chart-card">
+          <h3>Faixa etária</h3>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={perfil.faixaEtaria} margin={{ top: 4, right: 12, left: -18, bottom: 4 }}>
+              <CartesianGrid stroke={CHART_GRID} vertical={false} />
+              <XAxis dataKey="faixa" tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={{ stroke: CHART_GRID }} tickLine={false} />
+              <YAxis tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={false} tickLine={false} width={36} allowDecimals={false} />
+              <Tooltip content={<ChartTooltip countLabel="clientes" />} />
+              <Bar dataKey="count" radius={[4, 4, 0, 0]} maxBarSize={34} fill={CHART_COLOR} animationDuration={700} animationEasing="ease-out" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="card">
+          <h3 style={{ marginBottom: 12 }}>Sexo</h3>
+          {perfil.porSexo.length === 0 ? (
+            <p style={{ color: "var(--text-muted)", fontSize: 13 }}>Sem dado cadastrado ainda.</p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {perfil.porSexo.map((s) => {
+                const totalSexo = perfil.porSexo.reduce((acc, x) => acc + x.count, 0);
+                const pct = totalSexo ? (s.count / totalSexo) * 100 : 0;
+                return (
+                  <div key={s.sexo}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+                      <span>{s.sexo}</span>
+                      <span style={{ color: "var(--text-muted)" }}>{s.count} ({percentFmt(pct)})</span>
+                    </div>
+                    <div className="progress-track" style={{ height: 8 }}>
+                      <div className="progress-fill" style={{ width: `${pct}%`, background: "var(--primary)" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="card chart-card">
+          <h3>Perfil de renda</h3>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={perfil.faixaRenda} layout="vertical" margin={{ top: 4, right: 20, left: 8, bottom: 4 }} barCategoryGap={8}>
+              <CartesianGrid stroke={CHART_GRID} horizontal={false} />
+              <XAxis type="number" tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={{ stroke: CHART_GRID }} tickLine={false} allowDecimals={false} />
+              <YAxis type="category" dataKey="faixa" tick={{ fill: CHART_MUTED, fontSize: 11 }} axisLine={false} tickLine={false} width={110} />
+              <Tooltip content={<ChartTooltip countLabel="clientes" />} />
+              <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={18} fill={CHART_COLOR} animationDuration={700} animationEasing="ease-out" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 }}>
         <div className="card chart-card">
           <h3>Clientes por faixa de utilização</h3>
           <ResponsiveContainer width="100%" height={280}>
@@ -412,6 +574,48 @@ export default function Dashboard() {
                       <td>{c.ativos}</td>
                       <td>{c.count ? percentFmt((c.ativos / c.count) * 100) : "—"}</td>
                       <td>{currency.format(c.valorUtilizado)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="card chart-card">
+          <h3 style={{ marginBottom: 2 }}>Ranking de secretarias/convênios</h3>
+          <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2, marginBottom: 10 }}>
+            Convênios (ex.: secretarias de folha de pagamento) que mais usam o app.
+          </p>
+          {summary.ranking_secretarias.length === 0 ? (
+            <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
+              Sem dado de convênio/secretaria ainda (só disponível para clientes importados no
+              formato "Cartões e contas"/"SaldoCartao").
+            </p>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Secretaria/convênio</th>
+                    <th>Clientes</th>
+                    <th>Ativos</th>
+                    <th>Taxa</th>
+                    <th>Valor utilizado</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.ranking_secretarias.map((s) => (
+                    <tr key={s.empresaConveniada}>
+                      <td>
+                        <Link to={`/clients?empresaConveniada=${encodeURIComponent(s.empresaConveniada)}`}>
+                          {s.empresaConveniada}
+                        </Link>
+                      </td>
+                      <td>{s.count}</td>
+                      <td>{s.ativos}</td>
+                      <td>{s.count ? percentFmt((s.ativos / s.count) * 100) : "—"}</td>
+                      <td>{currency.format(s.valorUtilizado)}</td>
                     </tr>
                   ))}
                 </tbody>
