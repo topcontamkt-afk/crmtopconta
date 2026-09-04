@@ -70,9 +70,11 @@ código (env var em produção) antes de poder ser verificado de ponta a ponta.
     `runWithTenantContextAsync` por-tenant dentro de cada job funcionam.
   - Migration de policies aplicada ao Supabase de produção (usuário, via SQL Editor) —
     confirmada via `get_advisors(type=security)`, 0 lints (antes: 14 `rls_enabled_no_policy`).
-  - ⏳ **Pendente**: troca da `DATABASE_URL` de produção no Vercel para `app_runtime`
-    (+ `DATABASE_URL_ADMIN` novo) — o passo que efetivamente ativa a aplicação do RLS
-    em produção. Requer aprovação explícita separada antes de prosseguir.
+  - ✅ **Ativado em produção (2026-09-04)**: `DATABASE_URL` trocada para `app_runtime`,
+    `DATABASE_URL_ADMIN` adicionada, deploy do código correspondente (`d577392`)
+    confirmado `READY` sem erros de runtime. Login real na aplicação em produção
+    confirmado pelo usuário — RLS está de fato aplicado no tráfego real agora, não só
+    testado localmente.
 
 ## #7 — Erro cru vazando
 - Manual (pós-deploy): forçar uma falha de import (ex.: `GOOGLE_SERVICE_ACCOUNT_JSON`

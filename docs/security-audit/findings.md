@@ -129,12 +129,20 @@ de cron/scheduler, e um teste explícito de isolamento — um segundo tenant cri
 teste viu 0 clientes via a API HTTP, enquanto o tenant original continuou vendo os seus
 normalmente. Suíte completa (98 testes) e `tsc --noEmit` passando.
 
-**Pendente, decisão explícita do usuário**: trocar a `DATABASE_URL` de produção no Vercel para
-`app_runtime` (+ nova `DATABASE_URL_ADMIN` apontando para o role privilegiado atual) — só esse
-passo ativa a aplicação real do RLS em produção; até lá, a app continua rodando 100% no role
-privilegiado de sempre, sem risco. Auditoria de IDOR nas rotas de update/delete por id (item
-antes listado como decorrência deste roadmap) já foi feita separadamente nesta mesma rodada —
-ver achado #12 abaixo — sem necessidade de esperar a ativação do RLS real.
+**Status final: ativo em produção (2026-09-04).** `DATABASE_URL` de produção trocada para
+`app_runtime` e `DATABASE_URL_ADMIN` adicionada (role privilegiado, só para os jobs
+cross-tenant do scheduler) — deploy do código correspondente confirmado `READY`, zero erros de
+runtime pós-deploy, dados intactos (1 tenant, 1 user, 370 clients, inalterados), e login real
+feito pelo usuário na aplicação em produção confirmando que o caminho restrito por RLS
+(`app_runtime`) funciona ponta a ponta para tráfego real. RLS deixou de ser decorativo — é a
+segunda camada de defesa em produção agora, não só em código.
+
+Nota operacional: a senha do role `postgres` (privilegiado) foi trocada pelo usuário no meio
+desta rodada (rotação de uma credencial fraca encontrada por acaso) — `DATABASE_URL_ADMIN` e
+`DIRECT_URL` já foram atualizadas com o valor novo antes do deploy, sem incidente.
+
+Auditoria de IDOR nas rotas de update/delete por id (item antes listado como decorrência deste
+roadmap) foi feita separadamente nesta mesma rodada — ver achado #12 abaixo.
 
 ### 7. Vazamento de erro cru para o cliente HTTP
 **Status: Corrigido**

@@ -110,12 +110,18 @@ logo em seguida): role `app_runtime` (`LOGIN`, `NOBYPASSRLS`) + policy `tenant_i
 auditoria (ver seção Supabase acima) zeraram. Role `postgres` (usado por `DATABASE_URL`/
 `DIRECT_URL` hoje) continua com `rolbypassrls=true`, inalterado.
 
-**Estado atual: aditivo, ainda não ativo.** A aplicação em produção continua rodando 100% no
-role privilegiado de sempre — só a *migration* foi aplicada, a `DATABASE_URL` de runtime no
-Vercel ainda não foi trocada para `app_runtime`. RLS só passa a ser realmente aplicado depois
-desse segundo passo (troca de env var + `DATABASE_URL_ADMIN` novo apontando para o role
-privilegiado), feito somente com aprovação explícita separada — mesmo padrão já usado nesta
-auditoria para os secrets do Vercel.
+**Estado final: ativo em produção (2026-09-04).** `DATABASE_URL` trocada para `app_runtime` e
+`DATABASE_URL_ADMIN` (role privilegiado, só para os jobs cross-tenant do scheduler) adicionada
+no Vercel do backend, com aprovação explícita do usuário passo a passo. Deploy `d577392`
+(commit com todo o código RLS-aware) confirmado `READY`, sem erros de runtime pós-deploy, dados
+intactos (1 tenant, 1 user, 370 clients), e login real na aplicação em produção confirmado pelo
+usuário — prova de ponta a ponta que o role restrito funciona para tráfego real.
+
+Durante o processo, o usuário rotacionou a senha do role `postgres` (privilegiado) — era uma
+senha fraca/padrão descoberta por acaso ao pedir a connection string para montar
+`DATABASE_URL_ADMIN`. Isso invalidou temporariamente o `DATABASE_URL`/`DIRECT_URL` então em uso
+(mesma senha antiga) — corrigido no mesmo lote de mudanças, sem incidente registrado
+(`get_runtime_errors` limpo durante toda a janela da troca).
 
 Implementação completa no código (`backend/src/config/tenantGuard.ts`/`db.ts`,
 `middleware/auth.ts`, e o wrapping por-tenant em `services/scheduler.ts`/`automationEngine.ts`/
