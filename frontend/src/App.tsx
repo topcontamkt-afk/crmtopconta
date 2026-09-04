@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -57,7 +57,16 @@ function RequireAuth({ children }: { children: JSX.Element }) {
  */
 function RoleGate({ allowedRoles, children }: { allowedRoles: AuthUser["role"][]; children: JSX.Element }) {
   const { user } = useAuth();
-  if (!user || !allowedRoles.includes(user.role)) return <Navigate to="/" replace />;
+  if (!user || !allowedRoles.includes(user.role)) {
+    // Aviso lido pelo Layout logo após o redirect — sessionStorage porque precisa sobreviver à
+    // navegação, mas só até a próxima vez que o dashboard for exibido (não é preciso persistir).
+    try {
+      sessionStorage.setItem("accessDenied", "1");
+    } catch {
+      // Modo privado/storage indisponível: só perde o aviso, o redirect continua funcionando.
+    }
+    return <Navigate to="/" replace />;
+  }
   return children;
 }
 
@@ -65,6 +74,18 @@ function Layout({ children }: { children: JSX.Element }) {
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
+  const [accessDenied, setAccessDenied] = useState(false);
+
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem("accessDenied")) {
+        sessionStorage.removeItem("accessDenied");
+        setAccessDenied(true);
+      }
+    } catch {
+      // ignore — mesmo caso de storage indisponível do RoleGate acima.
+    }
+  }, [location.pathname]);
 
   const groups: NavGroupData[] = [
     {
@@ -140,6 +161,24 @@ function Layout({ children }: { children: JSX.Element }) {
         />
       </div>
       <div className="main">
+        {accessDenied && (
+          <div
+            style={{
+              background: "#fef2f2",
+              color: "#991b1b",
+              padding: "10px 16px",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              fontSize: 14,
+            }}
+          >
+            <span>Você não tem permissão para acessar essa página.</span>
+            <button className="btn secondary" onClick={() => setAccessDenied(false)}>
+              Fechar
+            </button>
+          </div>
+        )}
         <div className="topbar">
           <div />
           <div style={{ display: "flex", alignItems: "center" }}>

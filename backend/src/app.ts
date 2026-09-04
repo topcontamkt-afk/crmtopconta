@@ -43,7 +43,9 @@ app.use(
       if (!origin || env.ALLOWED_ORIGINS.includes(origin)) {
         return callback(null, true);
       }
-      return callback(new Error("Origem não permitida pelo CORS"));
+      const err: Error & { status?: number } = new Error("Origem não permitida pelo CORS");
+      err.status = 403;
+      return callback(err);
     },
   })
 );
@@ -85,6 +87,11 @@ app.use("/api/cron", cronRoutes);
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  // Rejeição de CORS (ver origin() acima) é esperada, não uma falha do servidor — 403 correto,
+  // sem poluir os logs de erro com algo que não é um bug.
+  if (err?.status === 403) {
+    return res.status(403).json({ error: "Origem não permitida" });
+  }
   console.error(err);
   res.status(500).json({ error: "Erro interno do servidor" });
 });

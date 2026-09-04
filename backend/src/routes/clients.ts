@@ -77,10 +77,14 @@ router.get("/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (re
 });
 
 function csvEscape(value: string): string {
-  if (value.includes(",") || value.includes('"') || value.includes("\n")) {
-    return `"${value.replace(/"/g, '""')}"`;
+  // Neutraliza CSV/formula injection (OWASP): um valor vindo de import (ex.: nome de cliente)
+  // começando com =/+/-/@ vira fórmula executável se o CSV for aberto no Excel/Sheets/LibreOffice
+  // — prefixa com aspas simples antes do escaping normal para forçar interpretação como texto.
+  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  if (safe.includes(",") || safe.includes('"') || safe.includes("\n")) {
+    return `"${safe.replace(/"/g, '""')}"`;
   }
-  return value;
+  return safe;
 }
 
 router.get("/:id", async (req, res) => {
