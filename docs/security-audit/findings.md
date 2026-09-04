@@ -224,6 +224,111 @@ vem do JWT/token assinado, nunca de parâmetro de URL — ex.: `auth.ts`, `tenan
 são um lookup de webhook autenticado por assinatura HMAC, não por sessão
 (`integrations.ts`, `applyStatusUpdate`). Nenhuma correção de código necessária.
 
+## Rodada GERALZONA (`perguntas.md`, 2026-09-04)
+
+Segunda rodada de auditoria, pedida pelo usuário depois da finalização do RLS, cobrindo
+3 perguntas amplas (exposição do banco Supabase, segurança do deploy Vercel, código
+front+back) via 3 agentes de pesquisa paralelos com acesso a MCP (Supabase/Vercel) e
+pesquisa externa. Achados novos abaixo; o que já estava corrigido foi re-verificado com
+prova fresca (98/98 testes, `curl` real contra produção para headers/CORS, build limpo)
+sem repetir aqui o que os achados #1-#12 já documentam.
+
+### 13. Supabase Data API (PostgREST) habilitado, grants padrão abertos em `anon`/`authenticated`
+**Status: Ação pendente (dashboard, fora do alcance de MCP/CLI)**
+
+A app nunca usa `supabase-js`/PostgREST/GraphQL (confirmado por `grep`, zero ocorrências
+em `backend/src`+`frontend/src`) — mas o Data API do projeto Supabase está ligado, e as
+14 tabelas têm o grant padrão do Supabase (`SELECT/INSERT/UPDATE/DELETE` para `anon` e
+`authenticated`) nunca revogado. Hoje isso é bloqueado pelo RLS (prova ao vivo: `curl`
+contra `https://wgpoxmbpkgrcmfxgkdss.supabase.co/rest/v1/Client` com a anon key pública
+devolveu `200 []`, não dados) — mas é o mesmo padrão estrutural do **CVE-2025-48757**
+(CVSS 9.3, mai/2025, 303 endpoints em 170 apps Supabase/Lovable expostos): basta uma
+migration futura criar uma tabela sem `ENABLE ROW LEVEL SECURITY` para ela ficar
+instantaneamente legível/gravável por qualquer um com a anon key pública.
+
+**Ação recomendada (decisão do usuário via grill-me: desligar completamente)**:
+Dashboard do Supabase → Project Settings → Data API → Disable Data API. Não há
+endpoint de Management API nem tool MCP para isso — confirmado via
+`mcp__supabase__search_docs`, é um toggle de projeto, não uma configuração SQL/Postgres.
+Alternativa mais granular (se algum dia o Data API precisar ficar ligado):
+`REVOKE`/`ALTER DEFAULT PRIVILEGES` de `anon`/`authenticated` nas 14 tabelas — documentada
+na fonte oficial, não aplicada aqui porque a decisão foi desligar de vez.
+
+Fonte: [Supabase Docs — Securing your API](https://supabase.com/docs/guides/api/securing-your-api),
+[CVE-2025-48757](https://www.brinztech.com/breach-alerts/brinztech-alert-critical-row-level-security-rls-vulnerability-cve-2025-48757-exposed-lovable-supabase-applications).
+
+### 14. Integração Vercel↔Supabase órfã expondo `SUPABASE_SERVICE_ROLE_KEY` (bypassa RLS) em produção
+**Status: Corrigido**
+
+`vercel env ls production` revelou 16 env vars (`POSTGRES_*`/`SUPABASE_*`/
+`NEXT_PUBLIC_SUPABASE_*`) injetadas automaticamente por uma integração Vercel
+Marketplace↔Supabase conectada em algum momento (todas "14d ago"), nunca removida e
+nunca referenciadas em nenhum lugar do código (`grep` confirmou zero uso). Entre elas,
+`SUPABASE_SERVICE_ROLE_KEY` bypassa RLS por completo via PostgREST — presente sem
+necessidade nenhuma, é superfície de ataque grátis para quem comprometer o
+dashboard/CLI da conta Vercel.
+
+Corrigido: as 16 variáveis removidas de produção via `vercel env rm` nesta sessão.
+Nota da própria CLI, registrada aqui por transparência: remover a variável do Vercel
+não revoga a credencial na origem — se quiser fechar 100% (inclusive contra alguém que
+tenha copiado o valor antes desta remoção), rotacionar a `service_role key` e/ou o
+JWT secret do projeto no dashboard do Supabase é o passo complementar, não aplicado
+aqui (decisão do usuário, não solicitada nesta rodada).
+
+### 15. Ambiente Preview sem env vars de banco (crash-loop silencioso) + sem proteção, compartilhando banco real
+**Status: Corrigido**
+
+Dois problemas encontrados juntos:
+
+- **Preview estava com zero de `DATABASE_URL`/`DATABASE_URL_ADMIN`/`DIRECT_URL`**
+  configuradas (não só senha antiga, como o snapshot anterior registrava — as 3 vars
+  simplesmente não existiam para o ambiente Preview). Como `config/env.ts` exige as 3
+  no boot (zod), todo deploy de Preview desde o merge do código RLS-aware
+  provavelmente falhava ao subir. Não foi possível confirmar retroativamente por
+  quanto tempo — o plano Hobby da Vercel só retém logs brutos por 1 hora
+  (`get_runtime_logs`), e não há alerta configurado para crash de deploy.
+- **Preview aponta para o mesmo banco Supabase de produção** (mesmas 370 linhas de
+  clientes reais), sem nenhuma Deployment Protection — o repositório é público no
+  GitHub, então qualquer PR/branch gera uma URL de Preview publicamente acessível.
+
+Corrigido: as 3 env vars adicionadas ao Preview (mesmos roles `app_runtime`/`postgres`
+usados em produção — Preview volta a ter RLS real, não um bypass). Vercel Authentication
+(SSO) ligada no ambiente Preview dos dois projetos (`crmtopconta-backend` e
+`crmtopconta-frontend`) via `mcp__vercel__update_project_deployment_protection` —
+produção permanece sem proteção de deployment, intencionalmente (perímetro é o JWT da
+app). Isolamento de dados (banco de teste separado para Preview) foi considerado e
+descartado pelo usuário nesta rodada — custo/complexidade de manter dois bancos em
+sincronia não justificou frente ao ganho de só adicionar Vercel Authentication.
+
+**Limitação aceita**: não há alerta automático de deploy/crash-loop configurado — o
+próximo gap desta natureza só será descoberto manualmente de novo, como este foi.
+
+### 16. CSV export — formula injection
+**Status: Corrigido**
+
+`GET /api/clients/export.csv` (`routes/clients.ts`) escapava vírgula/aspas/quebra de
+linha (RFC 4180) mas não neutralizava um valor começando com `=`/`+`/`-`/`@` — um nome
+de cliente plantado via import (ex.: `=HYPERLINK("http://evil","x")`) vira fórmula
+executável ao abrir o CSV no Excel/Sheets/LibreOffice (CWE-1236). Corrigido: `csvEscape()`
+agora prefixa esses valores com `'` antes do escaping normal, forçando interpretação
+como texto — mitigação padrão da OWASP CSV Injection cheat sheet.
+
+### 17. Pacote de hardening menor (defesa em profundidade / UX)
+**Status: Corrigido**
+
+Três achados de baixa severidade, nenhum deles um vazamento ativo:
+
+- **CORS**: rejeição de origem caía no error handler genérico (500) em vez de 403
+  explícito — corrigido em `app.ts` (não vazava nada, só sujava logs/semântica HTTP).
+- **JWT**: `jwt.verify()` sem allow-list explícita de `algorithms` — a lib
+  (`jsonwebtoken@9.0.2`) já rejeita `alg:none` por padrão desde CVE-2015-9235, mas
+  passar `{ algorithms: ["HS256"] }` explicitamente nos dois call sites de
+  `middleware/auth.ts` é defesa em profundidade sem custo.
+- **RoleGate (frontend)**: redirecionava silenciosamente para `/` ao bloquear acesso
+  por papel, sem explicar por quê. Corrigido com um banner dispensável no `Layout`
+  ("Você não tem permissão para acessar essa página"), lido via `sessionStorage` logo
+  após o redirect.
+
 ## Confirmado como correto (nenhuma mudança necessária)
 
 - **Envelope encryption** (`services/crypto.ts`): AES-256-GCM nativo do Node, IV novo
@@ -239,9 +344,10 @@ são um lookup de webhook autenticado por assinatura HMAC, não por sessão
 - **Frontend**: sem `dangerouslySetInnerHTML`/`innerHTML`, sem nenhum segredo em
   `VITE_*`/bundle público (não existem env vars de frontend hoje), 401 limpa sessão e
   redireciona para `/login` corretamente.
-- **Vercel**: sem proteção de deployment (SSO/senha/IP) em nenhum dos dois
-  projetos — esperado, já que o app tem seu próprio perímetro de autenticação (JWT);
-  confirmado que não há rota admin/debug exposta sem `requireAuth`.
+- **Vercel**: produção sem proteção de deployment (SSO/senha/IP) nos dois projetos —
+  esperado, já que o app tem seu próprio perímetro de autenticação (JWT); confirmado
+  que não há rota admin/debug exposta sem `requireAuth`. Preview ganhou Vercel
+  Authentication nesta rodada (achado #15) por compartilhar o banco real.
 - **Runtime em produção**: os dois clusters de erro encontrados nos últimos 7 dias
   (falhas de prepared statement do pooler PgBouncer, timeouts de import) já estavam
   resolvidos por deploys anteriores a esta auditoria (`ea85209` e `82214bf`) — não são

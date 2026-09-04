@@ -13,7 +13,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
     return res.status(401).json({ error: "Token ausente" });
   }
   try {
-    const payload = jwt.verify(header.substring(7), JWT_SECRET) as any;
+    const payload = jwt.verify(header.substring(7), JWT_SECRET, { algorithms: ["HS256"] }) as any;
     // Token intermediário emitido entre "senha correta" e "código 2FA confirmado" — nunca deve
     // ser aceito como autenticação completa em nenhuma rota protegida.
     if (payload.pending2FA) {
@@ -54,7 +54,7 @@ export function signPending2FAToken(userId: string) {
 }
 
 export function verifyPending2FAToken(token: string): string {
-  const payload = jwt.verify(token, JWT_SECRET) as any;
+  const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as any;
   if (!payload.pending2FA || !payload.sub) throw new Error("Token de verificação 2FA inválido");
   return payload.sub as string;
 }
