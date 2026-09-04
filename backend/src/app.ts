@@ -12,6 +12,8 @@ import helmet from "helmet";
 // gera resposta — a requisição fica "pendurada" no cliente até a função serverless estourar o
 // timeout (300s), em vez de retornar um 500 imediato. Precisa ser importado antes das rotas.
 import "express-async-errors";
+// Vercel Speed Insights para monitorar a performance da API
+import { injectSpeedInsights } from "@vercel/speed-insights";
 
 import authRoutes from "./routes/auth";
 import clientRoutes from "./routes/clients";
@@ -34,6 +36,10 @@ import cronRoutes from "./routes/cron";
  * serverless da Vercel (api/index.ts, na raiz do pacote backend).
  */
 const app = express();
+
+// Inicializar Vercel Speed Insights para coleta de métricas de performance
+injectSpeedInsights();
+
 // CORS restrito à allow-list resolvida em config/env.ts (env.ALLOWED_ORIGINS) — nunca reflete
 // qualquer origem por padrão. Requisições sem header Origin (server-to-server, curl, apps
 // mobile) são permitidas, já que não há origem de navegador a validar.
