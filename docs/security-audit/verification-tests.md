@@ -126,6 +126,36 @@ código (env var em produção) antes de poder ser verificado de ponta a ponta.
 - Manual (pós-deploy): confirmar `GET /api/audit-logs/verify-integrity` também em
   produção, com ADMIN/ANALYST real.
 
+## Rodada GERALZONA (`perguntas.md`) — #13 a #17
+
+- ✅ **#13 (Data API/PostgREST)**: `curl` real contra
+  `https://wgpoxmbpkgrcmfxgkdss.supabase.co/rest/v1/Client?select=id&limit=1` com a
+  anon key pública → `200 []` (bloqueado pelo RLS, não pelo grant — confirmado via
+  `pg_policies`/`information_schema.role_table_grants` que o grant padrão de
+  `anon`/`authenticated` está aberto nas 14 tabelas, é só o RLS que protege hoje).
+  `get_advisors(security)` re-confirmado limpo. ⏳ Desligar o Data API no dashboard
+  continua pendente de ação do usuário.
+- ✅ **#14 (env vars órfãs)**: `vercel env ls production` antes → 23 vars (7 usadas
+  pelo código + 16 órfãs incluindo `SUPABASE_SERVICE_ROLE_KEY`); depois de
+  `vercel env rm` nas 16 → confirmado só as 7 vars que o código realmente lê restam.
+- ✅ **#15 (Preview)**: `vercel env ls preview` antes → zero de
+  `DATABASE_URL`/`DATABASE_URL_ADMIN`/`DIRECT_URL`; depois → as 3 setadas (mesmos
+  roles `app_runtime`/`postgres` de produção). `mcp__vercel__get_project_deployment_protection`
+  depois da mudança → `ssoProtection: { enabled: true, deploymentType: "preview" }`
+  nos dois projetos, `passwordProtection`/`trustedIps` inalterados,
+  `production`/`prod_deployment_urls` não afetados.
+- ✅ **#16 (CSV formula injection)**: fix aplicado em `csvEscape()`; suíte completa
+  (98/98) segue verde depois da mudança — cobertura de teste dedicada para este caso
+  específico não foi adicionada nesta rodada (fix pequeno e mecânico, verificado por
+  leitura de código + suíte geral, não por um teste novo).
+- ✅ **#17 (hardening menor)**: `npm test` (backend, 98/98) e `npm run build`
+  (frontend, `tsc -b && vite build` limpo) depois das 3 mudanças (CORS, JWT
+  `algorithms`, RoleGate banner) — nenhuma regressão.
+- Manual (pós-deploy): confirmar com um `curl -H "Origin: https://evil.example"`
+  real que a rejeição de CORS agora devolve 403 (hoje testado só via `curl`
+  pré-mudança, que mostrou o 500 antigo); logar como um papel sem permissão e navegar
+  para `/users`/`/audit` para ver o banner novo.
+
 ## Verificação geral de ambiente (bloqueante para fechar #1 e #3)
 - ✅ `REDENTIALS_ENCRYPTION_KEY` → `CREDENTIALS_ENCRYPTION_KEY` corrigida no Vercel
   do backend (Production + Preview).

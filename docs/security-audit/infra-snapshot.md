@@ -130,6 +130,30 @@ Postgres real nesta sessão: login, CRUD normal, os 6 jobs de cron, e um teste e
 isolamento cross-tenant via HTTP (usuário de um tenant não vê nada do outro). Ver
 `verification-tests.md` para o detalhe completo.
 
+## Rodada GERALZONA — limpeza de env vars e proteção de Preview (2026-09-04)
+
+`vercel env ls production` revelou 16 variáveis (`POSTGRES_*`/`SUPABASE_*`/
+`NEXT_PUBLIC_SUPABASE_*`) injetadas por uma integração Vercel Marketplace↔Supabase
+conectada em algum momento, nunca usadas pelo código (`grep` confirmou zero
+referências) — incluindo `SUPABASE_SERVICE_ROLE_KEY`, que bypassa RLS por completo.
+Removidas via `vercel env rm` (produção). Estado final confirmado — só as 7 vars que
+o código realmente lê permanecem: `DATABASE_URL`, `DATABASE_URL_ADMIN`, `DIRECT_URL`,
+`ALLOWED_ORIGINS`, `CREDENTIALS_ENCRYPTION_KEY`, `CRON_SECRET`, `JWT_SECRET`.
+
+Também nesta rodada: descoberto que o ambiente **Preview estava com zero das 3 env
+vars de banco** (não só senha antiga — as vars não existiam) desde o merge do código
+RLS-aware, provavelmente causando crash-loop silencioso em todo deploy de Preview
+(sem alerta configurado, log bruto do Hobby só retém 1h). Corrigido: as 3 vars
+adicionadas ao Preview com os mesmos roles de produção (`app_runtime`/`postgres`).
+Vercel Authentication (SSO) ligada no ambiente Preview dos dois projetos
+(`crmtopconta-backend`, `crmtopconta-frontend`) via
+`mcp__vercel__update_project_deployment_protection` — produção permanece sem
+proteção de deployment, decisão inalterada (perímetro é o JWT da app).
+
+Ver `findings.md` achados #13-#17 e `verification-tests.md` para a prova completa
+(inclusive do achado #13, Data API do Supabase, ainda pendente de ação manual no
+dashboard).
+
 ## `npm audit` — antes e depois
 
 | Pacote | Antes | Depois |

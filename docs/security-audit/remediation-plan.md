@@ -8,13 +8,18 @@
 | 4 | Sem headers de segurança | `helmet()` | `backend/src/app.ts`, `backend/package.json` |
 | 5 | Sem rate limit | `middleware/rateLimit.ts` novo — 3 limiters (`express-rate-limit`) | `backend/src/middleware/rateLimit.ts`, `backend/src/routes/auth.ts`, `backend/src/routes/integrations.ts`, `backend/src/routes/imports.ts`, `backend/package.json` |
 | 6 | RLS decorativo | `config/tenantGuard.ts` novo — extensão Prisma, hard-throw sem `tenantId` | `backend/src/config/tenantGuard.ts`, `backend/src/config/db.ts`, + ajuste de tipo (`AppPrismaClient`) em todos os services que recebem `PrismaClient` como parâmetro |
-| 6b | (roadmap) RLS real | Não implementado — registrado como próximo passo | `backend/prisma/schema.prisma` (futura migration de policies), `backend/src/config/db.ts` (troca de role de conexão) |
+| 6b | RLS real no Postgres | **Implementado e ativo em produção** (2026-09-04) — role `app_runtime` (NOBYPASSRLS) + policies em 14 tabelas, `tenantGuard.ts` envolve toda operação numa transaction com `set_config('app.tenant_id', ...)` | `backend/prisma/schema.prisma` (migration de policies via `apply_migration`), `backend/src/config/tenantGuard.ts`, `backend/src/config/db.ts`, `backend/src/middleware/auth.ts` |
 | 7 | Erro cru vazando | Mensagem genérica na resposta HTTP, log completo só no servidor | `backend/src/routes/imports.ts`, `backend/src/routes/tenant.ts` |
 | 8 | PII em AuditLog sobrevive anonimização | (A) `logAudit(...)` redigido em 4 call sites; (B) cascata de redação no sweep de retenção | `backend/src/routes/users.ts`, `backend/src/routes/automations.ts`, `backend/src/routes/campaigns.ts`, `backend/src/routes/clients.ts`, `backend/src/services/retention.ts` |
 | 9 | Deps moderadas | Bump de major version + verificação de breaking changes | `backend/package.json` (`googleapis`, `node-cron`), `frontend/package.json` (`react-router-dom`) — ver `infra-snapshot.md` para o resultado final |
 | 10 | `/users` e `/audit` sem gate no front | Componente `RoleGate` espelhando os `requireRole` do backend | `frontend/src/App.tsx` |
 | 11 | AuditLog não tamper-evident | Hash-chain (SHA-256, `prevHash`/`hash` por linha, cadeia global) + endpoint de verificação | `backend/src/services/auditIntegrity.ts` (novo), `backend/src/middleware/audit.ts`, `backend/src/routes/audit.ts`, `backend/prisma/schema.prisma` |
 | 12 | IDOR em rotas por id (`findUnique`/`update`/`delete`/`upsert`) | Auditoria rota-por-rota das 9 arquivos afetados — sem achados, verify-then-act já consistente | `backend/src/routes/{clients,notifications,users,segments,auth,templates,integrations,tenant,automations}.ts` (revisados, não alterados) |
+| 13 | Supabase Data API/PostgREST habilitado, grants padrão abertos | Ação pendente — dashboard do Supabase (Project Settings → Data API → Disable), sem tool MCP/CLI para isso | Fora do repo — configuração de projeto Supabase |
+| 14 | `SUPABASE_SERVICE_ROLE_KEY` + 15 vars órfãs em produção (integração Vercel↔Supabase morta) | Removidas via `vercel env rm` (produção) | Vercel — `crmtopconta-backend` (env vars, sem arquivo no repo) |
+| 15 | Preview sem env vars de banco (crash-loop) + sem proteção, banco compartilhado com produção | `DATABASE_URL`/`DATABASE_URL_ADMIN`/`DIRECT_URL` adicionadas ao Preview; Vercel Authentication ligada no Preview dos 2 projetos | Vercel — `crmtopconta-backend`/`crmtopconta-frontend` (env vars + deployment protection, sem arquivo no repo) |
+| 16 | CSV export — formula injection | `csvEscape()` prefixa `'` em valor iniciado por `=+-@` | `backend/src/routes/clients.ts` |
+| 17 | Hardening menor (CORS 500→403, JWT `algorithms` allow-list, RoleGate silencioso) | 3 correções pequenas e independentes | `backend/src/app.ts`, `backend/src/middleware/auth.ts`, `frontend/src/App.tsx` |
 
 ## Novas variáveis de ambiente introduzidas
 
@@ -38,8 +43,12 @@ Todas documentadas com comentário em `backend/.env.example`:
 
 ## O que ficou fora do escopo desta rodada (propositalmente)
 
-- **RLS real no Postgres** — em andamento nesta mesma sessão (rodada de finalização,
-  ver `docs/security-audit/README.md`), roadmap original em achado #6.
+- **Desligar o Data API do Supabase** (achado #13) — ação de dashboard, sem caminho
+  via MCP/CLI; usuário decidiu desligar completamente, pendente de execução manual.
+- **Rotação de `SUPABASE_SERVICE_ROLE_KEY`/JWT secret do Supabase** (complemento do
+  achado #14) — remover a var do Vercel fecha o acesso via Vercel, mas não revoga a
+  credencial na origem; rotação no dashboard do Supabase é opcional, não pedida nesta
+  rodada.
 - **`WHATSAPP_APP_SECRET`** — variável nova, ainda não provisionada em produção
   (confirmado via `vercel env ls`); até ser configurada, o webhook do WhatsApp
   aceita requisições sem verificar assinatura (com warning no log). Provisionar via
