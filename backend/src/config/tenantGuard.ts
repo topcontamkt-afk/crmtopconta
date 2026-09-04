@@ -1,22 +1,24 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { Prisma } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
+import { poolerSafeDatabaseUrl } from "./databaseUrl";
 
 /**
- * Compensating control for tenant isolation.
+ * Tenant isolation: two layers, both enforced from this one Prisma Client extension.
  *
- * Context: Row Level Security is enabled on every table in the Supabase Postgres database, but
- * has ZERO policies, and the role our DATABASE_URL connects as (`postgres`) has
- * `rolbypassrls = true`. RLS is therefore pure decoration today — tenant isolation is enforced
- * ONLY by every Prisma query in this app manually including `where: { tenantId: ... }`. A single
- * route that forgets that filter on a list/aggregate/bulk-mutate query is a silent cross-tenant
- * PII leak. (Real RLS with a non-bypass role and session-scoped policies is tracked separately
- * as a roadmap item — out of scope here.)
+ * Layer 1 (RLS real): `DATABASE_URL` conecta como `app_runtime`, um role Postgres SEM
+ * `BYPASSRLS`, e todas as 14 tabelas têm policies (`current_setting('app.tenant_id')`, ver
+ * migration `add_rls_policies`) — o próprio Postgres recusa/filtra qualquer linha fora do
+ * tenant da sessão, mesmo que o código esqueça um filtro. A GUC de sessão precisa ser setada a
+ * cada operação (não por conexão inteira, porque o pooler do Supabase está em modo "transaction"
+ * — uma mesma conexão física é reciclada entre requests diferentes) — é o que a parte "abre uma
+ * transaction e roda set_config(...)" deste arquivo faz.
  *
- * This Prisma Client extension is a fast, in-app safety net: it throws a hard error — not a
- * warning — whenever a guarded operation on a tenant-scoped model is called with a `where`
- * clause that doesn't include `tenantId` (at the top level, or nested inside `AND`/`OR`/`NOT`).
- * The goal is to turn a missing-tenantId bug into an immediate 500 in dev/CI/staging instead of
- * a silent leak in production.
+ * Layer 2 (defesa em profundidade em código, histórica): antes da RLS real existir, esta era a
+ * ÚNICA linha de defesa (RLS estava ligado mas com zero policies, e o role de conexão tinha
+ * `rolbypassrls = true` — decorativo). Mantida mesmo com a RLS real em vigor: lança erro — não
+ * warning — se uma query "de conjunto" (findMany/updateMany/etc.) num modelo tenant-scoped não
+ * filtrar por `tenantId`, pegando o bug em dev/CI antes mesmo de chegar ao banco (mais rápido e
+ * mais claro que descobrir via "por que essa lista veio vazia" depois que a RLS já filtrou).
  */
 
 /**
@@ -125,6 +127,9 @@ export function whereHasTenantId(where: unknown): boolean {
  * Wrap ONLY the specific prisma call(s) that need this, as narrowly as possible, and always with
  * a comment at the call site explaining why the query is legitimately cross-tenant. Every use of
  * this function is a manually-reviewed exception to the guard — grep for it to find all of them.
+ * Legitimate callers today: the scheduler jobs in services/scheduler.ts and
+ * services/automationEngine.ts, plus the AuditLog hash-chain reads in
+ * services/auditIntegrity.ts (the tamper-evidence chain is global across tenants by design).
  */
 const bypassContext = new AsyncLocalStorage<boolean>();
 
@@ -138,6 +143,65 @@ export function withCrossTenantAccess<T>(fn: () => Promise<T>): Promise<T> {
   return bypassContext.run(true, async () => await fn());
 }
 
+/**
+ * Client administrativo (role privilegiado de sempre, `DATABASE_URL_ADMIN` — o mesmo valor que
+ * `DATABASE_URL` tinha antes da migração para RLS real, `rolbypassrls = true`), usado
+ * EXCLUSIVAMENTE pelo desvio de `withCrossTenantAccess()` abaixo. Sem extensão nenhuma — os
+ * scheduler jobs que usam esse caminho fazem queries genuinamente sem tenantId de propósito, e
+ * não têm um `app.tenant_id` de sessão pra setar (não há "o" tenant de um job cross-tenant).
+ * Construído de forma independente de config/db.ts (em vez de importado de lá) para não criar
+ * import circular — db.ts já importa `tenantGuardExtension` deste módulo.
+ */
+const prismaAdmin = new PrismaClient({
+  datasources: { db: { url: poolerSafeDatabaseUrl(process.env.DATABASE_URL_ADMIN) } },
+});
+
+/** "AutomationRule" -> "automationRule" — nome do model Prisma para a chave do client delegate. */
+function modelToDelegateKey(model: string): string {
+  return model.charAt(0).toLowerCase() + model.slice(1);
+}
+
+/**
+ * tenantId da request atual (setado por middleware/auth.ts logo após verificar o JWT — ver
+ * requireAuth). É o valor usado para popular a GUC `app.tenant_id` que as policies de RLS leem.
+ * Nunca setado durante um job de scheduler (esses usam bypassContext/prismaAdmin acima, não
+ * este contexto) nem em scripts fora do processo HTTP (ex.: prisma/seed.ts usa seu próprio
+ * PrismaClient contra DATABASE_URL_ADMIN diretamente, por precisar criar o próprio Tenant antes
+ * de qualquer tenantId existir para setar).
+ */
+const requestTenantContext = new AsyncLocalStorage<string>();
+
+/**
+ * Versão síncrona — usada só por middleware/auth.ts para envolver `next()` (a chamada em si é
+ * void/síncrona; o resto da cadeia de middlewares/rota herda o contexto normalmente via
+ * continuação assíncrona nativa, sem risco de perda de contexto).
+ */
+export function runWithTenantContext<T>(tenantId: string, fn: () => T): T {
+  return requestTenantContext.run(tenantId, fn);
+}
+
+/**
+ * Versão para trabalho assíncrono (jobs de scheduler processando um tenant por vez após uma
+ * varredura cross-tenant — ver services/scheduler.ts/automationEngine.ts/retention.ts/
+ * biExport.ts). `await fn()` *dentro* do callback de `run()`, não um tail-call sem await, pelo
+ * mesmo motivo documentado em withCrossTenantAccess acima: a lazy thenable do Prisma só chama
+ * `.then()` quando algo efetivamente aguarda a promise, e isso precisa acontecer sincronamente
+ * dentro do `.run()` para não perder o contexto do AsyncLocalStorage. Centralizado aqui (em vez
+ * de exigir que cada call site lembre de fazer isso certo) para não repetir o mesmo bug já
+ * corrigido uma vez neste arquivo.
+ */
+export function runWithTenantContextAsync<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
+  return requestTenantContext.run(tenantId, async () => await fn());
+}
+
+/**
+ * Evita recursão infinita: depois de abrir a transaction e rodar `set_config(...)`, a operação
+ * real é despachada de novo através de `tx[model][operation]()` — que passa por este MESMO hook
+ * de extensão outra vez (extensions se aplicam a `tx` também). Esse flag marca "já estamos
+ * dentro do nosso próprio wrapper, só execute a query" na segunda passada.
+ */
+const withinRlsWrapper = new AsyncLocalStorage<boolean>();
+
 /** Prisma Client extension implementing the guard described above. */
 export const tenantGuardExtension = Prisma.defineExtension((client) =>
   client.$extends({
@@ -146,6 +210,15 @@ export const tenantGuardExtension = Prisma.defineExtension((client) =>
       $allModels: {
         async $allOperations({ model, operation, args, query }) {
           if (bypassContext.getStore()) {
+            // Cross-tenant de propósito (scheduler jobs): despacha no client administrativo, a
+            // única conexão que não tem RLS pra satisfazer — rodar isso em `query(args)` (a
+            // conexão restrita de app_runtime) veria zero linhas sob RLS sem GUC setada.
+            return (prismaAdmin as unknown as Record<string, Record<string, (a: unknown) => unknown>>)[
+              modelToDelegateKey(model)
+            ][operation](args);
+          }
+
+          if (withinRlsWrapper.getStore()) {
             return query(args);
           }
 
@@ -180,7 +253,35 @@ export const tenantGuardExtension = Prisma.defineExtension((client) =>
             }
           }
 
-          return query(args);
+          const tenantId = requestTenantContext.getStore();
+          if (!tenantId) {
+            throw new Error(
+              `[tenantGuard] Refusing to run ${model}.${operation}() with no tenant context set. ` +
+                `Every query outside a scheduler job (withCrossTenantAccess) must run inside an ` +
+                `authenticated request (requireAuth sets this via runWithTenantContext) — RLS ` +
+                `would silently return zero rows without it.`
+            );
+          }
+
+          // RLS real: abre uma transaction (o pooler do Supabase está em modo "transaction" —
+          // uma GUC setada fora de uma transaction não sobreviveria de forma confiável até a
+          // query real rodar, podendo vazar para o próximo request que reusar a mesma conexão
+          // física). set_config(..., true) = equivalente a SET LOCAL, mas aceita bind parameter
+          // (SET LOCAL em si não aceita — por isso não é `SET LOCAL app.tenant_id = ${tenantId}`).
+          return client.$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+            // async+await (not a bare arrow returning the promise) is required here for the same
+            // reason documented on withCrossTenantAccess above: Prisma's query objects are lazy
+            // thenables whose .then() may not fire until awaited, and by then run()'s ALS context
+            // could already be gone.
+            return withinRlsWrapper.run(
+              true,
+              async () =>
+                await (tx as unknown as Record<string, Record<string, (a: unknown) => unknown>>)[
+                  modelToDelegateKey(model)
+                ][operation](args)
+            );
+          });
         },
       },
     },

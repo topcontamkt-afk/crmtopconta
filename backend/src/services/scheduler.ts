@@ -8,7 +8,7 @@ import { evaluateAutomationRules } from "./automationEngine";
 import { processQueueBatch } from "./campaignQueue";
 import { runRetentionSweep } from "./retention";
 import { exportAllTenantsSummary } from "./biExport";
-import { withCrossTenantAccess } from "../config/tenantGuard";
+import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 
 /**
  * Cada função abaixo é o "corpo" de um job periódico, desacoplada de *como* ela é disparada:
@@ -31,18 +31,27 @@ export async function runSheetSyncJob() {
 
   for (const conn of connections) {
     if (!cronMatchesNow(conn.cronSchedule, now)) continue;
+    // RLS real (config/tenantGuard.ts): a partir daqui já sabemos o tenant desta conexão — o
+    // resto do trabalho roda com o contexto de tenant setado (não mais o desvio cross-tenant
+    // acima), pela mesma conexão restrita (app_runtime) usada por qualquer request normal.
     try {
-      const rows = await fetchSheetRows(conn.sheetId, conn.sheetRange, (conn.columnMapping as any) || DEFAULT_COLUMN_MAPPING);
-      await runImport(prisma, conn.tenantId, rows, "scheduler", "google_sheets", conn.sheetId);
-      await prisma.sheetConnection.update({ where: { id: conn.id }, data: { lastSyncAt: now } });
+      await runWithTenantContextAsync(conn.tenantId, async () => {
+        const rows = await fetchSheetRows(conn.sheetId, conn.sheetRange, (conn.columnMapping as any) || DEFAULT_COLUMN_MAPPING);
+        await runImport(prisma, conn.tenantId, rows, "scheduler", "google_sheets", conn.sheetId);
+        await prisma.sheetConnection.update({ where: { id: conn.id }, data: { lastSyncAt: now } });
+      });
       synced++;
     } catch (e: any) {
       console.error(`[scheduler] Falha ao sincronizar SheetConnection ${conn.id}:`, e);
-      await notify(prisma, {
-        tenantId: conn.tenantId,
-        type: "IMPORT_FAILED",
-        severity: "ERRO",
-        message: `Sincronização automática da planilha ${conn.sheetId} falhou: ${e.message}`,
+      // async () => { await ... } (não um tail-call `() => notify(...)`) por precisar do await
+      // dentro do próprio callback de run() — mesmo motivo documentado em withCrossTenantAccess.
+      await runWithTenantContextAsync(conn.tenantId, async () => {
+        await notify(prisma, {
+          tenantId: conn.tenantId,
+          type: "IMPORT_FAILED",
+          severity: "ERRO",
+          message: `Sincronização automática da planilha ${conn.sheetId} falhou: ${e.message}`,
+        });
       });
     }
   }
@@ -62,11 +71,13 @@ export async function runSegmentRefreshJob() {
   for (const segment of segments) {
     if (!cronMatchesNow(segment.refreshCron, now)) continue;
     try {
-      const where = buildSegmentWhere(segment.tenantId, segment.filters as any);
-      const count = await prisma.client.count({ where });
-      await prisma.segmentDefinition.update({
-        where: { id: segment.id },
-        data: { lastCount: count, lastRefreshedAt: now },
+      await runWithTenantContextAsync(segment.tenantId, async () => {
+        const where = buildSegmentWhere(segment.tenantId, segment.filters as any);
+        const count = await prisma.client.count({ where });
+        await prisma.segmentDefinition.update({
+          where: { id: segment.id },
+          data: { lastCount: count, lastRefreshedAt: now },
+        });
       });
       refreshed++;
     } catch (e) {
@@ -92,14 +103,15 @@ export async function runCampaignDispatchJob() {
   const pendingCampaigns = await withCrossTenantAccess(() =>
     prisma.campaign.findMany({
       where: { status: { in: ["AGENDADA", "EM_EXECUCAO"] } },
-      select: { id: true },
+      select: { id: true, tenantId: true },
     })
   );
 
   const results = [];
   for (const c of pendingCampaigns) {
     try {
-      results.push({ campaignId: c.id, ...(await processQueueBatch(prisma, c.id, 100)) });
+      const batchResult = await runWithTenantContextAsync(c.tenantId, async () => await processQueueBatch(prisma, c.id, 100));
+      results.push({ campaignId: c.id, ...batchResult });
     } catch (e) {
       console.error(`[scheduler] Falha ao processar fila da campanha ${c.id}:`, e);
     }

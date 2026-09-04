@@ -1,5 +1,6 @@
 import { AppPrismaClient } from "../config/db";
 import { logAudit } from "../middleware/audit";
+import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 
 /**
  * Mesmos campos PII zerados no `prisma.client.update(...)` de runRetentionSweep abaixo,
@@ -75,50 +76,60 @@ async function cascadeAuditLogRedaction(prisma: AppPrismaClient, tenantId: strin
  * Em seguida, cascadeia a mesma anonimização para o AuditLog (ver cascadeAuditLogRedaction).
  */
 export async function runRetentionSweep(prisma: AppPrismaClient) {
-  const tenants = await prisma.tenant.findMany();
+  // Genuinely cross-tenant by design: varre todos os tenants pra achar quem tem sweep de
+  // retenção a fazer. Cada tenant é re-escopado abaixo via runWithTenantContextAsync.
+  const tenants = await withCrossTenantAccess(() => prisma.tenant.findMany());
   let totalAnonymized = 0;
   let totalAuditLogsRedacted = 0;
 
   for (const tenant of tenants) {
     const cutoff = new Date(Date.now() - tenant.retentionDays * 24 * 60 * 60 * 1000);
 
-    const candidates = await prisma.client.findMany({
-      where: {
-        tenantId: tenant.id,
-        anonymizedAt: null,
-        OR: [
-          { dataUltimaUtilizacao: { lte: cutoff } },
-          { AND: [{ dataUltimaUtilizacao: null }, { createdAt: { lte: cutoff } }] },
-        ],
-      },
-    });
-
-    for (const client of candidates) {
-      await prisma.client.update({
-        where: { id: client.id },
-        data: {
-          nome: "Cliente anonimizado",
-          telefone: `anon-${client.id}`,
-          cpfHash: `anon-${client.id}`,
-          cpfMasked: "***.***.***-**",
-          cidade: null,
-          autorizacaoComunicacao: false,
-          optOutAt: new Date(),
-          tags: [],
-          anonymizedAt: new Date(),
+    const { anonymized, auditLogsRedacted } = await runWithTenantContextAsync(tenant.id, async () => {
+      const candidates = await prisma.client.findMany({
+        where: {
+          tenantId: tenant.id,
+          anonymizedAt: null,
+          OR: [
+            { dataUltimaUtilizacao: { lte: cutoff } },
+            { AND: [{ dataUltimaUtilizacao: null }, { createdAt: { lte: cutoff } }] },
+          ],
         },
       });
-      await logAudit({
-        tenantId: tenant.id,
-        action: "RETENTION_ANONYMIZE",
-        target: "Client",
-        targetId: client.id,
-        details: { retentionDays: tenant.retentionDays },
-      });
-      totalAnonymized++;
 
-      totalAuditLogsRedacted += await cascadeAuditLogRedaction(prisma, tenant.id, client.id);
-    }
+      let anonymizedCount = 0;
+      let redactedCount = 0;
+      for (const client of candidates) {
+        await prisma.client.update({
+          where: { id: client.id },
+          data: {
+            nome: "Cliente anonimizado",
+            telefone: `anon-${client.id}`,
+            cpfHash: `anon-${client.id}`,
+            cpfMasked: "***.***.***-**",
+            cidade: null,
+            autorizacaoComunicacao: false,
+            optOutAt: new Date(),
+            tags: [],
+            anonymizedAt: new Date(),
+          },
+        });
+        await logAudit({
+          tenantId: tenant.id,
+          action: "RETENTION_ANONYMIZE",
+          target: "Client",
+          targetId: client.id,
+          details: { retentionDays: tenant.retentionDays },
+        });
+        anonymizedCount++;
+
+        redactedCount += await cascadeAuditLogRedaction(prisma, tenant.id, client.id);
+      }
+      return { anonymized: anonymizedCount, auditLogsRedacted: redactedCount };
+    });
+
+    totalAnonymized += anonymized;
+    totalAuditLogsRedacted += auditLogsRedacted;
   }
 
   return { totalAnonymized, auditLogsRedacted: totalAuditLogsRedacted };

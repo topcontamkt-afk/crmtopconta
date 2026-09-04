@@ -5,6 +5,7 @@ import { prisma } from "../config/db";
 import { requireAuth, signPending2FAToken, signToken, verifyPending2FAToken } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { twoFactorVerifyLimiter } from "../middleware/rateLimit";
+import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 import {
   isLocked,
   lockedMinutesRemaining,
@@ -32,7 +33,10 @@ router.post("/login", async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: "Dados inválidos" });
 
   const { email, password } = parsed.data;
-  const user = await prisma.user.findUnique({ where: { email } });
+  // Lookup por email é genuinamente cross-tenant: ainda não sabemos a qual tenant este usuário
+  // pertence (é exatamente isso que estamos descobrindo) — RLS real (config/tenantGuard.ts) não
+  // tem uma GUC de tenant pra setar aqui, então precisa do mesmo desvio dos jobs de scheduler.
+  const user = await withCrossTenantAccess(() => prisma.user.findUnique({ where: { email } }));
   if (!user || !user.active) return res.status(401).json({ error: "Credenciais inválidas" });
 
   if (isLocked(user)) {
@@ -41,32 +45,36 @@ router.post("/login", async (req, res) => {
     });
   }
 
-  const ok = await bcrypt.compare(password, user.passwordHash);
-  if (!ok) {
-    await registerFailedLogin(prisma, user.id, user.failedLoginCount);
-    return res.status(401).json({ error: "Credenciais inválidas" });
-  }
+  // A partir daqui já sabemos o tenant do usuário — roda o resto (updates de lockout, audit log)
+  // dentro do contexto de RLS real de propósito, não mais via bypass administrativo.
+  await runWithTenantContextAsync(user.tenantId, async () => {
+    const ok = await bcrypt.compare(password, user.passwordHash);
+    if (!ok) {
+      await registerFailedLogin(prisma, user.id, user.failedLoginCount);
+      return res.status(401).json({ error: "Credenciais inválidas" });
+    }
 
-  await resetFailedLogins(prisma, user.id);
+    await resetFailedLogins(prisma, user.id);
 
-  if (user.twoFactorEnabled) {
-    const tempToken = signPending2FAToken(user.id);
-    return res.json({ requires2FA: true, tempToken });
-  }
+    if (user.twoFactorEnabled) {
+      const tempToken = signPending2FAToken(user.id);
+      return res.json({ requires2FA: true, tempToken });
+    }
 
-  const token = signToken({ id: user.id, tenantId: user.tenantId, role: user.role, email: user.email });
-  await logAudit({ tenantId: user.tenantId, userId: user.id, action: "LOGIN", target: "User", targetId: user.id });
+    const token = signToken({ id: user.id, tenantId: user.tenantId, role: user.role, email: user.email });
+    await logAudit({ tenantId: user.tenantId, userId: user.id, action: "LOGIN", target: "User", targetId: user.id });
 
-  res.json({
-    token,
-    user: {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      tenantId: user.tenantId,
-      mustChangePassword: user.mustChangePassword,
-    },
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        tenantId: user.tenantId,
+        mustChangePassword: user.mustChangePassword,
+      },
+    });
   });
 });
 
@@ -87,7 +95,8 @@ router.post("/2fa/verify", twoFactorVerifyLimiter, async (req, res) => {
     return res.status(401).json({ error: "Sessão de verificação expirada, faça login novamente" });
   }
 
-  const user = await prisma.user.findUnique({ where: { id: userId } });
+  // Mesmo motivo do /login: ainda não sabemos o tenant deste userId até buscá-lo.
+  const user = await withCrossTenantAccess(() => prisma.user.findUnique({ where: { id: userId } }));
   if (!user || !user.active || !user.twoFactorEnabled || !user.twoFactorSecret) {
     return res.status(401).json({ error: "Não foi possível verificar o código" });
   }
@@ -97,19 +106,21 @@ router.post("/2fa/verify", twoFactorVerifyLimiter, async (req, res) => {
     return res.status(401).json({ error: "Código inválido" });
   }
 
-  const token = signToken({ id: user.id, tenantId: user.tenantId, role: user.role, email: user.email });
-  await logAudit({ tenantId: user.tenantId, userId: user.id, action: "LOGIN_2FA", target: "User", targetId: user.id });
+  await runWithTenantContextAsync(user.tenantId, async () => {
+    const token = signToken({ id: user.id, tenantId: user.tenantId, role: user.role, email: user.email });
+    await logAudit({ tenantId: user.tenantId, userId: user.id, action: "LOGIN_2FA", target: "User", targetId: user.id });
 
-  res.json({
-    token,
-    user: {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      tenantId: user.tenantId,
-      mustChangePassword: user.mustChangePassword,
-    },
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        tenantId: user.tenantId,
+        mustChangePassword: user.mustChangePassword,
+      },
+    });
   });
 });
 

@@ -49,7 +49,30 @@ código (env var em produção) antes de poder ser verificado de ponta a ponta.
 - ✅ Suíte completa do backend (85 testes) passou sem precisar afrouxar o guard —
   confirma que todas as queries existentes já filtravam por `tenantId` corretamente,
   exceto uma (`automationEngine.ts`, ação de bloqueio) corrigida durante o processo.
-- ⏳ RLS real (roadmap) ainda não implementado — sem teste aplicável ainda.
+- ✅ Auditoria de IDOR em rotas `findUnique`/`update`/`delete`/`upsert` por id (achado
+  #12): as 9 rotas que fazem essas operações revisadas manualmente — 100% seguem
+  verify-then-act ou são inerentemente seguras (id do JWT, não de URL). Sem achados,
+  sem mudança de código.
+- ✅ **RLS real, implementado e validado contra Postgres real** (não só mocks):
+  - SQL puro, direto como `app_runtime` (sem passar pelo app): sem `SET app.tenant_id`
+    → 0 linhas (falha fechada); com o tenant certo → linhas normais; com um tenant
+    inexistente → 0 linhas.
+  - App local ponta a ponta: login, `GET /api/clients`, `PUT /api/tenant/settings`,
+    `GET /api/audit-logs/verify-integrity` — tudo funcionando através do role
+    restrito, sem nenhum erro `[tenantGuard]`/"no tenant context" no log.
+  - **Isolamento cross-tenant via HTTP**: criado um segundo tenant + usuário só para o
+    teste — login nesse tenant retornou `total: 0` clientes (não os 40 do tenant
+    original) e as configurações do próprio tenant (não as do outro); tenant original
+    continuou vendo seus 40 clientes normalmente depois. Usuário de teste removido ao
+    final.
+  - Todos os 6 jobs de cron/scheduler disparados manualmente (`/api/cron/*`) sem
+    nenhum erro — confirma que o desvio `withCrossTenantAccess`/`prismaAdmin` e o
+    `runWithTenantContextAsync` por-tenant dentro de cada job funcionam.
+  - Migration de policies aplicada ao Supabase de produção (usuário, via SQL Editor) —
+    confirmada via `get_advisors(type=security)`, 0 lints (antes: 14 `rls_enabled_no_policy`).
+  - ⏳ **Pendente**: troca da `DATABASE_URL` de produção no Vercel para `app_runtime`
+    (+ `DATABASE_URL_ADMIN` novo) — o passo que efetivamente ativa a aplicação do RLS
+    em produção. Requer aprovação explícita separada antes de prosseguir.
 
 ## #7 — Erro cru vazando
 - Manual (pós-deploy): forçar uma falha de import (ex.: `GOOGLE_SERVICE_ACCOUNT_JSON`
@@ -82,6 +105,24 @@ código (env var em produção) antes de poder ser verificado de ponta a ponta.
   `/users` → redirecionado para `/` em vez de renderizar a tela quebrada; ANALYST
   em `/audit` → renderiza normalmente (permitido); OPERATOR/VIEWER em `/audit` →
   redirecionado.
+
+## #11 — AuditLog tamper-evident (hash-chain)
+- ✅ `backend/src/services/auditIntegrity.test.ts` (7 testes) — hash determinístico,
+  muda com qualquer campo/prevHash, independente da ordem de chaves em `details`;
+  cadeia íntegra → `valid: true`; adulteração no meio da cadeia → `valid: false` com
+  a linha exata; remoção de uma linha do meio → detectada; cadeia vazia → `valid:
+  true, checked: 0`.
+- ✅ `backend/src/middleware/audit.test.ts` (4 testes) — primeira entrada da cadeia
+  tem `prevHash: null`; entradas seguintes encadeiam com o hash anterior; ações
+  diferentes produzem hashes diferentes.
+- ✅ **Testado nesta sessão contra Postgres real** (local, `docker compose up -d`):
+  login + ação de tenant geraram 2 entradas encadeadas corretamente
+  (`GET /api/audit-logs/verify-integrity` → `valid: true`); `UPDATE` direto via SQL
+  numa linha do meio da cadeia (simulando acesso direto ao banco, bypass de RLS) foi
+  detectado corretamente pelo endpoint (`valid: false`, `brokenAt` apontando a linha
+  certa). Linha restaurada ao valor original depois do teste.
+- Manual (pós-deploy): confirmar `GET /api/audit-logs/verify-integrity` também em
+  produção, com ADMIN/ANALYST real.
 
 ## Verificação geral de ambiente (bloqueante para fechar #1 e #3)
 - ✅ `REDENTIALS_ENCRYPTION_KEY` → `CREDENTIALS_ENCRYPTION_KEY` corrigida no Vercel

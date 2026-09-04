@@ -353,6 +353,13 @@ model AuditLog {
   targetId  String?
   details   Json?
   createdAt DateTime @default(now())
+  // Hash-chain (tamper-evidence, achado #11 do docs/security-audit/findings.md): prevHash é o
+  // `hash` da entrada anterior na cadeia GLOBAL (todas as tenants, ordenada por createdAt — não
+  // por tenant, para manter uma única cadeia verificável); hash é o SHA-256 desta própria linha
+  // + prevHash. Ambos nullable porque entradas gravadas antes desta mudança não entram
+  // retroativamente na cadeia (limitação aceita, ver services/auditIntegrity.ts).
+  prevHash  String?
+  hash      String?
 
   @@index([tenantId, createdAt])
 }

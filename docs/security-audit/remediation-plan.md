@@ -13,7 +13,8 @@
 | 8 | PII em AuditLog sobrevive anonimização | (A) `logAudit(...)` redigido em 4 call sites; (B) cascata de redação no sweep de retenção | `backend/src/routes/users.ts`, `backend/src/routes/automations.ts`, `backend/src/routes/campaigns.ts`, `backend/src/routes/clients.ts`, `backend/src/services/retention.ts` |
 | 9 | Deps moderadas | Bump de major version + verificação de breaking changes | `backend/package.json` (`googleapis`, `node-cron`), `frontend/package.json` (`react-router-dom`) — ver `infra-snapshot.md` para o resultado final |
 | 10 | `/users` e `/audit` sem gate no front | Componente `RoleGate` espelhando os `requireRole` do backend | `frontend/src/App.tsx` |
-| 11 | AuditLog não tamper-evident | Documentado como risco aceito, sem mudança de código | este diretório |
+| 11 | AuditLog não tamper-evident | Hash-chain (SHA-256, `prevHash`/`hash` por linha, cadeia global) + endpoint de verificação | `backend/src/services/auditIntegrity.ts` (novo), `backend/src/middleware/audit.ts`, `backend/src/routes/audit.ts`, `backend/prisma/schema.prisma` |
+| 12 | IDOR em rotas por id (`findUnique`/`update`/`delete`/`upsert`) | Auditoria rota-por-rota das 9 arquivos afetados — sem achados, verify-then-act já consistente | `backend/src/routes/{clients,notifications,users,segments,auth,templates,integrations,tenant,automations}.ts` (revisados, não alterados) |
 
 ## Novas variáveis de ambiente introduzidas
 
@@ -37,14 +38,12 @@ Todas documentadas com comentário em `backend/.env.example`:
 
 ## O que ficou fora do escopo desta rodada (propositalmente)
 
-- **RLS real no Postgres** — roadmap, ver achado #6 em `findings.md`.
-- **Auditoria de IDOR em rotas de update/delete por id** — mencionada como
-  decorrência natural de implementar RLS real (o `tenantGuard.ts` não cobre
-  `findUnique`/`update`/`delete`/`upsert` por serem operações de registro único; o
-  app já segue verify-then-act na maioria das rotas, mas isso não foi auditado
-  exaustivamente nesta rodada).
-- **Tamper-evidence do AuditLog** — risco aceito, ver achado #11.
+- **RLS real no Postgres** — em andamento nesta mesma sessão (rodada de finalização,
+  ver `docs/security-audit/README.md`), roadmap original em achado #6.
 - **`WHATSAPP_APP_SECRET`** — variável nova, ainda não provisionada em produção
   (confirmado via `vercel env ls`); até ser configurada, o webhook do WhatsApp
   aceita requisições sem verificar assinatura (com warning no log). Provisionar via
-  Meta App Dashboard → Settings → Basic quando o canal de WhatsApp for ativado.
+  Meta App Dashboard → Settings → Basic quando o canal de WhatsApp for ativado —
+  fora do alcance desta sessão (requer acesso ao Meta Business Manager do cliente).
+- **Backup/PITR do Supabase** — sem tool MCP para checar; usuário confirma
+  diretamente no dashboard do Supabase.

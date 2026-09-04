@@ -1,31 +1,19 @@
 import { PrismaClient } from "@prisma/client";
+import { poolerSafeDatabaseUrl } from "./databaseUrl";
 import { tenantGuardExtension } from "./tenantGuard";
 
-// DATABASE_URL aponta para o connection pooler do Supabase (PgBouncer, porta 6543, modo
-// "transaction" — ver schema.prisma). Nesse modo o pooler não garante a mesma conexão física
-// entre o PREPARE e o EXECUTE de um prepared statement quando há concorrência (várias
-// invocações serverless ao mesmo tempo), o que produz erros intermitentes do tipo
-// `prepared statement "sN" does not exist` ou `bind message supplies N parameters, but
-// prepared statement requires M`. `pgbouncer=true` faz o Prisma usar o protocolo simples
-// (sem prepared statements) nessa conexão — é a correção documentada para Prisma + PgBouncer
-// em modo transaction, e é ela que resolve o bug de fato (não o connection_limit abaixo).
-// `connection_limit=5`: um pequeno pool por invocação, para permitir algum paralelismo real
-// dentro de uma mesma função serverless (ex.: importação em lote gravando várias linhas ao
-// mesmo tempo) sem abrir conexões demais no pooler compartilhado.
-function poolerSafeDatabaseUrl(): string | undefined {
-  const raw = process.env.DATABASE_URL;
-  if (!raw || raw.includes("pgbouncer=")) return raw;
-  const separator = raw.includes("?") ? "&" : "?";
-  return `${raw}${separator}pgbouncer=true&connection_limit=5`;
-}
-
-// tenantGuardExtension: compensating control for tenant isolation, since RLS is enabled with
-// zero policies on every table and the app's DB role bypasses RLS anyway (see
-// src/config/tenantGuard.ts for the full writeup). Applied here so every caller of this shared
-// client — routes and services alike — gets the guard automatically; there is no other place in
-// the codebase that constructs a PrismaClient.
+// DATABASE_URL conecta como o role `app_runtime` (RLS real, sem BYPASSRLS — ver migration
+// add_rls_policies e services/auditIntegrity.ts/config/tenantGuard.ts para o resto do desenho).
+// tenantGuardExtension: (1) defesa em profundidade em código, lançando erro se uma query num
+// modelo tenant-scoped não filtrar por tenantId; (2) abre cada operação numa transaction que
+// primeiro seta a GUC `app.tenant_id` (via set_config, `SET LOCAL` não aceita bind parameter)
+// que as policies do Postgres usam — sem isso, toda query contra app_runtime veria zero linhas
+// (RLS falha fechado). Aplicado aqui para que todo chamador deste client compartilhado — rotas
+// e services — ganhe ambas as camadas automaticamente; não há outro lugar no backend que
+// construa um PrismaClient para tráfego de request (prisma/seed.ts é a única exceção
+// deliberada, por precisar do role administrativo para criar o próprio Tenant).
 export const prisma = new PrismaClient({
-  datasources: { db: { url: poolerSafeDatabaseUrl() } },
+  datasources: { db: { url: poolerSafeDatabaseUrl(process.env.DATABASE_URL) } },
 }).$extends(tenantGuardExtension);
 
 // Prisma's `$extends()` return type intentionally drops `$on`/`$use` (extensions replace the

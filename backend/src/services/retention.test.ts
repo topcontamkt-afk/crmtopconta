@@ -9,7 +9,9 @@ jest.mock("../config/db", () => ({
   prisma: {
     tenant: { findMany: jest.fn() },
     client: { findMany: jest.fn(), update: jest.fn() },
-    auditLog: { findMany: jest.fn(), update: jest.fn(), create: jest.fn() },
+    // findFirst: usado por logAudit() (via getLastAuditHash(), hash-chain — achado #11) toda
+    // vez que o sweep registra a própria ação de anonimização no AuditLog.
+    auditLog: { findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), create: jest.fn() },
   },
 }));
 
@@ -27,7 +29,7 @@ type FakeAuditLog = {
 const mockPrisma = prisma as unknown as {
   tenant: { findMany: jest.Mock };
   client: { findMany: jest.Mock; update: jest.Mock };
-  auditLog: { findMany: jest.Mock; update: jest.Mock; create: jest.Mock };
+  auditLog: { findMany: jest.Mock; findFirst: jest.Mock; update: jest.Mock; create: jest.Mock };
 };
 
 const REDACTED = "[redacted-anonimizacao]";
@@ -47,6 +49,7 @@ describe("runRetentionSweep — cascata de redação de PII em AuditLog", () => 
     ]);
     mockPrisma.client.update.mockImplementation(async ({ where, data }: any) => ({ id: where.id, ...data }));
     mockPrisma.auditLog.create.mockResolvedValue({ id: "new-log" });
+    mockPrisma.auditLog.findFirst.mockResolvedValue(null); // hash-chain: sem entrada anterior nestes testes
 
     fakeAuditLogs = [
       // Entrada pré-existente (antes do fix da Parte A) com PII bruta no details — deve ser

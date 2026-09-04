@@ -2,7 +2,7 @@ import { AppPrismaClient } from "../config/db";
 import { logAudit } from "../middleware/audit";
 import { notify } from "./notifications";
 import { enqueueCampaign, processQueueBatch } from "./campaignQueue";
-import { withCrossTenantAccess } from "../config/tenantGuard";
+import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 
 /**
  * Motor de automação (Fase 2): avalia periodicamente as AutomationRule ativas de cada tenant
@@ -197,19 +197,26 @@ export async function evaluateAutomationRules(prisma: AppPrismaClient) {
 
   for (const rule of rules) {
     try {
-      const { clientIds } = await matchClients(prisma, rule.tenantId, rule.trigger, rule.condition);
-      const result = await executeAction(prisma, rule.tenantId, rule.id, rule.name, rule.action, clientIds);
-      await prisma.automationRule.update({ where: { id: rule.id }, data: { lastRunAt: new Date() } });
-      results.push({ ruleId: rule.id, trigger: rule.trigger, matched: clientIds.length, ...result });
+      // RLS real: a partir daqui já sabemos o tenant desta regra — resto do trabalho roda com o
+      // contexto de tenant setado (ver config/tenantGuard.ts).
+      const result = await runWithTenantContextAsync(rule.tenantId, async () => {
+        const { clientIds } = await matchClients(prisma, rule.tenantId, rule.trigger, rule.condition);
+        const actionResult = await executeAction(prisma, rule.tenantId, rule.id, rule.name, rule.action, clientIds);
+        await prisma.automationRule.update({ where: { id: rule.id }, data: { lastRunAt: new Date() } });
+        return { matched: clientIds.length, ...actionResult };
+      });
+      results.push({ ruleId: rule.id, trigger: rule.trigger, ...result });
     } catch (e: any) {
       console.error(`[automationEngine] Falha ao avaliar regra ${rule.id} (${rule.trigger}):`, e);
-      await notify(prisma, {
-        tenantId: rule.tenantId,
-        type: "AUTOMATION_ERROR",
-        severity: "ERRO",
-        message: `Falha ao avaliar a regra "${rule.name}": ${e.message}`,
-        relatedType: "AutomationRule",
-        relatedId: rule.id,
+      await runWithTenantContextAsync(rule.tenantId, async () => {
+        await notify(prisma, {
+          tenantId: rule.tenantId,
+          type: "AUTOMATION_ERROR",
+          severity: "ERRO",
+          message: `Falha ao avaliar a regra "${rule.name}": ${e.message}`,
+          relatedType: "AutomationRule",
+          relatedId: rule.id,
+        });
       });
     }
   }

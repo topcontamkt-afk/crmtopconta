@@ -107,13 +107,34 @@ registro único, não vazamento de tabela inteira; o app já segue o padrão
 verify-then-act — `findFirst` com `tenantId` antes de `update`/`delete` por id — na
 maioria das rotas). Ver item de roadmap abaixo.
 
-**Roadmap (não implementado nesta rodada)**: RLS real — role Postgres sem
-`BYPASSRLS`, policies usando `SET LOCAL app.tenant_id` por request, troca da
-`DATABASE_URL` de runtime para esse role. Requer nova migration de policies, mudança
-em como o Prisma abre conexão/transação por request, e teste de carga garantindo que
-`SET LOCAL` não vaza entre requests no pool (`connection_limit=1` do pooler ajuda
-aqui). Junto com isso, vale auditar as rotas de update/delete por id quanto a IDOR
-(ver achado do `tenantGuard.ts` acima).
+**Atualização (rodada de finalização) — RLS real: implementado, aplicado no Supabase,
+ativação em produção pendente de aprovação.**
+
+Role `app_runtime` (`NOBYPASSRLS`) + policy `tenant_isolation` (`FOR ALL`,
+`current_setting('app.tenant_id', true)`) em todas as 14 tabelas — aplicado ao Supabase de
+produção via SQL rodado pelo usuário, confirmado via `get_advisors(type=security)` (os 14
+lints `rls_enabled_no_policy` zeraram). `backend/src/config/tenantGuard.ts` ganhou um segundo
+`AsyncLocalStorage` (`requestTenantContext`, setado por `middleware/auth.ts` logo após o JWT) e
+a extensão do Prisma passou a envolver TODA operação — não só as guardadas — numa transaction
+que primeiro roda `set_config('app.tenant_id', ...)`. Os 4 pontos cross-tenant de sempre
+(scheduler/automationEngine) continuam usando `withCrossTenantAccess`, mas agora despacham para
+um client administrativo separado (`prismaAdmin`, role privilegiado, sem RLS) em vez de só
+pular o check de código — e o trabalho por-tenant que vem depois de cada varredura cross-tenant
+(scheduler.ts, automationEngine.ts, retention.ts, biExport.ts) passou a rodar dentro do
+contexto de tenant real via `runWithTenantContextAsync`. `prisma/seed.ts` e o login/2FA (que
+precisam de lookup por email/id antes de saber o tenant) usam o mesmo desvio administrativo.
+
+Validado nesta sessão contra Postgres real local (não só mocks): login, CRUD normal, os 6 jobs
+de cron/scheduler, e um teste explícito de isolamento — um segundo tenant criado só para o
+teste viu 0 clientes via a API HTTP, enquanto o tenant original continuou vendo os seus
+normalmente. Suíte completa (98 testes) e `tsc --noEmit` passando.
+
+**Pendente, decisão explícita do usuário**: trocar a `DATABASE_URL` de produção no Vercel para
+`app_runtime` (+ nova `DATABASE_URL_ADMIN` apontando para o role privilegiado atual) — só esse
+passo ativa a aplicação real do RLS em produção; até lá, a app continua rodando 100% no role
+privilegiado de sempre, sem risco. Auditoria de IDOR nas rotas de update/delete por id (item
+antes listado como decorrência deste roadmap) já foi feita separadamente nesta mesma rodada —
+ver achado #12 abaixo — sem necessidade de esperar a ativação do RLS real.
 
 ### 7. Vazamento de erro cru para o cliente HTTP
 **Status: Corrigido**
@@ -165,13 +186,35 @@ frontend espelhando exatamente as duas checagens de `requireRole` já existentes
 backend — nenhuma restrição nova foi inventada.
 
 ### 11. `AuditLog` não é tamper-evident
-**Status: Risco aceito (documentado)**
+**Status: Corrigido (hash-chain a partir de agora)**
 
-Sem hash-chain/assinatura. Nenhuma rota da API permite editar/apagar logs, mas
-acesso direto ao Postgres (roles que já sabemos que fazem bypass de RLS) poderia
-alterar histórico sem deixar rastro. Aceito como risco de MVP — reavaliar junto com o
-item de roadmap de RLS real, já que ambos tocam em "o que um acesso direto ao banco
-consegue fazer que a aplicação não deveria permitir".
+Cada `AuditLog` novo grava `prevHash`/`hash` (SHA-256, cadeia global entre tenants,
+`services/auditIntegrity.ts`) — qualquer alteração ou remoção de uma linha existente
+via acesso direto ao Postgres quebra a cadeia a partir dali, detectável via
+`GET /api/audit-logs/verify-integrity` (ADMIN/ANALYST). Testado nesta sessão contra
+Postgres real: `UPDATE` direto via SQL numa linha do meio da cadeia foi detectado
+corretamente pelo endpoint (`valid: false`, apontando a linha exata).
+
+**Limitação aceita**: as 17+ entradas gravadas antes desta mudança (`hash`/`prevHash`
+nulos) não entram retroativamente na cadeia — não há como provar que não foram
+alteradas antes de hoje. Sem lock explícito na leitura do "último hash" — sob escrita
+concorrente real (rara neste volume) duas chamadas a `logAudit()` poderiam ler o mesmo
+`prevHash`; isso apareceria como uma quebra de cadeia na verificação, indistinguível de
+adulteração real (decisão deliberada, para não introduzir SQL cru/`$queryRaw` só para
+um lock, ver comentário em `auditIntegrity.ts`).
+
+### 12. IDOR em rotas `findUnique`/`update`/`delete`/`upsert` por id
+**Status: Auditado — nenhum achado**
+
+`tenantGuard.ts` documenta que essas operações (ao contrário de `findMany`/`updateMany`/
+etc.) não são guardadas pela extensão do Prisma, por dependerem de um id já único.
+Auditoria rota-por-rota das 9 arquivos que fazem essas operações
+(`clients`, `notifications`, `users`, `segments`, `auth`, `templates`, `integrations`,
+`tenant`, `automations`) confirmou que 100% seguem verify-then-act (`findFirst` com
+`tenantId` antes do `update`/`delete`/`upsert` por id) ou são inerentemente seguras (id
+vem do JWT/token assinado, nunca de parâmetro de URL — ex.: `auth.ts`, `tenant.ts`) ou
+são um lookup de webhook autenticado por assinatura HMAC, não por sessão
+(`integrations.ts`, `applyStatusUpdate`). Nenhuma correção de código necessária.
 
 ## Confirmado como correto (nenhuma mudança necessária)
 

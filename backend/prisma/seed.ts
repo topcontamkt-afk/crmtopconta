@@ -3,7 +3,13 @@ import bcrypt from "bcryptjs";
 import { hashCPF, maskCPF, normalizePhone } from "../src/services/masking";
 import { computeUsage } from "../src/services/usage";
 
-const prisma = new PrismaClient();
+// RLS real (config/tenantGuard.ts): DATABASE_URL conecta como app_runtime, sem BYPASSRLS — mas
+// criar o Tenant aqui é o próprio problema do ovo e da galinha (não dá pra setar a GUC
+// app.tenant_id de um tenant que ainda não existe). Seed precisa do role administrativo
+// (DATABASE_URL_ADMIN, o mesmo `postgres`/bypass de sempre), nunca do role restrito.
+const prisma = new PrismaClient({
+  datasources: { db: { url: process.env.DATABASE_URL_ADMIN || process.env.DATABASE_URL } },
+});
 
 async function main() {
   const tenant = await prisma.tenant.create({

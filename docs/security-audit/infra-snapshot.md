@@ -101,6 +101,29 @@ também não estão setadas — esperado (nenhum canal configurado ainda: `Chann
 = 0 linhas; Sheets provavelmente não sincroniza de fato apesar de haver 1
 `SheetConnection` salva, já que falta o service account).
 
+## RLS real — atualização pós-auditoria (rodada de finalização)
+
+Aplicado ao Supabase de produção (SQL rodado pelo usuário no SQL Editor, verificado via MCP
+logo em seguida): role `app_runtime` (`LOGIN`, `NOBYPASSRLS`) + policy `tenant_isolation`
+(`FOR ALL`) nas 14 tabelas, usando `current_setting('app.tenant_id', true)`. Confirmado via
+`get_advisors(type=security)` — os 14 lints `rls_enabled_no_policy` que existiam no início da
+auditoria (ver seção Supabase acima) zeraram. Role `postgres` (usado por `DATABASE_URL`/
+`DIRECT_URL` hoje) continua com `rolbypassrls=true`, inalterado.
+
+**Estado atual: aditivo, ainda não ativo.** A aplicação em produção continua rodando 100% no
+role privilegiado de sempre — só a *migration* foi aplicada, a `DATABASE_URL` de runtime no
+Vercel ainda não foi trocada para `app_runtime`. RLS só passa a ser realmente aplicado depois
+desse segundo passo (troca de env var + `DATABASE_URL_ADMIN` novo apontando para o role
+privilegiado), feito somente com aprovação explícita separada — mesmo padrão já usado nesta
+auditoria para os secrets do Vercel.
+
+Implementação completa no código (`backend/src/config/tenantGuard.ts`/`db.ts`,
+`middleware/auth.ts`, e o wrapping por-tenant em `services/scheduler.ts`/`automationEngine.ts`/
+`retention.ts`/`biExport.ts` para os jobs de cron) já testada e validada localmente contra
+Postgres real nesta sessão: login, CRUD normal, os 6 jobs de cron, e um teste explícito de
+isolamento cross-tenant via HTTP (usuário de um tenant não vê nada do outro). Ver
+`verification-tests.md` para o detalhe completo.
+
 ## `npm audit` — antes e depois
 
 | Pacote | Antes | Depois |

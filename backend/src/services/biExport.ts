@@ -1,6 +1,7 @@
 import { AppPrismaClient } from "../config/db";
 import { writeSheetSummary } from "./googleSheets";
 import { FAIXA_LABELS } from "./usage";
+import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 
 /**
  * Conector BI leve (Fase 3): monta um snapshot tabular (KPIs do dashboard + campanhas recentes)
@@ -53,11 +54,16 @@ export async function exportTenantSummaryToSheet(prisma: AppPrismaClient, tenant
 }
 
 export async function exportAllTenantsSummary(prisma: AppPrismaClient) {
-  const tenants = await prisma.tenant.findMany({ select: { id: true } });
+  // Genuinely cross-tenant by design: varre todos os tenants pra achar quem tem export a fazer.
+  // Cada tenant é re-escopado abaixo via runWithTenantContextAsync (mesma conexão restrita —
+  // app_runtime — que exportTenantSummaryToSheet já usa quando chamado pelo botão manual em
+  // routes/integrations.ts).
+  const tenants = await withCrossTenantAccess(() => prisma.tenant.findMany({ select: { id: true } }));
   const results = [];
   for (const t of tenants) {
     try {
-      results.push({ tenantId: t.id, ...(await exportTenantSummaryToSheet(prisma, t.id)) });
+      const result = await runWithTenantContextAsync(t.id, () => exportTenantSummaryToSheet(prisma, t.id));
+      results.push({ tenantId: t.id, ...result });
     } catch (e: any) {
       console.error(`[biExport] Falha ao exportar resumo do tenant ${t.id}:`, e);
       results.push({ tenantId: t.id, exported: false, reason: e.message });

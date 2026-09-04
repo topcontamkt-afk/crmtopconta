@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env";
+import { runWithTenantContext } from "../config/tenantGuard";
 
 // Sem fallback: config/env.ts já falha o boot do processo se JWT_SECRET estiver ausente, então
 // nunca existe um caminho de execução em que este valor não esteja definido.
@@ -19,7 +20,10 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
       return res.status(401).json({ error: "Verificação de dois fatores pendente" });
     }
     req.user = { id: payload.sub, tenantId: payload.tenantId, role: payload.role, email: payload.email };
-    next();
+    // RLS real (config/tenantGuard.ts): toda query feita pelo resto da cadeia de middlewares/rota
+    // precisa desse tenantId disponível via AsyncLocalStorage para setar a GUC `app.tenant_id`
+    // que as policies do Postgres leem — sem isso, toda query veria zero linhas.
+    runWithTenantContext(req.user.tenantId, next);
   } catch {
     return res.status(401).json({ error: "Token inválido ou expirado" });
   }
