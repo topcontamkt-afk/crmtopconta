@@ -109,6 +109,7 @@ model Tenant {
   channelConfigs     ChannelConfig[]
   messageTemplates   MessageTemplate[]
   notifications      Notification[]
+  dashboardSnapshots DashboardSnapshot[]
 }
 
 model User {
@@ -430,4 +431,31 @@ model Notification {
   createdAt   DateTime              @default(now())
 
   @@index([tenantId, read, createdAt])
+}
+
+// Foto diária dos KPIs da base — é o que permite tendência real, variação vs. período anterior
+// e comparação entre períodos no dashboard (sem isso só existe o "agora"). Uma linha por tenant
+// por dia (`day` = data civil em Brasília); regravada (upsert) se o snapshot do dia for recalculado.
+// O histórico começa no dia em que o job foi ligado — não dá para reconstruir o passado.
+model DashboardSnapshot {
+  id              String   @id @default(uuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+  day             DateTime @db.Date
+  totalClientes   Int
+  ativos          Int
+  inativos        Int
+  bloqueados      Int
+  semUso          Int
+  limiteTotal     Decimal  @db.Decimal(16, 2)
+  valorUtilizado  Decimal  @db.Decimal(16, 2)
+  saldoDisponivel Decimal  @db.Decimal(16, 2)
+  usaramNoDia     Int      @default(0) // clientes com dataUltimaUtilizacao naquele dia
+  encerradosNoDia Int      @default(0) // clientes com encerradoEm naquele dia
+  faixas          Json     // { FAIXA_USO: contagem }
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([tenantId, day])
+  @@index([tenantId, day])
 }

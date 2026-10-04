@@ -42,6 +42,7 @@ export const TENANT_SCOPED_MODELS = [
   "ChannelConfig",
   "MessageTemplate",
   "Notification",
+  "DashboardSnapshot",
 ] as const;
 
 type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number];

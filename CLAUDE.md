@@ -112,6 +112,18 @@ when `limiteTotal` increases —, usage-tier nudges, opt-out/invalid-phone
 block) and firing the configured action (launch campaign, notify, or block).
 Repeat sends to the same client stay protected by the existing dedupe window.
 
+### Dashboard e histórico
+
+`routes/dashboard.ts` expõe `GET /api/dashboard/overview` (KPIs, variação vs. período anterior,
+séries, nota de saúde, funil, oportunidades, resultado de campanhas, cobertura de dados e insights;
+filtros `days`, `cidade`, `empresaConveniada`) e `GET /api/dashboard/audiencia` (ids do público de
+uma oportunidade, para "Criar campanha"). Tendência e variação vêm de `DashboardSnapshot`: uma foto
+diária dos KPIs por tenant (`services/snapshots.ts`), gravada pelo job `/api/cron/snapshot` e,
+como garantia no plano Hobby, na primeira visita do dia ao dashboard. O histórico começa no dia em
+que a tabela foi criada e não é reconstruível. Com filtro de cidade/convênio, séries e variações
+ficam indisponíveis (a foto é da base inteira). A nota de saúde (`services/health.ts`) tem pesos e
+metas fixos e é testada em `health.test.ts`. O SQL da tabela está em `backend/prisma/sql/`.
+
 ### Cron jobs: local vs. Vercel
 
 Locally, `services/scheduler.ts` runs everything via `node-cron` in-process.

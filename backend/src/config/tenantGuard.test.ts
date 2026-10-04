@@ -162,6 +162,7 @@ describe("TENANT_SCOPED_MODELS", () => {
         "ChannelConfig",
         "MessageTemplate",
         "Notification",
+        "DashboardSnapshot",
       ].sort()
     );
   });

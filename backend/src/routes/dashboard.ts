@@ -1,7 +1,11 @@
 import { Router } from "express";
+import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth } from "../middleware/auth";
 import { FAIXA_LABELS } from "../services/usage";
+import { addDays, clientWhere, computeKpis, DashboardFilters, rawFilterSql, todayBrt } from "../services/dashboardMetrics";
+import { computeHealth } from "../services/health";
+import { ensureTodaySnapshot } from "../services/snapshots";
 
 const router = Router();
 router.use(requireAuth);
@@ -363,6 +367,395 @@ router.get("/evolucao", async (req, res) => {
   );
 
   res.json(rows.map((r) => ({ periodo: r.periodo, total: Number(r.total) })));
+});
+
+const overviewQuerySchema = z.object({
+  days: z.enum(["7", "30", "90"]).default("30"),
+  cidade: z.string().trim().min(1).max(120).optional(),
+  empresaConveniada: z.string().trim().min(1).max(160).optional(),
+});
+
+type Insight = { tipo: "alerta" | "oportunidade" | "positivo" | "info"; texto: string };
+
+const pct1 = (n: number) => `${n.toFixed(1).replace(".", ",")}%`;
+const brl = (n: number) => n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+const isoDay = (d: Date) => d.toISOString().slice(0, 10);
+
+/** Variação absoluta e percentual contra a linha de base (null quando não há base real). */
+function delta(current: number, base: number | null | undefined) {
+  if (base === null || base === undefined) return null;
+  const abs = current - base;
+  return { abs, pct: base !== 0 ? (abs / base) * 100 : null };
+}
+
+/**
+ * GET /api/dashboard/overview — painel premium: KPIs com variação contra o período anterior,
+ * séries históricas (snapshots diários), nota de saúde, funil, oportunidades, resultado de
+ * campanhas, cobertura de dados e insights. Tudo calculado de dados reais: o que ainda não tem
+ * histórico/dado volta vazio ou null (a tela mostra estado vazio), nunca um valor inventado.
+ *
+ * Filtros (cidade, empresaConveniada) recortam os números "de agora"; o histórico (snapshots)
+ * é da base inteira, então com filtro ativo as séries e variações ficam indisponíveis.
+ */
+router.get("/overview", async (req, res) => {
+  const parsed = overviewQuerySchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  const { tenantId } = req.user!;
+  const days = Number(parsed.data.days);
+  const filters: DashboardFilters = { cidade: parsed.data.cidade, empresaConveniada: parsed.data.empresaConveniada };
+  const hasFilters = !!(filters.cidade || filters.empresaConveniada);
+
+  // Primeira visita do dia grava a foto de hoje — o histórico começa a acumular sem depender de cron.
+  await ensureTodaySnapshot(prisma, tenantId);
+
+  const today = todayBrt();
+  const sinceDay = addDays(today, -days);
+  const sinceTs = addDays(new Date(), -days);
+  const base = clientWhere(tenantId, filters);
+  const raw = rawFilterSql(filters, 2);
+
+  const notNull = (field: "cidade" | "empresaConveniada" | "remuneracaoBruta" | "dataUltimaUtilizacao" | "encerradoEm" | "dataNascimento") =>
+    prisma.client.count({ where: { AND: [base, { [field]: { not: null } }] } });
+
+  const msgBase = { campaign: { tenantId, isSandbox: false }, queuedAt: { gte: sinceTs } };
+
+  const [
+    kpis,
+    snaps,
+    lastImport,
+    stuckImport,
+    novos,
+    rankingCidades,
+    rankingSecretarias,
+    cidadeOpts,
+    convenioOpts,
+    aniversariantes,
+    cCidade,
+    cConvenio,
+    cRenda,
+    cUltimaUso,
+    cEncerrado,
+    cNascimento,
+    campanhas,
+    enviadas,
+    entregues,
+    respondidas,
+    convertidas,
+    msgAgg,
+  ] = await Promise.all([
+    computeKpis(prisma, tenantId, filters),
+    prisma.dashboardSnapshot.findMany({ where: { tenantId, day: { gte: sinceDay } }, orderBy: { day: "asc" } }),
+    prisma.importJob.findFirst({ where: { tenantId }, orderBy: { startedAt: "desc" } }),
+    prisma.importJob.findFirst({
+      where: { tenantId, status: "EM_EXECUCAO", startedAt: { lt: addDays(new Date(), -1 / 48) } }, // > 30 min
+      orderBy: { startedAt: "desc" },
+    }),
+    prisma.client.count({ where: { AND: [base, { createdAt: { gte: sinceTs } }] } }),
+    rankingPorCampo(tenantId, "cidade"),
+    rankingPorCampo(tenantId, "empresaConveniada"),
+    prisma.client.groupBy({
+      by: ["cidade"],
+      where: { tenantId, cidade: { not: null } },
+      _count: true,
+      orderBy: { _count: { cidade: "desc" } },
+      take: 100,
+    }),
+    prisma.client.groupBy({
+      by: ["empresaConveniada"],
+      where: { tenantId, empresaConveniada: { not: null } },
+      _count: true,
+      orderBy: { _count: { empresaConveniada: "desc" } },
+      take: 100,
+    }),
+    prisma.$queryRawUnsafe<Array<{ count: bigint }>>(
+      `SELECT COUNT(*)::bigint AS count FROM "Client"
+       WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL
+         AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM (now() AT TIME ZONE 'America/Sao_Paulo')) ${raw.sql}`,
+      tenantId,
+      ...raw.params
+    ),
+    notNull("cidade"),
+    notNull("empresaConveniada"),
+    notNull("remuneracaoBruta"),
+    notNull("dataUltimaUtilizacao"),
+    notNull("encerradoEm"),
+    notNull("dataNascimento"),
+    prisma.campaign.count({ where: { tenantId, isSandbox: false, createdAt: { gte: sinceTs } } }),
+    prisma.messageEvent.count({ where: { ...msgBase, sentAt: { not: null } } }),
+    prisma.messageEvent.count({ where: { ...msgBase, deliveredAt: { not: null } } }),
+    prisma.messageEvent.count({ where: { ...msgBase, respondedAt: { not: null } } }),
+    prisma.messageEvent.count({ where: { ...msgBase, convertedAt: { not: null } } }),
+    prisma.messageEvent.aggregate({ where: msgBase, _sum: { cost: true, convertedValue: true } }),
+  ]);
+
+  const total = kpis.totalClientes;
+  const health = computeHealth({
+    total,
+    ativos: kpis.ativos,
+    semUso: kpis.semUso,
+    indefinidos: kpis.faixas["INDEFINIDO"] ?? 0,
+    bloqueados: kpis.bloqueados,
+    limiteTotal: kpis.limiteTotal,
+    valorUtilizado: kpis.valorUtilizado,
+  });
+
+  // --- Histórico (snapshots) ---------------------------------------------------------------
+  const series = snaps.map((s) => {
+    const limite = Number(s.limiteTotal);
+    const usado = Number(s.valorUtilizado);
+    const h = computeHealth({
+      total: s.totalClientes,
+      ativos: s.ativos,
+      semUso: s.semUso,
+      indefinidos: (s.faixas as Record<string, number> | null)?.["INDEFINIDO"] ?? 0,
+      bloqueados: s.bloqueados,
+      limiteTotal: limite,
+      valorUtilizado: usado,
+    });
+    return {
+      day: isoDay(s.day),
+      totalClientes: s.totalClientes,
+      ativos: s.ativos,
+      inativos: s.inativos,
+      semUso: s.semUso,
+      limiteTotal: limite,
+      valorUtilizado: usado,
+      saldoDisponivel: Number(s.saldoDisponivel),
+      usoLimitePct: limite > 0 ? Number(((usado / limite) * 100).toFixed(2)) : 0,
+      ativosPct: s.totalClientes > 0 ? Number(((s.ativos / s.totalClientes) * 100).toFixed(2)) : 0,
+      usaramNoDia: s.usaramNoDia,
+      encerradosNoDia: s.encerradosNoDia,
+      score: h?.score ?? null,
+    };
+  });
+
+  // Linha de base = foto mais antiga da janela, desde que seja anterior a hoje. Com histórico
+  // mais curto que o período pedido, `baseline.dias` mostra o intervalo realmente comparado.
+  const baselineSnap = !hasFilters && snaps.length > 0 && snaps[0].day < today ? snaps[0] : null;
+  const baseline = baselineSnap
+    ? {
+        day: isoDay(baselineSnap.day),
+        dias: Math.round((today.getTime() - baselineSnap.day.getTime()) / 86_400_000),
+        pedidoDias: days,
+      }
+    : null;
+  const bl = baselineSnap
+    ? {
+        totalClientes: baselineSnap.totalClientes,
+        ativos: baselineSnap.ativos,
+        inativos: baselineSnap.inativos,
+        semUso: baselineSnap.semUso,
+        limiteTotal: Number(baselineSnap.limiteTotal),
+        valorUtilizado: Number(baselineSnap.valorUtilizado),
+        saldoDisponivel: Number(baselineSnap.saldoDisponivel),
+      }
+    : null;
+  const baselineHealth = baselineSnap
+    ? computeHealth({
+        total: baselineSnap.totalClientes,
+        ativos: baselineSnap.ativos,
+        semUso: baselineSnap.semUso,
+        indefinidos: (baselineSnap.faixas as Record<string, number> | null)?.["INDEFINIDO"] ?? 0,
+        bloqueados: baselineSnap.bloqueados,
+        limiteTotal: Number(baselineSnap.limiteTotal),
+        valorUtilizado: Number(baselineSnap.valorUtilizado),
+      })
+    : null;
+
+  const deltas = {
+    limiteTotal: delta(kpis.limiteTotal, bl?.limiteTotal),
+    valorUtilizado: delta(kpis.valorUtilizado, bl?.valorUtilizado),
+    saldoDisponivel: delta(kpis.saldoDisponivel, bl?.saldoDisponivel),
+    ativos: delta(kpis.ativos, bl?.ativos),
+    totalClientes: delta(total, bl?.totalClientes),
+    inativos: delta(kpis.inativos, bl?.inativos),
+    semUso: delta(kpis.semUso, bl?.semUso),
+    score: health && baselineHealth ? delta(health.score, baselineHealth.score) : null,
+  };
+
+  // --- Funil e oportunidades ---------------------------------------------------------------
+  const jaUtilizaram = Math.max(0, total - kpis.semUso - (kpis.faixas["INDEFINIDO"] ?? 0));
+  const funil = [
+    { key: "base", label: "Base total", count: total },
+    { key: "utilizaram", label: "Já utilizaram o limite", count: jaUtilizaram },
+    { key: "ativos", label: "Ativos hoje", count: kpis.ativos },
+    { key: "quase", label: "Quase no limite", count: kpis.quaseCompleto },
+  ];
+  const aniversariantesCount = Number(aniversariantes[0]?.count ?? 0);
+  const oportunidades = {
+    inativos: kpis.inativos,
+    semUso: kpis.semUso,
+    quaseCompleto: kpis.quaseCompleto,
+    aniversariantes: aniversariantesCount,
+  };
+
+  // --- Campanhas ---------------------------------------------------------------------------
+  const rate = (n: number, d: number) => (d > 0 ? Number(((n / d) * 100).toFixed(1)) : null);
+  const resultadoCampanhas = {
+    temDados: enviadas > 0 || campanhas > 0,
+    campanhas,
+    enviadas,
+    entregues,
+    respondidas,
+    convertidas,
+    taxaEntrega: rate(entregues, enviadas),
+    taxaResposta: rate(respondidas, entregues || enviadas),
+    taxaConversao: rate(convertidas, enviadas),
+    valorConvertido: Number(msgAgg._sum.convertedValue ?? 0),
+    custo: Number(msgAgg._sum.cost ?? 0),
+  };
+
+  // --- Cobertura dos dados (o que falta preencher na origem) ----------------------------------
+  const cob = (label: string, key: string, n: number, libera: string) => ({
+    key,
+    label,
+    preenchidos: n,
+    pct: total > 0 ? Number(((n / total) * 100).toFixed(1)) : 0,
+    libera,
+  });
+  const cobertura = [
+    cob("Cidade", "cidade", cCidade, "Ranking e filtro por cidade"),
+    cob("Convênio / secretaria", "empresaConveniada", cConvenio, "Ranking de convênios"),
+    cob("Renda", "remuneracaoBruta", cRenda, "Perfil de renda"),
+    cob("Última utilização", "dataUltimaUtilizacao", cUltimaUso, "Taxa de uso por mês"),
+    cob("Encerramento", "encerradoEm", cEncerrado, "Taxa de cancelamento"),
+    cob("Data de nascimento", "dataNascimento", cNascimento, "Faixa etária e aniversariantes"),
+  ];
+
+  // --- Insights (todos derivados dos números acima) --------------------------------------------
+  const insights: Insight[] = [];
+  if (stuckImport) {
+    insights.push({
+      tipo: "alerta",
+      texto: `Uma importação de ${stuckImport.totalRows.toLocaleString("pt-BR")} linhas (iniciada em ${stuckImport.startedAt.toLocaleDateString("pt-BR")}) nunca terminou. A base pode estar incompleta: reenvie o arquivo.`,
+    });
+  }
+  if (total === 0) {
+    insights.push({ tipo: "info", texto: "Ainda não há clientes neste recorte." });
+  } else {
+    if (kpis.inativos / total >= 0.5) {
+      insights.push({
+        tipo: "alerta",
+        texto: `${pct1((kpis.inativos / total) * 100)} da base está inativa (${kpis.inativos.toLocaleString("pt-BR")} de ${total.toLocaleString("pt-BR")}). É a maior alavanca de crescimento.`,
+      });
+    }
+    const indefinidos = kpis.faixas["INDEFINIDO"] ?? 0;
+    if (indefinidos / total >= 0.3) {
+      insights.push({
+        tipo: "alerta",
+        texto: `${indefinidos.toLocaleString("pt-BR")} clientes (${pct1((indefinidos / total) * 100)}) estão sem limite cadastrado. Os cálculos de uso ignoram esses clientes: confira a coluna de limite na planilha de origem.`,
+      });
+    }
+    if (kpis.semUso > 0) {
+      insights.push({
+        tipo: "oportunidade",
+        texto: `${kpis.semUso.toLocaleString("pt-BR")} clientes nunca usaram o cartão: público para campanha de ativação.`,
+      });
+    }
+    const reativar = Math.round(kpis.inativos * 0.1);
+    if (reativar >= 1) {
+      insights.push({
+        tipo: "oportunidade",
+        texto: `Reativar 10% dos inativos significa cerca de ${reativar.toLocaleString("pt-BR")} clientes ativos a mais.`,
+      });
+    }
+    if (kpis.limiteTotal > 0) {
+      insights.push({
+        tipo: "info",
+        texto: `${pct1((kpis.saldoDisponivel / kpis.limiteTotal) * 100)} do limite liberado (${brl(kpis.saldoDisponivel)}) ainda está disponível para uso.`,
+      });
+    }
+    if (kpis.quaseCompleto > 0) {
+      insights.push({
+        tipo: "oportunidade",
+        texto: `${kpis.quaseCompleto} cliente(s) estão quase no limite: avalie renovação ou aumento.`,
+      });
+    }
+    if (deltas.ativos && baseline && deltas.ativos.abs !== 0) {
+      const sinal = deltas.ativos.abs > 0 ? "+" : "";
+      insights.push({
+        tipo: deltas.ativos.abs > 0 ? "positivo" : "alerta",
+        texto: `Clientes ativos: ${sinal}${deltas.ativos.abs} nos últimos ${baseline.dias} dia(s).`,
+      });
+    }
+    const semCobertura = cobertura.filter((c) => c.pct < 50);
+    if (semCobertura.length > 0) {
+      insights.push({
+        tipo: "info",
+        texto: `Dados faltando na origem: ${semCobertura.map((c) => c.label.toLowerCase()).join(", ")}. Completar a planilha libera mais análises.`,
+      });
+    }
+  }
+  if (!hasFilters && snaps.length < 2) {
+    insights.push({
+      tipo: "info",
+      texto: `O histórico começou em ${(snaps[0]?.day ?? today).toISOString().slice(0, 10).split("-").reverse().join("/")}: tendências e variações aparecem a partir do segundo dia.`,
+    });
+  }
+
+  res.json({
+    periodo: { dias: days, desde: isoDay(sinceDay) },
+    filtros: {
+      aplicados: { cidade: filters.cidade ?? null, empresaConveniada: filters.empresaConveniada ?? null },
+      cidades: cidadeOpts.map((c) => ({ valor: c.cidade as string, count: c._count })),
+      convenios: convenioOpts.map((c) => ({ valor: c.empresaConveniada as string, count: c._count })),
+    },
+    kpis: { ...kpis, novosNoPeriodo: novos },
+    deltas,
+    baseline,
+    historicoDisponivel: !hasFilters && snaps.length >= 2,
+    series: hasFilters ? [] : series,
+    saude: health ? { ...health, delta: deltas.score } : null,
+    funil,
+    oportunidades,
+    rankingCidades: rankingCidades.map((r) => ({ cidade: r.chave, count: r.count, ativos: r.ativos, valorUtilizado: r.valorUtilizado })),
+    rankingSecretarias: rankingSecretarias.map((r) => ({ empresaConveniada: r.chave, count: r.count, ativos: r.ativos, valorUtilizado: r.valorUtilizado })),
+    campanhas: resultadoCampanhas,
+    cobertura,
+    insights,
+    ultimaAtualizacao: lastImport?.finishedAt || lastImport?.startedAt || null,
+  });
+});
+
+/** GET /api/dashboard/audiencia — ids dos clientes de uma oportunidade, para "Criar campanha". */
+const audienciaSchema = z.object({
+  tipo: z.enum(["inativos", "semUso", "quaseCompleto", "aniversariantes"]),
+  cidade: z.string().trim().min(1).max(120).optional(),
+  empresaConveniada: z.string().trim().min(1).max(160).optional(),
+});
+router.get("/audiencia", async (req, res) => {
+  const parsed = audienciaSchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  const { tenantId } = req.user!;
+  const { tipo, ...filters } = parsed.data;
+
+  let ids: string[];
+  if (tipo === "aniversariantes") {
+    const raw = rawFilterSql(filters, 2);
+    const rows = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
+      `SELECT "id" FROM "Client"
+       WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL
+         AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM (now() AT TIME ZONE 'America/Sao_Paulo')) ${raw.sql}
+       LIMIT 5000`,
+      tenantId,
+      ...raw.params
+    );
+    ids = rows.map((r) => r.id);
+  } else {
+    const extra =
+      tipo === "inativos"
+        ? { statusConta: "INATIVO" as const }
+        : tipo === "semUso"
+          ? { faixaUso: "NAO_UTILIZOU" as const }
+          : { faixaUso: "QUASE_COMPLETO" as const };
+    const rows = await prisma.client.findMany({
+      where: { ...clientWhere(tenantId, filters), ...extra },
+      select: { id: true },
+      take: 5000,
+    });
+    ids = rows.map((r) => r.id);
+  }
+  res.json({ tipo, total: ids.length, clientIds: ids });
 });
 
 export default router;
