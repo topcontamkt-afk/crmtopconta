@@ -5,8 +5,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { importLimiter } from "../middleware/rateLimit";
 import { runPurchaseImport, PurchaseRow } from "../services/purchaseImport";
-import { isMerchantCategory, MERCHANT_CATEGORIES } from "../services/merchantCategories";
-import { buildSegmentWhere } from "../services/segments";
+import { CATEGORY_MESSAGES, isMerchantCategory, MERCHANT_CATEGORIES, messageForCategories, MULTI_CATEGORY_MESSAGE } from "../services/merchantCategories";
 
 const router = Router();
 router.use(requireAuth);
@@ -90,7 +89,8 @@ router.get("/categories", async (req, res) => {
     },
     totais: totais[0] ?? { clientes: 0, compras: 0, valor: 0 },
     categorias: rows.map((r) => ({ ...r, label: label.get(r.category) ?? r.category })),
-    todasCategorias: MERCHANT_CATEGORIES,
+    todasCategorias: MERCHANT_CATEGORIES.map((c) => ({ ...c, mensagem: CATEGORY_MESSAGES[c.key] })),
+    mensagemVariasCategorias: MULTI_CATEGORY_MESSAGE,
   });
 });
 
@@ -162,11 +162,14 @@ const audienceSchema = z.object({
   categorias: z.string().optional(), // lista separada por vírgula
   lojistaIds: z.string().optional(),
   days: z.coerce.number().int().min(0).max(3650).default(0),
+  minCompras: z.coerce.number().int().min(1).max(50).default(1),
 });
 
 /**
- * GET /api/purchases/audiencia — clientes que compraram nas categorias/lojistas pedidos (para
- * "Criar campanha" na tela de Comércio). `autorizados` conta quem pode receber comunicação.
+ * GET /api/purchases/audiencia — clientes que compraram nas categorias/lojistas pedidos, com no
+ * mínimo `minCompras` compras (para "Criar campanha" na tela de Comércio). Devolve também quantos
+ * clientes há por frequência (1+, 2+, 3+) e quantos podem receber (sem opt-out), mais a mensagem
+ * sugerida para essas categorias.
  */
 router.get("/audiencia", async (req, res) => {
   const parsed = audienceSchema.safeParse(req.query);
@@ -176,16 +179,25 @@ router.get("/audiencia", async (req, res) => {
   const lojistaIds = (parsed.data.lojistaIds ?? "").split(",").filter(Boolean);
   if (categorias.length === 0 && lojistaIds.length === 0) return res.status(400).json({ error: "Informe ao menos uma categoria ou lojista" });
 
-  const where = buildSegmentWhere(tenantId, {
-    categoriasCompra: categorias.length ? categorias : undefined,
-    lojistaIds: lojistaIds.length ? lojistaIds : undefined,
-    compraNosUltimosDias: parsed.data.days > 0 ? parsed.data.days : undefined,
-  });
-  const [clients, autorizados] = await Promise.all([
-    prisma.client.findMany({ where, select: { id: true }, take: 5000 }),
-    prisma.client.count({ where: { AND: [where, { autorizacaoComunicacao: true, optOutAt: null }] } }),
-  ]);
-  res.json({ total: clients.length, autorizados, clientIds: clients.map((c) => c.id) });
+  const porCliente = await tenantRaw.query<Array<{ id: string; n: number }>>(
+    `SELECT p."clientId" AS id, COUNT(*)::int AS n
+     FROM "Purchase" p JOIN "Merchant" m ON m."id" = p."merchantId"
+     WHERE p."tenantId" = $1 AND p."occurredAt" >= $2::timestamptz
+       AND ($3::text[] IS NULL OR m."category" = ANY($3::text[]))
+       AND ($4::text[] IS NULL OR m."id" = ANY($4::text[]))
+     GROUP BY p."clientId"`,
+    tenantId,
+    sinceFor(parsed.data.days).toISOString(),
+    categorias.length ? categorias : null,
+    lojistaIds.length ? lojistaIds : null
+  );
+
+  const porFrequencia = [1, 2, 3].map((min) => porCliente.filter((c) => c.n >= min).length);
+  const ids = porCliente.filter((c) => c.n >= parsed.data.minCompras).map((c) => c.id).slice(0, 5000);
+  const autorizados = ids.length
+    ? await prisma.client.count({ where: { tenantId, id: { in: ids }, autorizacaoComunicacao: true, optOutAt: null } })
+    : 0;
+  res.json({ total: ids.length, autorizados, porFrequencia, clientIds: ids, mensagem: messageForCategories(categorias) });
 });
 
 export default router;

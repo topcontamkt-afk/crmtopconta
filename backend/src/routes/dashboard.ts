@@ -6,6 +6,7 @@ import { FAIXA_LABELS } from "../services/usage";
 import { addDays, clientWhere, computeKpis, DashboardFilters, rawFilterSql, todayBrt } from "../services/dashboardMetrics";
 import { computeHealth } from "../services/health";
 import { ensureTodaySnapshot } from "../services/snapshots";
+import { computeOpportunities, OPPORTUNITY_KEYS, OpportunityKey, opportunityAudience, suggestedMessage } from "../services/opportunities";
 
 const router = Router();
 router.use(requireAuth);
@@ -717,11 +718,28 @@ router.get("/overview", async (req, res) => {
   });
 });
 
-/** GET /api/dashboard/audiencia — ids dos clientes de uma oportunidade, para "Criar campanha". */
-const audienciaSchema = z.object({
-  tipo: z.enum(["inativos", "semUso", "quaseCompleto", "aniversariantes"]),
+const filtersQuerySchema = z.object({
   cidade: z.string().trim().min(1).max(120).optional(),
   empresaConveniada: z.string().trim().min(1).max(160).optional(),
+});
+
+/**
+ * GET /api/dashboard/oportunidades — fila de oportunidades (faixas de uso do limite, ativação,
+ * comércio, relacionamento, qualidade dos dados e itens que dependem de histórico). Ver
+ * services/opportunities.ts. Aceita os mesmos filtros de cidade/convênio do overview.
+ */
+router.get("/oportunidades", async (req, res) => {
+  const parsed = filtersQuerySchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  res.json(await computeOpportunities(prisma, req.user!.tenantId, parsed.data));
+});
+
+/**
+ * GET /api/dashboard/audiencia — ids dos clientes de uma oportunidade (para "Criar campanha"), junto
+ * da mensagem sugerida. `autorizados` conta quem de fato pode receber (sem opt-out).
+ */
+const audienciaSchema = filtersQuerySchema.extend({
+  tipo: z.enum(OPPORTUNITY_KEYS as [OpportunityKey, ...OpportunityKey[]]),
 });
 router.get("/audiencia", async (req, res) => {
   const parsed = audienciaSchema.safeParse(req.query);
@@ -729,33 +747,11 @@ router.get("/audiencia", async (req, res) => {
   const { tenantId } = req.user!;
   const { tipo, ...filters } = parsed.data;
 
-  let ids: string[];
-  if (tipo === "aniversariantes") {
-    const raw = rawFilterSql(filters, 2);
-    const rows = await tenantRaw.query<Array<{ id: string }>>(
-      `SELECT "id" FROM "Client"
-       WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL
-         AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM (now() AT TIME ZONE 'America/Sao_Paulo')) ${raw.sql}
-       LIMIT 5000`,
-      tenantId,
-      ...raw.params
-    );
-    ids = rows.map((r) => r.id);
-  } else {
-    const extra =
-      tipo === "inativos"
-        ? { statusConta: "INATIVO" as const }
-        : tipo === "semUso"
-          ? { faixaUso: "NAO_UTILIZOU" as const }
-          : { faixaUso: "QUASE_COMPLETO" as const };
-    const rows = await prisma.client.findMany({
-      where: { ...clientWhere(tenantId, filters), ...extra },
-      select: { id: true },
-      take: 5000,
-    });
-    ids = rows.map((r) => r.id);
-  }
-  res.json({ tipo, total: ids.length, clientIds: ids });
+  const ids = await opportunityAudience(prisma, tenantId, filters, tipo);
+  const autorizados = ids.length
+    ? await prisma.client.count({ where: { tenantId, id: { in: ids }, autorizacaoComunicacao: true, optOutAt: null } })
+    : 0;
+  res.json({ tipo, total: ids.length, autorizados, clientIds: ids, mensagem: suggestedMessage(tipo) ?? null });
 });
 
 export default router;

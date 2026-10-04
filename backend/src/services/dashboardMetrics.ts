@@ -35,16 +35,17 @@ export function clientWhere(tenantId: string, filters: DashboardFilters = {}): P
  * de placeholder livre ($n). Nomes de coluna são literais fixos; os valores sempre vão como
  * parâmetro — nunca interpolados.
  */
-export function rawFilterSql(filters: DashboardFilters, startIndex: number): { sql: string; params: string[] } {
+export function rawFilterSql(filters: DashboardFilters, startIndex: number, alias?: string): { sql: string; params: string[] } {
   const parts: string[] = [];
   const params: string[] = [];
+  const col = (name: string) => (alias ? `${alias}."${name}"` : `"${name}"`); // alias é literal do código, nunca entrada
   if (filters.cidade) {
     params.push(filters.cidade);
-    parts.push(`AND "cidade" = $${startIndex + params.length - 1}`);
+    parts.push(`AND ${col("cidade")} = $${startIndex + params.length - 1}`);
   }
   if (filters.empresaConveniada) {
     params.push(filters.empresaConveniada);
-    parts.push(`AND "empresaConveniada" = $${startIndex + params.length - 1}`);
+    parts.push(`AND ${col("empresaConveniada")} = $${startIndex + params.length - 1}`);
   }
   return { sql: parts.join(" "), params };
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Megaphone, ShoppingBag, Store, Users, Wallet } from "lucide-react";
@@ -19,7 +19,16 @@ interface CategoriasResponse {
   dados: { totalTransacoes: number; primeira: string | null; ultima: string | null };
   totais: { clientes: number; compras: number; valor: number };
   categorias: Categoria[];
-  todasCategorias: { key: string; label: string }[];
+  todasCategorias: { key: string; label: string; mensagem: string }[];
+  mensagemVariasCategorias: string;
+}
+
+interface Audiencia {
+  total: number;
+  autorizados: number;
+  porFrequencia: number[];
+  clientIds: string[];
+  mensagem: string;
 }
 
 interface Lojista {
@@ -36,6 +45,12 @@ interface Lojista {
 const currency = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
 const intFmt = new Intl.NumberFormat("pt-BR");
 const dateFmt = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString("pt-BR") : "—");
+
+/** Prévia da mensagem com valores de exemplo (o envio usa os dados reais de cada cliente). */
+function previaMensagem(texto: string): string {
+  const exemplo: Record<string, string> = { nome: "Maria", saldo: "R$ 850,00", limite: "R$ 1.500,00", percentual: "45", cidade: "Boquim" };
+  return texto.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k) => exemplo[k] ?? m);
+}
 
 const PERIODOS: { dias: number; label: string }[] = [
   { dias: 0, label: "Todo o período" },
@@ -62,6 +77,13 @@ export default function Commerce() {
   const [error, setError] = useState<string | null>(null);
   const [criando, setCriando] = useState(false);
   const [salvando, setSalvando] = useState<string | null>(null);
+  const [freq, setFreq] = useState(1);
+  const [canal, setCanal] = useState<"WHATSAPP" | "SMS">("WHATSAPP");
+  const [aud, setAud] = useState<Audiencia | null>(null);
+  const [carregandoAud, setCarregandoAud] = useState(false);
+  const [mensagem, setMensagem] = useState("");
+  const [mensagemEditada, setMensagemEditada] = useState(false);
+  const editadaRef = useRef(false); // espelho do estado para o efeito não refazer a busca ao editar o texto
 
   const load = useCallback(() => {
     Promise.all([
@@ -82,23 +104,40 @@ export default function Commerce() {
     setSelecionadas((s) => (s.includes(cat) ? s.filter((c) => c !== cat) : [...s, cat]));
   }
 
-  async function criarCampanha(categorias: string[], rotulo: string) {
-    setCriando(true);
-    setError(null);
-    try {
-      const r = await api<{ total: number; autorizados: number; clientIds: string[] }>(
-        `/purchases/audiencia?categorias=${categorias.join(",")}&days=${dias}`
-      );
-      if (r.total === 0) {
-        setError("Nenhum cliente comprou nessas categorias no período.");
-        return;
-      }
-      navigate("/campaigns/new", { state: { presetClientIds: r.clientIds, presetLabel: `Compraram em: ${rotulo}` } });
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setCriando(false);
+  // Público real da seleção (categorias + frequência mínima): recalcula quando algo muda.
+  useEffect(() => {
+    if (selecionadas.length === 0) {
+      setAud(null);
+      return;
     }
+    let cancelado = false;
+    setCarregandoAud(true);
+    api<Audiencia>(`/purchases/audiencia?categorias=${selecionadas.join(",")}&days=${dias}&minCompras=${freq}`)
+      .then((r) => {
+        if (cancelado) return;
+        setAud(r);
+        // A mensagem acompanha a seleção até o operador editar o texto.
+        setMensagem((atual) => (editadaRef.current && atual ? atual : r.mensagem));
+        setError(null);
+      })
+      .catch((e) => !cancelado && setError(e.message))
+      .finally(() => !cancelado && setCarregandoAud(false));
+    return () => {
+      cancelado = true;
+    };
+  }, [selecionadas, dias, freq]);
+
+  function criarCampanha() {
+    if (!aud || aud.total === 0) return;
+    setCriando(true);
+    navigate("/campaigns/new", {
+      state: {
+        presetClientIds: aud.clientIds,
+        presetLabel: `Compraram em: ${rotuloSelecao}${freq > 1 ? ` (${freq}+ compras)` : ""}`,
+        presetMessage: mensagem || aud.mensagem,
+        presetChannel: canal,
+      },
+    });
   }
 
   async function mudarCategoria(l: Lojista, category: string) {
@@ -205,34 +244,81 @@ export default function Commerce() {
               )}
             </div>
 
-            <div className="card pd-card pd-grow-1">
-              <h3>Campanha por categoria</h3>
-              <p className="pd-card-sub">Envie só para quem usa o cartão nesse tipo de comércio. Opt-outs são excluídos automaticamente.</p>
+            <div className="card pd-card pd-grow-1" style={{ borderColor: "#2c3a63" }}>
+              <h3>Montar campanha por comércio</h3>
+              <p className="pd-card-sub">Público: quem costuma comprar nas categorias escolhidas. Opt-outs ficam de fora automaticamente.</p>
+
+              <div className="pd-label">1 · Categorias</div>
               <div className="pd-chips">
                 {data.categorias.map((c) => (
-                  <button
-                    key={c.category}
-                    type="button"
-                    className={`pd-chip ${selecionadas.includes(c.category) ? "on" : ""}`}
-                    aria-pressed={selecionadas.includes(c.category)}
-                    onClick={() => alternar(c.category)}
-                  >
+                  <button key={c.category} type="button" className={`pd-chip ${selecionadas.includes(c.category) ? "on" : ""}`} aria-pressed={selecionadas.includes(c.category)} onClick={() => alternar(c.category)}>
                     {c.label} <strong>{intFmt.format(c.clientes)}</strong>
                   </button>
                 ))}
               </div>
-              <button
-                className="btn"
-                style={{ marginTop: 14, display: "inline-flex", alignItems: "center", gap: 6, minHeight: 40 }}
-                disabled={selecionadas.length === 0 || criando}
-                onClick={() => criarCampanha(selecionadas, rotuloSelecao)}
-              >
+
+              <div className="pd-label" style={{ marginTop: 14 }}>2 · Frequência mínima</div>
+              <div className="pd-seg" role="group" aria-label="Frequência mínima de compras" style={{ display: "flex" }}>
+                {[1, 2, 3].map((n) => (
+                  <button key={n} type="button" style={{ flex: 1 }} className={freq === n ? "on" : ""} aria-pressed={freq === n} onClick={() => setFreq(n)}>
+                    {n}+ {n === 1 ? "compra" : "compras"}
+                    {aud ? ` (${intFmt.format(aud.porFrequencia[n - 1] ?? 0)})` : ""}
+                  </button>
+                ))}
+              </div>
+
+              <div className="pd-label" style={{ marginTop: 14 }}>3 · Canal</div>
+              <div className="pd-seg" role="group" aria-label="Canal de envio" style={{ display: "flex" }}>
+                {([["WHATSAPP", "WhatsApp"], ["SMS", "SMS"]] as const).map(([k, l]) => (
+                  <button key={k} type="button" style={{ flex: 1 }} className={canal === k ? "on" : ""} aria-pressed={canal === k} onClick={() => setCanal(k)}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+
+              <div className="pd-audience">
+                <span className="pd-card-sub" style={{ margin: 0 }}>Público estimado</span>
+                <strong>
+                  {selecionadas.length === 0 ? "Escolha uma categoria" : carregandoAud && !aud ? "Calculando..." : `${intFmt.format(aud?.total ?? 0)} ${(aud?.total ?? 0) === 1 ? "cliente" : "clientes"}`}
+                </strong>
+                {aud && aud.total > 0 && (
+                  <span className="pd-card-sub" style={{ margin: 0 }}>
+                    {intFmt.format(aud.autorizados)} podem receber (sem opt-out). Quem compra em várias categorias é contado uma vez.
+                  </span>
+                )}
+                {aud && aud.total === 0 && <span className="pd-card-sub" style={{ margin: 0 }}>Ninguém atende a esse critério.</span>}
+              </div>
+
+              <div className="pd-label" style={{ marginTop: 14 }}>4 · Mensagem sugerida (editável)</div>
+              <textarea
+                aria-label="Mensagem da campanha"
+                rows={4}
+                value={mensagem}
+                disabled={selecionadas.length === 0}
+                onChange={(e) => {
+                  setMensagem(e.target.value);
+                  editadaRef.current = true;
+                  setMensagemEditada(true);
+                }}
+                style={{ width: "100%", resize: "vertical" }}
+              />
+              {mensagem && <p className="pd-hint">Prévia: {previaMensagem(mensagem)}</p>}
+              <p className="pd-hint">
+                Variáveis: {"{{nome}}"}, {"{{saldo}}"}, {"{{limite}}"}, {"{{percentual}}"}, {"{{cidade}}"}. Você ainda revisa tudo no assistente antes de enviar.
+              </p>
+              {mensagemEditada && (
+                <button type="button" className="btn secondary" style={{ minHeight: 36, marginBottom: 10 }} onClick={() => { editadaRef.current = false; setMensagemEditada(false); if (aud) setMensagem(aud.mensagem); }}>
+                  Voltar à mensagem sugerida
+                </button>
+              )}
+
+              <button className="btn" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, minHeight: 44, width: "100%" }} disabled={!aud || aud.total === 0 || criando} onClick={criarCampanha}>
                 <Megaphone size={14} />
-                {criando ? "Carregando..." : selecionadas.length === 0 ? "Escolha uma categoria" : `Criar campanha (${selecionadas.length})`}
+                {!aud || aud.total === 0 ? "Sem público para enviar" : `Criar campanha para ${intFmt.format(aud.total)} ${aud.total === 1 ? "cliente" : "clientes"}`}
               </button>
               {selecionadas.length > 0 && (
-                <button className="btn secondary" style={{ marginTop: 14, marginLeft: 8, minHeight: 40 }} onClick={() => setSelecionadas([])}>
-                  Limpar
+                <button className="btn secondary" style={{ marginTop: 8, minHeight: 36 }} onClick={() => setSelecionadas([])}>
+                  Limpar seleção
                 </button>
               )}
             </div>

@@ -21,6 +21,10 @@ interface Segment {
 interface PresetAudienceState {
   presetClientIds?: string[];
   presetLabel?: string;
+  // Texto e canal sugeridos pela tela de origem (ex.: oportunidade do Dashboard, campanha por
+  // categoria de comércio) — o operador ainda pode editar tudo no assistente.
+  presetMessage?: string;
+  presetChannel?: "WHATSAPP" | "SMS";
 }
 
 export default function CampaignWizard() {
@@ -49,11 +53,11 @@ export default function CampaignWizard() {
   const [audiencePreview, setAudiencePreview] = useState<number | null>(
     usePreset ? preset!.presetClientIds!.length : null
   );
-  const [channel, setChannel] = useState<"WHATSAPP" | "SMS">("WHATSAPP");
+  const [channel, setChannel] = useState<"WHATSAPP" | "SMS">(preset?.presetChannel ?? "WHATSAPP");
 
   const [templates, setTemplates] = useState<Template[]>([]);
   const [templateId, setTemplateId] = useState("");
-  const [messageTemplate, setMessageTemplate] = useState("Olá {{nome}}, você já utilizou {{percentual}}% do seu limite!");
+  const [messageTemplate, setMessageTemplate] = useState(preset?.presetMessage ?? "Olá {{nome}}, você já utilizou {{percentual}}% do seu limite!");
 
   const [abEnabled, setAbEnabled] = useState(false);
   const [messageTemplateB, setMessageTemplateB] = useState("");

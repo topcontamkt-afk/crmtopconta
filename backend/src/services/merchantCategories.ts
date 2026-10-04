@@ -60,3 +60,32 @@ export function categorizeMerchant(name: string): MerchantCategory {
   }
   return "OUTROS";
 }
+
+/**
+ * Mensagens sugeridas por categoria para campanhas de comércio. Só usam variáveis que o envio
+ * suporta (templateVariables.ts) — há teste garantindo isso. O operador pode editar antes de enviar.
+ */
+export const CATEGORY_MESSAGES: Record<MerchantCategory, string> = {
+  SUPERMERCADO: "Olá, {{nome}}! Seu cartão TopConta rende mais no supermercado. Use seu limite nas compras do mês nos parceiros credenciados.",
+  POSTO: "Olá, {{nome}}! Abasteça com seu cartão TopConta nos postos credenciados e aproveite seu limite disponível de {{saldo}}.",
+  FARMACIA: "Olá, {{nome}}! Cuide da saúde com seu cartão TopConta: ele é aceito nas farmácias credenciadas.",
+  ACOUGUE: "Olá, {{nome}}! A carne da semana pode sair no seu cartão TopConta, nos açougues credenciados.",
+  PADARIA: "Olá, {{nome}}! O café da manhã fica mais fácil com seu cartão TopConta, nas padarias credenciadas.",
+  VESTUARIO: "Olá, {{nome}}! Renove o guarda-roupa com seu cartão TopConta nas lojas credenciadas. Você tem {{saldo}} disponíveis.",
+  CONSTRUCAO: "Olá, {{nome}}! Obra ou reforma? Use seu cartão TopConta nas lojas de material de construção credenciadas.",
+  PAPELARIA: "Olá, {{nome}}! Material escolar e de escritório no seu cartão TopConta, nas papelarias credenciadas.",
+  AUTOPECAS: "Olá, {{nome}}! Peças e serviços para o seu veículo no cartão TopConta, nos parceiros credenciados.",
+  ACADEMIA: "Olá, {{nome}}! Cuide do bem-estar com seu cartão TopConta nas academias credenciadas.",
+  GAS_AGUA: "Olá, {{nome}}! Gás e água também cabem no seu cartão TopConta, nos parceiros credenciados.",
+  OUTROS: "Olá, {{nome}}! Conheça os parceiros credenciados que aceitam seu cartão TopConta.",
+};
+
+export const MULTI_CATEGORY_MESSAGE =
+  "Olá, {{nome}}! Seu cartão TopConta é aceito nos parceiros que você já conhece. Use seu limite disponível de {{saldo}}.";
+
+/** Mensagem sugerida para um conjunto de categorias (uma só usa a específica; várias, a genérica). */
+export function messageForCategories(keys: string[]): string {
+  const valid = keys.filter(isMerchantCategory);
+  if (valid.length === 1) return CATEGORY_MESSAGES[valid[0]];
+  return MULTI_CATEGORY_MESSAGE;
+}

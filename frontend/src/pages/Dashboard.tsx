@@ -26,6 +26,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { api } from "../api/client";
+import OpportunityQueue from "../components/OpportunityQueue";
 
 type Delta = { abs: number; pct: number | null } | null;
 
@@ -102,7 +103,6 @@ interface Perfil {
   faixaRenda: { faixa: string; count: number }[];
 }
 
-type OportunidadeTipo = "inativos" | "semUso" | "quaseCompleto" | "aniversariantes";
 type ChartTab = "uso" | "ativos" | "encerramentos" | "saude";
 
 const currency = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
@@ -133,12 +133,6 @@ const CHART_TABS: { key: ChartTab; label: string }[] = [
   { key: "saude", label: "Nota de saúde" },
 ];
 
-const OPORTUNIDADES: { tipo: OportunidadeTipo; titulo: string; desc: string; cor: string }[] = [
-  { tipo: "inativos", titulo: "Clientes inativos", desc: "Reengajamento é a prioridade da base.", cor: COLOR.danger },
-  { tipo: "semUso", titulo: "Nunca utilizaram", desc: "Cartão sem uso: candidatos a campanha de ativação.", cor: COLOR.warning },
-  { tipo: "quaseCompleto", titulo: "Quase no limite", desc: "Perto de esgotar o limite: renovação ou aumento.", cor: COLOR.primary },
-  { tipo: "aniversariantes", titulo: "Aniversariantes do mês", desc: "Boa hora para uma campanha de relacionamento.", cor: COLOR.purple },
-];
 
 const REFRESH_MS = 60_000;
 
@@ -152,7 +146,6 @@ export default function Dashboard() {
   const [perfil, setPerfil] = useState<Perfil | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [creating, setCreating] = useState<OportunidadeTipo | null>(null);
   const requestId = useRef(0);
 
   const load = useCallback(() => {
@@ -180,25 +173,6 @@ export default function Dashboard() {
     }, REFRESH_MS);
     return () => clearInterval(interval);
   }, [load]);
-
-  async function criarCampanha(tipo: OportunidadeTipo, titulo: string) {
-    setCreating(tipo);
-    try {
-      const qs = new URLSearchParams({ tipo });
-      if (cidade) qs.set("cidade", cidade);
-      if (convenio) qs.set("empresaConveniada", convenio);
-      const r = await api<{ total: number; clientIds: string[] }>(`/dashboard/audiencia?${qs}`);
-      if (r.total === 0) {
-        setError("Nenhum cliente neste público para criar a campanha.");
-        return;
-      }
-      navigate("/campaigns/new", { state: { presetClientIds: r.clientIds, presetLabel: titulo } });
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setCreating(null);
-    }
-  }
 
   if (error && !data) return <div className="error-text">{error}</div>;
   if (!data) return <DashboardSkeleton />;
@@ -316,42 +290,24 @@ export default function Dashboard() {
       </div>
 
       <div className="pd-row">
-        <div className="card pd-card pd-grow-13">
-          <h3>Fila de oportunidades</h3>
-          <p className="pd-card-sub">Do dado à ação: cada item abre o assistente de campanha com o público já selecionado.</p>
-          <div className="pd-opps">
-            {OPORTUNIDADES.map((o) => {
-              const n = data.oportunidades[o.tipo];
-              return (
-                <div key={o.tipo} className="pd-opp">
-                  <span className="pd-opp-n" style={{ color: o.cor, background: `${o.cor}22` }}>
-                    {intFmt.format(n)}
-                  </span>
-                  <div className="pd-opp-text">
-                    <strong>{o.titulo}</strong>
-                    <span>{o.desc}</span>
-                  </div>
-                  <button className="btn" disabled={n === 0 || creating !== null} onClick={() => criarCampanha(o.tipo, o.titulo)}>
-                    <Megaphone size={14} /> {creating === o.tipo ? "Carregando..." : "Criar campanha"}
-                  </button>
-                </div>
-              );
-            })}
+        <OpportunityQueue cidade={cidade} convenio={convenio} />
+      </div>
+
+      <div className="pd-row">
+        {cidadesBaixaAtivacao.length > 0 && (
+          <div className="card pd-card pd-grow-1">
+            <h3>Cidades com menor ativação</h3>
+            <p className="pd-card-sub">Cidades com pelo menos 5 clientes e a menor taxa de ativos.</p>
+            {cidadesBaixaAtivacao.map((c) => (
+              <Link key={c.cidade} to={`/clients?cidade=${encodeURIComponent(c.cidade)}&statusConta=INATIVO`} className="opportunity-city-row">
+                <span>
+                  {c.cidade} ({c.count})
+                </span>
+                <span>{pct(c.taxa)} ativos</span>
+              </Link>
+            ))}
           </div>
-          {cidadesBaixaAtivacao.length > 0 && (
-            <div style={{ marginTop: 14 }}>
-              <div className="pd-label">Cidades com menor ativação</div>
-              {cidadesBaixaAtivacao.map((c) => (
-                <Link key={c.cidade} to={`/clients?cidade=${encodeURIComponent(c.cidade)}&statusConta=INATIVO`} className="opportunity-city-row">
-                  <span>
-                    {c.cidade} ({c.count})
-                  </span>
-                  <span>{pct(c.taxa)} ativos</span>
-                </Link>
-              ))}
-            </div>
-          )}
-        </div>
+        )}
 
         <div className="card pd-card pd-grow-1">
           <h3>Ativação da base</h3>

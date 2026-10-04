@@ -79,7 +79,7 @@ router.delete("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
 });
 
 const previewSchema = z.object({
-  sample: z.record(z.any()).default({ nome: "Maria Silva", cidade: "São Paulo", percentual: 45 }),
+  sample: z.record(z.any()).default({ nome: "Maria Silva", cidade: "São Paulo", percentual: 45, saldo: "R$ 850,00", limite: "R$ 1.500,00" }),
 });
 
 /** POST /api/templates/:id/preview — pré-visualização rica com placeholders substituídos. */

@@ -124,6 +124,18 @@ que a tabela foi criada e não é reconstruível. Com filtro de cidade/convênio
 ficam indisponíveis (a foto é da base inteira). A nota de saúde (`services/health.ts`) tem pesos e
 metas fixos e é testada em `health.test.ts`. O SQL da tabela está em `backend/prisma/sql/`.
 
+### Fila de oportunidades e campanhas por categoria
+
+`services/opportunities.ts` calcula a fila do dashboard (`GET /api/dashboard/oportunidades`): faixas
+de uso do limite (cortes 50/70/80%), ativação, comércio (supermercado sem posto, 1 compra, 3+ compras,
+top 10% em valor), relacionamento, qualidade de dados (status `dados`: não é campanha) e itens que
+dependem de histórico (`historico`). `GET /api/dashboard/audiencia?tipo=` devolve os ids do público e a
+mensagem sugerida; o assistente de campanha recebe tudo via router state (`presetClientIds`,
+`presetMessage`, `presetChannel`). Em /commerce, `GET /api/purchases/audiencia` aceita `minCompras`
+(frequência mínima) e devolve o público por frequência e a mensagem da categoria. Mensagens sugeridas só
+podem usar as variáveis de `services/templateVariables.ts` (`nome`, `cidade`, `percentual`, `saldo`,
+`limite`), que o envio de fato preenche; `opportunities.test.ts` garante isso.
+
 ### Comércio credenciado (compras por categoria)
 
 A aba "Todas as Compras" da planilha (transações do cartão) entra por `POST /api/purchases/import`
