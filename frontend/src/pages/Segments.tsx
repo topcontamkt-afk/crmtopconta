@@ -35,6 +35,9 @@ export default function Segments() {
   const [semUsoDiasMin, setSemUsoDiasMin] = useState("");
   const [usadoNosUltimosDias, setUsadoNosUltimosDias] = useState("");
   const [tags, setTags] = useState("");
+  const [categoriasCompra, setCategoriasCompra] = useState<string[]>([]);
+  const [compraNosUltimosDias, setCompraNosUltimosDias] = useState("");
+  const [categoriasDisponiveis, setCategoriasDisponiveis] = useState<{ key: string; label: string }[]>([]);
   const [dynamic, setDynamic] = useState(true);
   const [preview, setPreview] = useState<number | null>(null);
 
@@ -43,6 +46,9 @@ export default function Segments() {
   }
 
   useEffect(load, []);
+  useEffect(() => {
+    api<{ todasCategorias: { key: string; label: string }[] }>("/purchases/categories").then((r) => setCategoriasDisponiveis(r.todasCategorias)).catch(() => {});
+  }, []);
 
   function toggle(list: string[], value: string, setList: (v: string[]) => void) {
     setList(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
@@ -56,6 +62,8 @@ export default function Segments() {
       semUsoDiasMin: semUsoDiasMin ? Number(semUsoDiasMin) : undefined,
       usadoNosUltimosDias: usadoNosUltimosDias ? Number(usadoNosUltimosDias) : undefined,
       tags: tags.trim() ? tags.split(",").map((t) => t.trim()).filter(Boolean) : undefined,
+      categoriasCompra: categoriasCompra.length ? categoriasCompra : undefined,
+      compraNosUltimosDias: compraNosUltimosDias ? Number(compraNosUltimosDias) : undefined,
     };
   }
 
@@ -169,6 +177,34 @@ export default function Segments() {
               onChange={(e) => setUsadoNosUltimosDias(e.target.value)}
             />
           </div>
+        </div>
+
+        <div className="form-row">
+          <label>Comprou no comércio credenciado (categoria)</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
+            {categoriasDisponiveis.map((c) => (
+              <label key={c.key} style={{ fontSize: 13, fontWeight: 400 }}>
+                <input
+                  type="checkbox"
+                  checked={categoriasCompra.includes(c.key)}
+                  onChange={() => toggle(categoriasCompra, c.key, setCategoriasCompra)}
+                />{" "}
+                {c.label}
+              </label>
+            ))}
+          </div>
+          <input
+            type="number"
+            min={0}
+            placeholder="Comprou nos últimos (dias) — vazio = qualquer data"
+            style={{ marginTop: 8 }}
+            value={compraNosUltimosDias}
+            onChange={(e) => setCompraNosUltimosDias(e.target.value)}
+          />
+          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            Vem da aba “Todas as Compras” (Importações → formato Compras). Sem categoria marcada, o prazo vale
+            para qualquer compra no comércio credenciado.
+          </span>
         </div>
 
         <div className="form-row">

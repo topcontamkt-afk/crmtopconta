@@ -124,6 +124,23 @@ que a tabela foi criada e não é reconstruível. Com filtro de cidade/convênio
 ficam indisponíveis (a foto é da base inteira). A nota de saúde (`services/health.ts`) tem pesos e
 metas fixos e é testada em `health.test.ts`. O SQL da tabela está em `backend/prisma/sql/`.
 
+### Comércio credenciado (compras por categoria)
+
+A aba "Todas as Compras" da planilha (transações do cartão) entra por `POST /api/purchases/import`
+(`services/purchaseImport.ts`, formato "Compras" na tela de Importações; CSV exportado da aba). Cada linha
+liga ao cliente pelo hash do CPF/CNPJ (zero à esquerda perdido pela planilha é recomposto); transação
+de cliente que ainda não está na base é ignorada e reaparece ao reenviar o arquivo (idempotente por
+`idTransacaoCartao`). Só "Compra à Vista..." tem lojista (`Merchant`); saque/Pix/assinatura entram sem
+lojista e alimentam `Client.dataUltimaUtilizacao`. A planilha não traz categoria: ela é deduzida do nome
+do lojista (`services/merchantCategories.ts`) e é editável em /commerce (`categorySource=MANUAL` nunca é
+sobrescrito). Os valores desta aba vêm no formato dos EUA (`R$ 1,591.00`), por isso `parseMoney` deduz o
+separador decimal. Segmentos e campanhas filtram por `categoriasCompra`/`lojistaIds`/`compraNosUltimosDias`
+(`services/segments.ts`).
+
+**SQL cru e RLS:** `prisma.$queryRaw*` não passa pelo hook de tenant e, sob o role `app_runtime`, não
+enxerga nenhuma linha. Use sempre `tenantRaw.query/execute` (`config/db.ts`), que abre a transaction com
+`app.tenant_id`.
+
 ### Cron jobs: local vs. Vercel
 
 Locally, `services/scheduler.ts` runs everything via `node-cron` in-process.

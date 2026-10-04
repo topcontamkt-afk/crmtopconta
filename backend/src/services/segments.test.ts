@@ -53,3 +53,23 @@ describe("buildSegmentWhere", () => {
     expect(buildSegmentWhere("t1", {})).toEqual({ tenantId: "t1" });
   });
 });
+
+describe("filtros de comércio credenciado (compras)", () => {
+  it("categoriasCompra vira purchases.some com merchant.category e tenantId", () => {
+    const where: any = buildSegmentWhere("t1", { categoriasCompra: ["SUPERMERCADO", "POSTO"] });
+    expect(where.AND[0].purchases.some).toEqual({ tenantId: "t1", merchant: { category: { in: ["SUPERMERCADO", "POSTO"] } } });
+  });
+
+  it("só o prazo vale para qualquer compra no comércio (lojista não nulo) dentro da janela", () => {
+    const where: any = buildSegmentWhere("t1", { compraNosUltimosDias: 30 });
+    const some = where.AND[0].purchases.some;
+    expect(some.merchantId).toEqual({ not: null });
+    expect(some.occurredAt.gte).toBeInstanceOf(Date);
+    expect(some.occurredAt.gte.getTime()).toBeLessThan(Date.now());
+  });
+
+  it("sem filtro de compra não adiciona condição de purchases", () => {
+    const where: any = buildSegmentWhere("t1", { cidade: ["Boquim"] });
+    expect(JSON.stringify(where)).not.toContain("purchases");
+  });
+});

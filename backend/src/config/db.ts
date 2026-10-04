@@ -1,6 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import { poolerSafeDatabaseUrl } from "./databaseUrl";
-import { tenantGuardExtension } from "./tenantGuard";
+import { runRawInTenantTx, tenantGuardExtension } from "./tenantGuard";
 
 // DATABASE_URL conecta como o role `app_runtime` (RLS real, sem BYPASSRLS — ver migration
 // add_rls_policies e services/auditIntegrity.ts/config/tenantGuard.ts para o resto do desenho).
@@ -21,3 +21,15 @@ export const prisma = new PrismaClient({
 // function that receives the shared client as a parameter should be typed with this alias
 // instead of importing `PrismaClient` from "@prisma/client" directly.
 export type AppPrismaClient = typeof prisma;
+
+/**
+ * SQL cru com RLS: roda dentro de uma transaction com `app.tenant_id` setado (ver
+ * runRawInTenantTx). `prisma.$queryRawUnsafe` direto NÃO enxerga nenhuma linha sob RLS real.
+ * Os valores sempre vão como parâmetros ($1, $2...) — nunca interpolados no texto do SQL.
+ */
+export const tenantRaw = {
+  query: <T = unknown>(sql: string, ...params: unknown[]): Promise<T> =>
+    runRawInTenantTx(prisma, (tx) => tx.$queryRawUnsafe<T>(sql, ...params)),
+  execute: (sql: string, ...params: unknown[]): Promise<number> =>
+    runRawInTenantTx(prisma, (tx) => tx.$executeRawUnsafe(sql, ...params)),
+};

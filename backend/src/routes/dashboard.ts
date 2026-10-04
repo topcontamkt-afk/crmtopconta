@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../config/db";
+import { prisma, tenantRaw } from "../config/db";
 import { requireAuth } from "../middleware/auth";
 import { FAIXA_LABELS } from "../services/usage";
 import { addDays, clientWhere, computeKpis, DashboardFilters, rawFilterSql, todayBrt } from "../services/dashboardMetrics";
@@ -25,7 +25,7 @@ interface RankingRow {
  * então interpolar o nome da coluna no texto do SQL é seguro.
  */
 async function rankingPorCampo(tenantId: string, column: "cidade" | "empresaConveniada"): Promise<RankingRow[]> {
-  const rows = await prisma.$queryRawUnsafe<
+  const rows = await tenantRaw.query<
     Array<{ chave: string; total: bigint; ativos: bigint; valor_utilizado: number | null }>
   >(
     `SELECT "${column}" AS chave,
@@ -125,7 +125,7 @@ router.get("/uso-mensal", async (req, res) => {
 
   const [totalClientes, porMesRaw] = await Promise.all([
     prisma.client.count({ where: { tenantId } }),
-    prisma.$queryRawUnsafe<Array<{ mes: Date; usados: bigint }>>(
+    tenantRaw.query<Array<{ mes: Date; usados: bigint }>>(
       `SELECT date_trunc('month', "dataUltimaUtilizacao") AS mes, COUNT(*)::bigint AS usados
        FROM "Client"
        WHERE "tenantId" = $1
@@ -170,7 +170,7 @@ router.get("/encerramentos", async (req, res) => {
 
   const [totalClientes, porMesRaw, motivosRaw] = await Promise.all([
     prisma.client.count({ where: { tenantId } }),
-    prisma.$queryRawUnsafe<Array<{ mes: Date; encerrados: bigint }>>(
+    tenantRaw.query<Array<{ mes: Date; encerrados: bigint }>>(
       `SELECT date_trunc('month', "encerradoEm") AS mes, COUNT(*)::bigint AS encerrados
        FROM "Client"
        WHERE "tenantId" = $1
@@ -228,7 +228,7 @@ router.get("/engajamento", async (req, res) => {
   const { tenantId } = req.user!;
 
   const [niveisRaw, totalAniversariantes, aniversariantesRaw] = await Promise.all([
-    prisma.$queryRawUnsafe<Array<{ nivel: string; count: bigint }>>(
+    tenantRaw.query<Array<{ nivel: string; count: bigint }>>(
       `SELECT
          CASE
            WHEN "statusConta" = 'BLOQUEADO' THEN 'bloqueado'
@@ -244,13 +244,13 @@ router.get("/engajamento", async (req, res) => {
        GROUP BY nivel`,
       tenantId
     ),
-    prisma.$queryRawUnsafe<Array<{ count: bigint }>>(
+    tenantRaw.query<Array<{ count: bigint }>>(
       `SELECT COUNT(*)::bigint AS count FROM "Client"
        WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL
          AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM CURRENT_DATE)`,
       tenantId
     ),
-    prisma.$queryRawUnsafe<
+    tenantRaw.query<
       Array<{ id: string; nome: string; telefone: string; cidade: string | null; dia: number }>
     >(
       `SELECT "id", "nome", "telefone", "cidade", EXTRACT(DAY FROM "dataNascimento")::int AS dia
@@ -298,7 +298,7 @@ router.get("/perfil", async (req, res) => {
   const { tenantId } = req.user!;
 
   const [faixaEtariaRaw, porSexoRaw, faixaRendaRaw] = await Promise.all([
-    prisma.$queryRawUnsafe<Array<{ faixa: string; count: bigint }>>(
+    tenantRaw.query<Array<{ faixa: string; count: bigint }>>(
       `SELECT
          CASE
            WHEN "dataNascimento" IS NULL THEN 'desconhecida'
@@ -316,7 +316,7 @@ router.get("/perfil", async (req, res) => {
       tenantId
     ),
     prisma.client.groupBy({ by: ["sexo"], where: { tenantId }, _count: true }),
-    prisma.$queryRawUnsafe<Array<{ faixa: string; count: bigint }>>(
+    tenantRaw.query<Array<{ faixa: string; count: bigint }>>(
       `SELECT
          CASE
            WHEN COALESCE("remuneracaoBruta", "remuneracaoLiquida") IS NULL THEN 'desconhecida'
@@ -359,7 +359,7 @@ router.get("/evolucao", async (req, res) => {
   const { tenantId } = req.user!;
   const granularity = (req.query.granularity as string) === "monthly" ? "month" : "week";
 
-  const rows: Array<{ periodo: Date; total: bigint }> = await prisma.$queryRawUnsafe(
+  const rows: Array<{ periodo: Date; total: bigint }> = await tenantRaw.query(
     `SELECT date_trunc('${granularity}', "createdAt") AS periodo, COUNT(*)::bigint AS total
      FROM "Client" WHERE "tenantId" = $1
      GROUP BY periodo ORDER BY periodo ASC LIMIT 52`,
@@ -467,7 +467,7 @@ router.get("/overview", async (req, res) => {
       orderBy: { _count: { empresaConveniada: "desc" } },
       take: 100,
     }),
-    prisma.$queryRawUnsafe<Array<{ count: bigint }>>(
+    tenantRaw.query<Array<{ count: bigint }>>(
       `SELECT COUNT(*)::bigint AS count FROM "Client"
        WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL
          AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM (now() AT TIME ZONE 'America/Sao_Paulo')) ${raw.sql}`,
@@ -732,7 +732,7 @@ router.get("/audiencia", async (req, res) => {
   let ids: string[];
   if (tipo === "aniversariantes") {
     const raw = rawFilterSql(filters, 2);
-    const rows = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
+    const rows = await tenantRaw.query<Array<{ id: string }>>(
       `SELECT "id" FROM "Client"
        WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL
          AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM (now() AT TIME ZONE 'America/Sao_Paulo')) ${raw.sql}

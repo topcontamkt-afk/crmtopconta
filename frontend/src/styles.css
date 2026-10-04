@@ -889,3 +889,24 @@ input, select, textarea {
 @keyframes pdShimmer { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
 .pd-skel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); animation: pdShimmer 1.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .pd-skel { animation: none; } .pd-fill { transition: none; } }
+
+/* ---- Comércio credenciado (pages/Commerce.tsx) ---- */
+.pd-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.pd-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.pd-chip strong { color: var(--text); font-weight: 600; }
+.pd-chip:hover { color: var(--text); }
+.pd-chip.on { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.pd-chip:focus-visible { outline: 2px solid var(--primary-hover); outline-offset: 2px; }

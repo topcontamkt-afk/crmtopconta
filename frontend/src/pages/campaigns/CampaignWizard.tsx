@@ -43,6 +43,9 @@ export default function CampaignWizard() {
   const [statusConta, setStatusConta] = useState("");
   const [semUsoDiasMin, setSemUsoDiasMin] = useState("");
   const [usadoNosUltimosDias, setUsadoNosUltimosDias] = useState("");
+  const [categoriaCompra, setCategoriaCompra] = useState("");
+  const [compraNosUltimosDias, setCompraNosUltimosDias] = useState("");
+  const [categoriasDisponiveis, setCategoriasDisponiveis] = useState<{ key: string; label: string }[]>([]);
   const [audiencePreview, setAudiencePreview] = useState<number | null>(
     usePreset ? preset!.presetClientIds!.length : null
   );
@@ -72,6 +75,7 @@ export default function CampaignWizard() {
 
   useEffect(() => {
     api<Segment[]>("/segments").then(setSegments);
+    api<{ todasCategorias: { key: string; label: string }[] }>("/purchases/categories").then((r) => setCategoriasDisponiveis(r.todasCategorias)).catch(() => {});
   }, []);
 
   function adHocFilters() {
@@ -84,6 +88,8 @@ export default function CampaignWizard() {
       statusConta: statusConta ? [statusConta] : undefined,
       semUsoDiasMin: semUsoDiasMin ? Number(semUsoDiasMin) : undefined,
       usadoNosUltimosDias: usadoNosUltimosDias ? Number(usadoNosUltimosDias) : undefined,
+      categoriasCompra: categoriaCompra ? [categoriaCompra] : undefined,
+      compraNosUltimosDias: compraNosUltimosDias ? Number(compraNosUltimosDias) : undefined,
     };
   }
 
@@ -243,6 +249,22 @@ export default function CampaignWizard() {
                     style={{ width: 160 }}
                     value={usadoNosUltimosDias}
                     onChange={(e) => setUsadoNosUltimosDias(e.target.value)}
+                  />
+                  <select value={categoriaCompra} onChange={(e) => setCategoriaCompra(e.target.value)} aria-label="Comprou em (categoria de comércio)">
+                    <option value="">Qualquer comércio</option>
+                    {categoriasDisponiveis.map((c) => (
+                      <option key={c.key} value={c.key}>
+                        Comprou em: {c.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    min={0}
+                    placeholder="Comprou nos últimos (dias)"
+                    style={{ width: 170 }}
+                    value={compraNosUltimosDias}
+                    onChange={(e) => setCompraNosUltimosDias(e.target.value)}
                   />
                   <button type="button" className="btn secondary" onClick={previewAudience}>
                     Contar público
