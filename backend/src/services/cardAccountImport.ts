@@ -4,6 +4,7 @@ import { computeUsage } from "./usage";
 import { hashDocument, isValidDocument, maskDocument, detectDocumentType, normalizePhone } from "./masking";
 import { notify } from "./notifications";
 import { ImportRunResult } from "./importService";
+import { normalizeDocumentDigits, parseMoney } from "./purchaseParsing";
 
 /**
  * Importador para o formato real de "Cartões e contas" — cadastro/ativação de cartão vinculado
@@ -110,15 +111,12 @@ function parseDate(v?: string): Date | undefined {
   return isNaN(d.getTime()) ? undefined : d;
 }
 
-function parseNumber(v?: string | number): number | undefined {
+export function parseNumber(v?: string | number): number | undefined {
   if (v === undefined || v === null || v === "") return undefined;
   if (typeof v === "number") return v;
-  // Colunas de valor na planilha real vêm formatadas como moeda (ex.: "R$ 500,00", "R$ -" pra
-  // zero, "R$ 0,34") — remove o símbolo antes de converter, e trata "-" isolado como zero.
-  let s = String(v).trim().replace(/^R\$\s*/i, "").trim();
-  if (s === "-" || s === "") return 0;
-  const n = Number(s.replace(/\./g, "").replace(",", "."));
-  return isNaN(n) ? undefined : n;
+  // Aceita "R$ 500,00" (BR), "2,000.00" / "10.50" (EUA, comum em CSV exportado do Sheets) e
+  // "R$ -" (zero): parseMoney deduz o separador decimal de cada valor em vez de assumir BR.
+  return parseMoney(v) ?? undefined;
 }
 
 function parseBool(v?: string | boolean): boolean {
@@ -148,7 +146,10 @@ interface PreparedRow {
 }
 
 /** Fase 1 (sem banco): valida e transforma cada linha crua no formato de gravação. */
-function prepareRow(raw: CardAccountRow, rowNumber: number, tenantCpfSalt: string, jobId: string, tenantId: string, errors: RowError[]): PreparedRow | null {
+function prepareRow(rawIn: CardAccountRow, rowNumber: number, tenantCpfSalt: string, jobId: string, tenantId: string, errors: RowError[]): PreparedRow | null {
+  // Planilhas perdem o zero à esquerda do CPF/CNPJ (ex.: CPF com 10 dígitos): recompõe antes de validar.
+  const doc = rawIn.documento ? normalizeDocumentDigits(rawIn.documento) : null;
+  const raw: CardAccountRow = doc ? { ...rawIn, documento: doc } : rawIn;
   const err = validateRow(raw, rowNumber);
   if (err) {
     errors.push(err);
