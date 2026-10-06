@@ -81,10 +81,16 @@ const REQUIRED_FIELDS: (keyof CardAccountRow)[] = ["documento", "nome", "telefon
 //  - PODE_TER_MAS_NAO_ATIVOU: aprovado mas nunca ativou -> Inativo (público "sem uso")
 //  - NAO_PODE_TER: reprovado (cadastro originado no comércio) -> Inativo, sem autorização de
 //    comunicação (nunca houve contrato aceito) e origemCliente marcado como "comercio"
-const STATUS_CARTAO_MAP: Record<string, "ATIVO" | "INATIVO"> = {
+// Também aceita status em texto simples ("Ativo", "Inativo", "Bloqueado", "Encerrado"), como vem
+// em exportações de painéis de acompanhamento — sem marcar o cliente como reprovado.
+const STATUS_CARTAO_MAP: Record<string, "ATIVO" | "INATIVO" | "BLOQUEADO"> = {
   ATIVOU_CARTAO: "ATIVO",
   PODE_TER_MAS_NAO_ATIVOU: "INATIVO",
   NAO_PODE_TER: "INATIVO",
+  ATIVO: "ATIVO",
+  INATIVO: "INATIVO",
+  BLOQUEADO: "BLOQUEADO",
+  ENCERRADO: "INATIVO",
 };
 
 // Concorrência limitada em vez de Promise.all irrestrito: grava várias linhas ao mesmo tempo
