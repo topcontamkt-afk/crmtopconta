@@ -2,13 +2,14 @@ import { ChangeEvent, Fragment, useEffect, useState } from "react";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { parseCsv } from "../utils/csv";
-import { autoMapColumns, CARD_ACCOUNT_FIELDS, IMPORT_FIELDS, ImportFieldDef } from "../utils/importFields";
+import { autoMapColumns, CARD_ACCOUNT_FIELDS, IMPORT_FIELDS, ImportFieldDef, PURCHASE_FIELDS } from "../utils/importFields";
 
-type UploadFormat = "cartoes" | "generico";
+type UploadFormat = "cartoes" | "generico" | "compras";
 
 const FORMAT_CONFIG: Record<UploadFormat, { label: string; fields: ImportFieldDef[]; endpoint: string }> = {
   cartoes: { label: "Cartões e contas (cadastro/ativação de cartão)", fields: CARD_ACCOUNT_FIELDS, endpoint: "/imports/cartoes" },
   generico: { label: "Genérico (id_cliente, status_conta, autorização LGPD...)", fields: IMPORT_FIELDS, endpoint: "/imports/csv" },
+  compras: { label: "Compras (aba “Todas as Compras”: transações do cartão e lojistas)", fields: PURCHASE_FIELDS, endpoint: "/purchases/import" },
 };
 
 interface Quality {
@@ -133,22 +134,31 @@ export default function Imports() {
     let added = 0;
     let updated = 0;
     let errors = 0;
+    let unmatched = 0;
+    let merchantsCreated = 0;
 
     try {
       for (let i = 0; i < totalBatches; i++) {
         const batch = rows.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE);
         setUploadStatus(`Importando lote ${i + 1} de ${totalBatches} (${added + updated} de ${rows.length} processados até agora)...`);
-        const resp = await api<{ addedCount: number; updatedCount: number; errorCount: number }>(
+        const resp = await api<{ addedCount: number; updatedCount: number; errorCount: number; unmatchedRows?: number; merchantsCreated?: number }>(
           FORMAT_CONFIG[format].endpoint,
           { method: "POST", body: { rows: batch } }
         );
         added += resp.addedCount;
         updated += resp.updatedCount;
         errors += resp.errorCount;
+        unmatched += resp.unmatchedRows ?? 0;
+        merchantsCreated += resp.merchantsCreated ?? 0;
       }
       setUploadStatus(
-        `Importado: ${added} novos, ${updated} atualizados, ${errors} com erro/aviso.` +
-          (errors > 0 ? " Veja o detalhe no histórico abaixo." : "")
+        format === "compras"
+          ? `Compras importadas: ${added} novas, ${updated} já existiam, ${merchantsCreated} lojista(s) novo(s), ${errors} linha(s) com erro.` +
+              (unmatched > 0
+                ? ` ${unmatched} transação(ões) ficaram de fora porque o cliente ainda não está na base: importe os clientes e envie este arquivo de novo (não duplica).`
+                : "")
+          : `Importado: ${added} novos, ${updated} atualizados, ${errors} com erro/aviso.` +
+              (errors > 0 ? " Veja o detalhe no histórico abaixo." : "")
       );
       resetUpload();
       load();

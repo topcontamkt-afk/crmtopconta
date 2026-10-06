@@ -97,6 +97,25 @@ async function sendWithFailover(
   return { ...last, provider: providers[providers.length - 1]?.name ?? "none" };
 }
 
+const brl = (n: unknown) => Number(n ?? 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+
+/** Contexto de renderização de um cliente real (usado no envio). */
+export function templateContext(client: {
+  nome: string;
+  cidade: string | null;
+  percentualUtilizado: unknown;
+  saldoDisponivel: unknown;
+  limiteTotal: unknown;
+}): Record<string, unknown> {
+  return {
+    nome: client.nome,
+    cidade: client.cidade,
+    percentual: client.percentualUtilizado,
+    saldo: brl(client.saldoDisponivel),
+    limite: brl(client.limiteTotal),
+  };
+}
+
 export function renderTemplate(template: string, client: Record<string, any>): string {
   return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => {
     const value = client[key];
@@ -215,11 +234,7 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
     }
 
     const templateBody = evt.variant === "B" && campaign.messageTemplateB ? campaign.messageTemplateB : campaign.messageTemplate;
-    const body = renderTemplate(templateBody, {
-      nome: evt.client.nome,
-      cidade: evt.client.cidade,
-      percentual: evt.client.percentualUtilizado,
-    });
+    const body = renderTemplate(templateBody, templateContext(evt.client));
 
     const sendResult = await sendWithFailover(providers, evt.client.telefone, body);
 
@@ -261,7 +276,7 @@ export async function sendTestMessages(
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
   const providers = await resolveProviders(prisma, tenantId, campaign.channel);
 
-  const sample = { nome: "Cliente Teste", cidade: "São Paulo", percentual: 42 };
+  const sample = { nome: "Cliente Teste", cidade: "São Paulo", percentual: 42, saldo: brl(850), limite: brl(1500) };
   const body = renderTemplate(campaign.messageTemplate, sample);
 
   const results = [];

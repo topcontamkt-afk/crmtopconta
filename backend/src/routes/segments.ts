@@ -26,6 +26,9 @@ const filtersSchema = z.object({
   tags: z.array(z.string()).optional(),
   search: z.string().optional(),
   empresaConveniada: z.array(z.string()).optional(),
+  categoriasCompra: z.array(z.string()).optional(),
+  lojistaIds: z.array(z.string()).optional(),
+  compraNosUltimosDias: z.number().optional(),
 });
 
 // Grupo de filtros combináveis (AND/OR aninhados) — segment builder avançado (Fase 2).

@@ -16,6 +16,13 @@ export interface SegmentFilters {
   clientIds?: string[]; // seleção explícita de clientes (usado pelo motor de automação e por
   // públicos pré-montados no Dashboard, ex.: aniversariantes do mês)
   empresaConveniada?: string[]; // convênio/secretaria de vínculo (só populado no formato "Cartões e contas"/"SaldoCartao")
+  // Comércio credenciado (aba "Todas as Compras"): clientes que compraram em lojistas de certas
+  // categorias (ex.: SUPERMERCADO, POSTO) e/ou em lojistas específicos, opcionalmente dentro de uma
+  // janela de dias. Sem categoria nem lojista, `compraNosUltimosDias` vale para qualquer compra no
+  // comércio credenciado.
+  categoriasCompra?: string[];
+  lojistaIds?: string[];
+  compraNosUltimosDias?: number;
 }
 
 /**
@@ -53,6 +60,16 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
   if (filters.usadoNosUltimosDias !== undefined) {
     const cutoff = new Date(Date.now() - filters.usadoNosUltimosDias * 24 * 60 * 60 * 1000);
     and.push({ dataUltimaUtilizacao: { gte: cutoff } });
+  }
+  if (filters.categoriasCompra?.length || filters.lojistaIds?.length || filters.compraNosUltimosDias !== undefined) {
+    const purchase: Prisma.PurchaseWhereInput = { tenantId };
+    if (filters.categoriasCompra?.length) purchase.merchant = { category: { in: filters.categoriasCompra } };
+    if (filters.lojistaIds?.length) purchase.merchantId = { in: filters.lojistaIds };
+    if (!filters.categoriasCompra?.length && !filters.lojistaIds?.length) purchase.merchantId = { not: null };
+    if (filters.compraNosUltimosDias !== undefined) {
+      purchase.occurredAt = { gte: new Date(Date.now() - filters.compraNosUltimosDias * 24 * 60 * 60 * 1000) };
+    }
+    and.push({ purchases: { some: purchase } });
   }
   if (filters.search) {
     and.push({

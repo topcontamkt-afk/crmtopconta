@@ -86,3 +86,21 @@ export function autoMapColumns(headers: string[], fields: ImportFieldDef[] = IMP
   }
   return mapping;
 }
+
+/**
+ * Aba "Todas as Compras" (transações do cartão) — mesmos campos de
+ * backend/src/services/purchaseImport.ts (PurchaseRow). Só "Compra à Vista..." tem lojista; as
+ * demais transações (saque, Pix, assinatura) entram sem lojista. Nesta aba os valores vêm no
+ * formato dos EUA ("R$ 1,591.00"): o backend deduz o separador decimal de cada valor.
+ */
+export const PURCHASE_FIELDS: ImportFieldDef[] = [
+  { key: "id_transacao", label: "ID da transação", required: true, synonyms: ["idtransacaocartao", "id_transacao_cartao", "idtransacao", "id_transacao"] },
+  { key: "data", label: "Data da transação", required: true, synonyms: ["dtconfirmada", "dt_confirmada", "data", "data_transacao", "datatransacao"] },
+  { key: "documento", label: "CPF/CNPJ do cliente", required: true, synonyms: ["cpfcnpjcliente", "cpf_cnpj_cliente", "cpfcnpj", "cpf_cnpj", "cpf", "cnpj", "documento"] },
+  { key: "descricao", label: "Tipo da transação (Descrição)", required: true, synonyms: ["descricao", "tipo", "tipo_transacao"] },
+  { key: "lojista", label: "Lojista (Nome fantasia)", required: false, synonyms: ["nomefantasia", "nome_fantasia", "lojista", "estabelecimento"] },
+  { key: "valor_principal", label: "Valor principal", required: true, synonyms: ["valorprincipal", "valor_principal", "valor"] },
+  { key: "valor_parcela", label: "Valor da parcela", required: false, synonyms: ["valor_parcela", "valorparcela", "valor_da_parcela"] },
+  { key: "juros", label: "Juros", required: false, synonyms: ["juros"] },
+  { key: "razao_social", label: "Razão social (promotora/associação)", required: false, synonyms: ["razaosocial", "razao_social"] },
+];

@@ -109,6 +109,9 @@ model Tenant {
   channelConfigs     ChannelConfig[]
   messageTemplates   MessageTemplate[]
   notifications      Notification[]
+  dashboardSnapshots DashboardSnapshot[]
+  merchants          Merchant[]
+  purchases          Purchase[]
 }
 
 model User {
@@ -202,6 +205,7 @@ model Client {
   saldoLiquidoSaque       Decimal?     @db.Decimal(14, 2)
 
   tags                   String[]     @default([])
+  purchases              Purchase[]
 
   createdAt              DateTime     @default(now())
   updatedAt               DateTime     @updatedAt
@@ -430,4 +434,79 @@ model Notification {
   createdAt   DateTime              @default(now())
 
   @@index([tenantId, read, createdAt])
+}
+
+// Foto diária dos KPIs da base — é o que permite tendência real, variação vs. período anterior
+// e comparação entre períodos no dashboard (sem isso só existe o "agora"). Uma linha por tenant
+// por dia (`day` = data civil em Brasília); regravada (upsert) se o snapshot do dia for recalculado.
+// O histórico começa no dia em que o job foi ligado — não dá para reconstruir o passado.
+model DashboardSnapshot {
+  id              String   @id @default(uuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+  day             DateTime @db.Date
+  totalClientes   Int
+  ativos          Int
+  inativos        Int
+  bloqueados      Int
+  semUso          Int
+  limiteTotal     Decimal  @db.Decimal(16, 2)
+  valorUtilizado  Decimal  @db.Decimal(16, 2)
+  saldoDisponivel Decimal  @db.Decimal(16, 2)
+  usaramNoDia     Int      @default(0) // clientes com dataUltimaUtilizacao naquele dia
+  encerradosNoDia Int      @default(0) // clientes com encerradoEm naquele dia
+  faixas          Json     // { FAIXA_USO: contagem }
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([tenantId, day])
+  @@index([tenantId, day])
+}
+
+// Lojista do comércio credenciado (NomeFantasia na aba "Todas as Compras"). A categoria (supermercado,
+// posto, farmácia...) não vem na planilha: é deduzida do nome (services/merchantCategories.ts) e fica
+// editável (categorySource = MANUAL passa a ter prioridade sobre a dedução automática).
+model Merchant {
+  id             String   @id @default(uuid())
+  tenantId       String
+  tenant         Tenant   @relation(fields: [tenantId], references: [id])
+  name           String
+  nameKey        String   // nome normalizado (minúsculas, sem acento) — chave de dedupe por tenant
+  category       String   @default("OUTROS")
+  categorySource String   @default("AUTO") // AUTO | MANUAL
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  purchases Purchase[]
+
+  @@unique([tenantId, nameKey])
+  @@index([tenantId, category])
+}
+
+// Transação do cartão (aba "Todas as Compras"). Só compras no comércio credenciado têm lojista;
+// saque, Pix, assinatura e débito de fatura entram com merchantId nulo. externalId = idTransacaoCartao
+// (reimportar a mesma planilha não duplica).
+model Purchase {
+  id            String    @id @default(uuid())
+  tenantId      String
+  tenant        Tenant    @relation(fields: [tenantId], references: [id])
+  clientId      String
+  client        Client    @relation(fields: [clientId], references: [id])
+  merchantId    String?
+  merchant      Merchant? @relation(fields: [merchantId], references: [id])
+  externalId    String
+  occurredAt    DateTime
+  tipo          String    // Descricao da planilha (ex.: "Compra à Vista Cartão Top Convênio")
+  merchantName  String?
+  valorPrincipal Decimal  @db.Decimal(14, 2)
+  valorParcela  Decimal?  @db.Decimal(14, 2)
+  juros         Decimal?  @db.Decimal(14, 2)
+  razaoSocial   String?
+  importJobId   String?
+  createdAt     DateTime  @default(now())
+
+  @@unique([tenantId, externalId])
+  @@index([tenantId, occurredAt])
+  @@index([clientId, occurredAt])
+  @@index([merchantId, occurredAt])
 }

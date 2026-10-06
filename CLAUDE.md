@@ -112,6 +112,47 @@ when `limiteTotal` increases —, usage-tier nudges, opt-out/invalid-phone
 block) and firing the configured action (launch campaign, notify, or block).
 Repeat sends to the same client stay protected by the existing dedupe window.
 
+### Dashboard e histórico
+
+`routes/dashboard.ts` expõe `GET /api/dashboard/overview` (KPIs, variação vs. período anterior,
+séries, nota de saúde, funil, oportunidades, resultado de campanhas, cobertura de dados e insights;
+filtros `days`, `cidade`, `empresaConveniada`) e `GET /api/dashboard/audiencia` (ids do público de
+uma oportunidade, para "Criar campanha"). Tendência e variação vêm de `DashboardSnapshot`: uma foto
+diária dos KPIs por tenant (`services/snapshots.ts`), gravada pelo job `/api/cron/snapshot` e,
+como garantia no plano Hobby, na primeira visita do dia ao dashboard. O histórico começa no dia em
+que a tabela foi criada e não é reconstruível. Com filtro de cidade/convênio, séries e variações
+ficam indisponíveis (a foto é da base inteira). A nota de saúde (`services/health.ts`) tem pesos e
+metas fixos e é testada em `health.test.ts`. O SQL da tabela está em `backend/prisma/sql/`.
+
+### Fila de oportunidades e campanhas por categoria
+
+`services/opportunities.ts` calcula a fila do dashboard (`GET /api/dashboard/oportunidades`): faixas
+de uso do limite (cortes 50/70/80%), ativação, comércio (supermercado sem posto, 1 compra, 3+ compras,
+top 10% em valor), relacionamento, qualidade de dados (status `dados`: não é campanha) e itens que
+dependem de histórico (`historico`). `GET /api/dashboard/audiencia?tipo=` devolve os ids do público e a
+mensagem sugerida; o assistente de campanha recebe tudo via router state (`presetClientIds`,
+`presetMessage`, `presetChannel`). Em /commerce, `GET /api/purchases/audiencia` aceita `minCompras`
+(frequência mínima) e devolve o público por frequência e a mensagem da categoria. Mensagens sugeridas só
+podem usar as variáveis de `services/templateVariables.ts` (`nome`, `cidade`, `percentual`, `saldo`,
+`limite`), que o envio de fato preenche; `opportunities.test.ts` garante isso.
+
+### Comércio credenciado (compras por categoria)
+
+A aba "Todas as Compras" da planilha (transações do cartão) entra por `POST /api/purchases/import`
+(`services/purchaseImport.ts`, formato "Compras" na tela de Importações; CSV exportado da aba). Cada linha
+liga ao cliente pelo hash do CPF/CNPJ (zero à esquerda perdido pela planilha é recomposto); transação
+de cliente que ainda não está na base é ignorada e reaparece ao reenviar o arquivo (idempotente por
+`idTransacaoCartao`). Só "Compra à Vista..." tem lojista (`Merchant`); saque/Pix/assinatura entram sem
+lojista e alimentam `Client.dataUltimaUtilizacao`. A planilha não traz categoria: ela é deduzida do nome
+do lojista (`services/merchantCategories.ts`) e é editável em /commerce (`categorySource=MANUAL` nunca é
+sobrescrito). Os valores desta aba vêm no formato dos EUA (`R$ 1,591.00`), por isso `parseMoney` deduz o
+separador decimal. Segmentos e campanhas filtram por `categoriasCompra`/`lojistaIds`/`compraNosUltimosDias`
+(`services/segments.ts`).
+
+**SQL cru e RLS:** `prisma.$queryRaw*` não passa pelo hook de tenant e, sob o role `app_runtime`, não
+enxerga nenhuma linha. Use sempre `tenantRaw.query/execute` (`config/db.ts`), que abre a transaction com
+`app.tenant_id`.
+
 ### Cron jobs: local vs. Vercel
 
 Locally, `services/scheduler.ts` runs everything via `node-cron` in-process.

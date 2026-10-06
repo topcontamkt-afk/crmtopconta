@@ -45,6 +45,9 @@ const adHocFiltersSchema = z
     tags: z.array(z.string()).optional(),
     search: z.string().optional(),
     empresaConveniada: z.array(z.string()).optional(),
+    categoriasCompra: z.array(z.string()).optional(),
+    lojistaIds: z.array(z.string()).optional(),
+    compraNosUltimosDias: z.number().optional(),
     // Lista explícita de clientes (ex.: "aniversariantes do mês" montado no Dashboard) — o
     // wizard usa isso como um público alternativo a segmento salvo/filtros manuais.
     clientIds: z.array(z.string()).optional(),

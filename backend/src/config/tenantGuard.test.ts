@@ -31,6 +31,8 @@ jest.mock("@prisma/client", () => {
 
 import {
   TENANT_SCOPED_MODELS,
+  runRawInTenantTx,
+  runWithTenantContextAsync as runWithTenantCtxForRaw,
   runWithTenantContext,
   tenantGuardExtension,
   whereHasTenantId,
@@ -162,6 +164,9 @@ describe("TENANT_SCOPED_MODELS", () => {
         "ChannelConfig",
         "MessageTemplate",
         "Notification",
+        "DashboardSnapshot",
+        "Merchant",
+        "Purchase",
       ].sort()
     );
   });
@@ -337,5 +342,32 @@ describe("withCrossTenantAccess exemption", () => {
 
     expect(rejection).toBeInstanceOf(Error);
     expect((rejection as Error).message).toMatch(/tenantGuard/);
+  });
+});
+
+describe("runRawInTenantTx (SQL cru sob RLS)", () => {
+  function fakeRawClient() {
+    const executed: unknown[][] = [];
+    const tx = { $executeRaw: jest.fn(async (...args: unknown[]) => { executed.push(args); return 1; }) };
+    const client = { $transaction: jest.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx)) };
+    return { client, tx, executed };
+  }
+
+  it("recusa SQL cru sem contexto de tenant", async () => {
+    const { client } = fakeRawClient();
+    await expect(runRawInTenantTx(client, async () => "x")).rejects.toThrow(/no tenant context/);
+    expect(client.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("seta app.tenant_id na mesma transaction antes de rodar o callback", async () => {
+    const { client, tx } = fakeRawClient();
+    const order: string[] = [];
+    tx.$executeRaw.mockImplementationOnce(async () => { order.push("set_config"); return 1; });
+    const result = await runWithTenantCtxForRaw("tenant-1", () =>
+      runRawInTenantTx(client, async () => { order.push("callback"); return 42; })
+    );
+    expect(result).toBe(42);
+    expect(order).toEqual(["set_config", "callback"]);
+    expect(client.$transaction).toHaveBeenCalledTimes(1);
   });
 });
