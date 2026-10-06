@@ -129,7 +129,7 @@ describe("whereHasTenantId", () => {
   });
 
   it("finds tenantId nested inside AND (array form)", () => {
-    const where = { AND: [{ tenantId: "t1" }, { faixaUso: "USO_ALTO" }] };
+    const where = { AND: [{ tenantId: "t1" }, { faixaUso: "USO_71_99" }] };
     expect(whereHasTenantId(where)).toBe(true);
   });
 
@@ -244,7 +244,7 @@ describe("tenantGuard $allOperations hook — RLS transaction wrapping (real ten
     const orShape = { where: { tenantId: "t1", OR: [{ cidade: "São Paulo" }, { cidade: "Rio de Janeiro" }] } };
     await runWithTenantContext("t1", () => hook({ model: "Client", operation: "findMany", args: orShape, query: jest.fn() }));
 
-    const nestedShape = { where: { AND: [{ tenantId: "t1" }, { faixaUso: "USO_ALTO" }] } };
+    const nestedShape = { where: { AND: [{ tenantId: "t1" }, { faixaUso: "USO_71_99" }] } };
     await runWithTenantContext("t1", () =>
       hook({ model: "Client", operation: "findMany", args: nestedShape, query: jest.fn() })
     );

@@ -35,11 +35,12 @@ describe("oportunidades", () => {
     for (const o of OPORTUNIDADES.filter((x) => x.status !== "campanha")) expect(OPPORTUNITY_KEYS).not.toContain(o.key);
   });
 
-  it("faixas cobrem 0%, 1-49, 50-69, 70-79, 80-99 e 100 sem sobreposição", () => {
-    expect(USO_BANDAS.map((b) => b.range)).toEqual(["0%", "1 a 49%", "50 a 69%", "70 a 79%", "80 a 99%", "100%"]);
-    expect(bandWhere("uso_1_49")).toEqual({ percentualUtilizado: { gt: 0, lt: 50 } });
-    expect(bandWhere("uso_80_99")).toEqual({ percentualUtilizado: { gte: 80, lt: 100 } });
-    expect(bandWhere("uso_100")).toEqual({ percentualUtilizado: { gte: 100 } });
+  it("faixas cobrem 0%, 1-10, 11-20, 21-30, 31-50, 51-70, 71-99 e 100 sem sobreposição", () => {
+    expect(USO_BANDAS.map((b) => b.range)).toEqual(["0%", "1 a 10%", "11 a 20%", "21 a 30%", "31 a 50%", "51 a 70%", "71 a 99%", "100%"]);
+    expect(bandWhere("uso_0")).toEqual({ faixaUso: "SEM_USO" });
+    expect(bandWhere("uso_1_10")).toEqual({ faixaUso: "USO_1_10" });
+    expect(bandWhere("uso_71_99")).toEqual({ faixaUso: "USO_71_99" });
+    expect(bandWhere("uso_100")).toEqual({ faixaUso: "USO_100" });
     expect(bandWhere("inativos")).toBeNull();
   });
 });

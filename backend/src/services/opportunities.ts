@@ -13,10 +13,12 @@ import { addDays, clientWhere, DashboardFilters, rawFilterSql } from "./dashboar
 export type OpportunityKey =
   | "inativos"
   | "semUso"
-  | "uso_1_49"
-  | "uso_50_69"
-  | "uso_70_79"
-  | "uso_80_99"
+  | "uso_1_10"
+  | "uso_11_20"
+  | "uso_21_30"
+  | "uso_31_50"
+  | "uso_51_70"
+  | "uso_71_99"
   | "uso_100"
   | "ativosComSaldo"
   | "novos30d"
@@ -25,15 +27,15 @@ export type OpportunityKey =
   | "comercio_1vez"
   | "comercio_3mais"
   | "comercio_top10"
-  | "quaseCompleto"; // legado (faixa QUASE_COMPLETO); mantido para compatibilidade com /audiencia
+  | "quaseCompleto"; // legado (hoje = faixa 71 a 99%); mantido para compatibilidade com /audiencia
 
 export const OPPORTUNITY_KEYS: OpportunityKey[] = [
-  "inativos", "semUso", "uso_1_49", "uso_50_69", "uso_70_79", "uso_80_99", "uso_100",
+  "inativos", "semUso", "uso_1_10", "uso_11_20", "uso_21_30", "uso_31_50", "uso_51_70", "uso_71_99", "uso_100",
   "ativosComSaldo", "novos30d", "aniversariantes",
   "comercio_super_sem_posto", "comercio_1vez", "comercio_3mais", "comercio_top10", "quaseCompleto",
 ];
 
-/** Faixas do módulo "uso do limite" (cortes 50/70/80%). A faixa 0% é a própria oportunidade `semUso`. */
+/** Faixas do módulo "uso do limite" (0%, 1-10, 11-20, 21-30, 31-50, 51-70, 71-99 e 100%). A faixa 0% é a própria oportunidade `semUso`. */
 export interface BandDef {
   key: OpportunityKey | "uso_0";
   range: string;
@@ -51,24 +53,34 @@ export const USO_BANDAS: BandDef[] = [
     mensagem: "Olá, {{nome}}! Seu limite de {{limite}} no cartão TopConta está liberado. Use nos parceiros credenciados perto de você.",
   },
   {
-    key: "uso_1_49", range: "1 a 49%", label: "Uso inicial", titulo: "Uso inicial (1 a 49%)", cor: "#5b8cff",
-    acao: "Incentivo: já usou, mas pouco. Reforçar os parceiros e a vantagem de usar o cartão no dia a dia.",
+    key: "uso_1_10", range: "1 a 10%", label: "Uso muito baixo", titulo: "Uso muito baixo (1 a 10%)", cor: "#5b8cff",
+    acao: "Incentivo: usou pouquíssimo. Reforçar os parceiros e a vantagem de usar o cartão no dia a dia.",
     mensagem: "Olá, {{nome}}! Você já tem {{saldo}} disponíveis no cartão TopConta. Que tal usar nas compras desta semana?",
   },
   {
-    key: "uso_50_69", range: "50 a 69%", label: "Uso intermediário", titulo: "Uso intermediário (50 a 69%)", cor: "#2dd4bf",
+    key: "uso_11_20", range: "11 a 20%", label: "Uso baixo", titulo: "Uso baixo (11 a 20%)", cor: "#38bdf8",
+    acao: "Incentivo: já usou, mas ainda pouco. Lembrar do saldo e dos parceiros credenciados.",
+    mensagem: "Olá, {{nome}}! Seu cartão TopConta tem {{saldo}} esperando por você. Aproveite nos parceiros credenciados.",
+  },
+  {
+    key: "uso_21_30", range: "21 a 30%", label: "Uso inicial", titulo: "Uso inicial (21 a 30%)", cor: "#2dd4bf",
+    acao: "Estímulo: cliente começando a engajar. Reforçar os parceiros que ele pode frequentar.",
+    mensagem: "Olá, {{nome}}! Você já usou {{percentual}}% do limite do cartão TopConta. Continue aproveitando nos parceiros credenciados.",
+  },
+  {
+    key: "uso_31_50", range: "31 a 50%", label: "Uso moderado", titulo: "Uso moderado (31 a 50%)", cor: "#34d399",
     acao: "Consolidação: cliente engajado. Reforçar os parceiros que ele já frequenta e acompanhar o saldo.",
+    mensagem: "Olá, {{nome}}! Você está usando bem o cartão TopConta ({{percentual}}% do limite). Ainda restam {{saldo}} para aproveitar.",
+  },
+  {
+    key: "uso_51_70", range: "51 a 70%", label: "Uso intermediário", titulo: "Uso intermediário (51 a 70%)", cor: "#a3e635",
+    acao: "Fidelização: cliente recorrente. Acompanhar o saldo e avisar antes de esgotar.",
     mensagem: "Olá, {{nome}}! Seu cartão TopConta está rendendo: você usou {{percentual}}% do limite e ainda tem {{saldo}} para o mês.",
   },
   {
-    key: "uso_70_79", range: "70 a 79%", label: "Uso alto", titulo: "Uso alto (70 a 79%)", cor: "#a78bfa",
-    acao: "Atenção: avisar do saldo restante antes de esgotar e oferecer acompanhamento do limite.",
-    mensagem: "Olá, {{nome}}! Restam {{saldo}} do seu limite no cartão TopConta. Use com tranquilidade e acompanhe seu saldo.",
-  },
-  {
-    key: "uso_80_99", range: "80 a 99%", label: "Quase no limite", titulo: "Quase no limite (80 a 99%)", cor: "#ff6907",
+    key: "uso_71_99", range: "71 a 99%", label: "Uso alto", titulo: "Uso alto (71 a 99%)", cor: "#ff6907",
     acao: "Pré-renovação: avisar o saldo restante e abrir o pedido de aumento de limite antes de esgotar.",
-    mensagem: "Olá, {{nome}}! Seu limite está quase no fim ({{percentual}}% usado). Quer pedir um aumento? É só responder esta mensagem.",
+    mensagem: "Olá, {{nome}}! Seu limite no cartão TopConta está quase no fim ({{percentual}}% usado) e restam {{saldo}}. Quer pedir um aumento? É só responder esta mensagem.",
   },
   {
     key: "uso_100", range: "100%", label: "Limite esgotado", titulo: "Limite esgotado (100%)", cor: "#f0616d",
@@ -77,16 +89,16 @@ export const USO_BANDAS: BandDef[] = [
   },
 ];
 
-/** `where` de cada faixa de uso (sem a faixa 0%, que usa faixaUso = NAO_UTILIZOU como `semUso`). */
-export function bandWhere(key: OpportunityKey): Prisma.ClientWhereInput | null {
-  switch (key) {
-    case "uso_1_49": return { percentualUtilizado: { gt: 0, lt: 50 } };
-    case "uso_50_69": return { percentualUtilizado: { gte: 50, lt: 70 } };
-    case "uso_70_79": return { percentualUtilizado: { gte: 70, lt: 80 } };
-    case "uso_80_99": return { percentualUtilizado: { gte: 80, lt: 100 } };
-    case "uso_100": return { percentualUtilizado: { gte: 100 } };
-    default: return null;
-  }
+/** Faixa do cadastro (`Client.faixaUso`) de cada faixa de uso — a mesma regra de services/usage.ts. */
+const FAIXA_DA_BANDA: Record<string, "SEM_USO" | "USO_1_10" | "USO_11_20" | "USO_21_30" | "USO_31_50" | "USO_51_70" | "USO_71_99" | "USO_100"> = {
+  uso_0: "SEM_USO", uso_1_10: "USO_1_10", uso_11_20: "USO_11_20", uso_21_30: "USO_21_30",
+  uso_31_50: "USO_31_50", uso_51_70: "USO_51_70", uso_71_99: "USO_71_99", uso_100: "USO_100",
+};
+
+/** `where` de cada faixa de uso (a 0% também: é a oportunidade `semUso`). */
+export function bandWhere(key: OpportunityKey | "uso_0"): Prisma.ClientWhereInput | null {
+  const faixa = FAIXA_DA_BANDA[key];
+  return faixa ? { faixaUso: faixa } : null;
 }
 
 type Impacto = "Alto" | "Médio" | "Baixo";
@@ -110,8 +122,8 @@ export const OPORTUNIDADES: OppDef[] = [
     mensagem: "Olá, {{nome}}! Sentimos sua falta. Seu cartão TopConta continua à disposição: use nos parceiros credenciados." },
   { key: "semUso", grupo: "Ativação", titulo: "Nunca utilizaram o cartão", desc: "Têm limite liberado e não usaram. Campanha de primeira compra.", impacto: "Alto", status: "campanha",
     mensagem: USO_BANDAS[0].mensagem },
-  { key: "uso_100", grupo: "Uso do limite", titulo: "Limite esgotado (100%)", desc: "Usam tudo o que têm: oferecer aumento de limite.", impacto: "Alto", status: "campanha", mensagem: USO_BANDAS[5].mensagem },
-  { key: "uso_80_99", grupo: "Uso do limite", titulo: "Quase no limite (80 a 99%)", desc: "Avisar o saldo e abrir pedido de aumento antes de esgotar.", impacto: "Médio", status: "campanha", mensagem: USO_BANDAS[4].mensagem },
+  { key: "uso_100", grupo: "Uso do limite", titulo: "Limite esgotado (100%)", desc: "Usam tudo o que têm: oferecer aumento de limite.", impacto: "Alto", status: "campanha", mensagem: USO_BANDAS[7].mensagem },
+  { key: "uso_71_99", grupo: "Uso do limite", titulo: "Uso alto (71 a 99%)", desc: "Avisar o saldo e abrir pedido de aumento antes de esgotar.", impacto: "Médio", status: "campanha", mensagem: USO_BANDAS[6].mensagem },
   { key: "comercio_super_sem_posto", grupo: "Comércio", titulo: "Compram em supermercado e nunca em posto", desc: "Venda cruzada: apresentar os postos credenciados.", impacto: "Médio", status: "campanha",
     mensagem: "Olá, {{nome}}! Você já usa o cartão TopConta no supermercado. Sabia que também vale nos postos credenciados? Abasteça com seu limite." },
   { key: "comercio_1vez", grupo: "Comércio", titulo: "Compraram uma única vez", desc: "Voltar a comprar: lembrar dos parceiros e do saldo.", impacto: "Médio", status: "campanha",
@@ -182,17 +194,12 @@ export async function computeOpportunities(prisma: AppPrismaClient, tenantId: st
   const since30 = addDays(new Date(), -30);
 
   const [
-    total, inativos, semUso, uso1, uso2, uso3, uso4, uso5, comSaldo, novos, semLimite, semCidade, validade,
+    total, inativos, porFaixa, comSaldo, novos, semLimite, semCidade, validade,
     aniversariantes, buyers, anyPurchase,
   ] = await Promise.all([
     prisma.client.count({ where: base }),
     prisma.client.count({ where: and({ statusConta: "INATIVO" }) }),
-    prisma.client.count({ where: and({ faixaUso: "NAO_UTILIZOU" }) }),
-    prisma.client.count({ where: and(bandWhere("uso_1_49")!) }),
-    prisma.client.count({ where: and(bandWhere("uso_50_69")!) }),
-    prisma.client.count({ where: and(bandWhere("uso_70_79")!) }),
-    prisma.client.count({ where: and(bandWhere("uso_80_99")!) }),
-    prisma.client.count({ where: and(bandWhere("uso_100")!) }),
+    prisma.client.groupBy({ by: ["faixaUso"], where: base, _count: true }),
     prisma.client.count({ where: and({ statusConta: "ATIVO", saldoDisponivel: { gt: 0 } }) }),
     prisma.client.count({ where: and({ createdAt: { gte: since30 } }) }),
     prisma.client.count({ where: and({ limiteTotal: { lte: 0 } }) }),
@@ -208,10 +215,13 @@ export async function computeOpportunities(prisma: AppPrismaClient, tenantId: st
     prisma.purchase.count({ where: { tenantId } }),
   ]);
 
+  const nFaixa = (f: string) => porFaixa.find((x) => x.faixaUso === f)?._count ?? 0;
+  const semUso = nFaixa("SEM_USO");
   const cohorts = commerceCohorts(buyers);
   const counts: Record<string, number> = {
     inativos, semUso,
-    uso_0: semUso, uso_1_49: uso1, uso_50_69: uso2, uso_70_79: uso3, uso_80_99: uso4, uso_100: uso5,
+    uso_0: semUso, uso_1_10: nFaixa("USO_1_10"), uso_11_20: nFaixa("USO_11_20"), uso_21_30: nFaixa("USO_21_30"),
+    uso_31_50: nFaixa("USO_31_50"), uso_51_70: nFaixa("USO_51_70"), uso_71_99: nFaixa("USO_71_99"), uso_100: nFaixa("USO_100"),
     ativosComSaldo: comSaldo, novos30d: novos,
     aniversariantes: Number(aniversariantes[0]?.count ?? 0),
     semLimite, semCidade, validadePassada: validade,
@@ -221,7 +231,7 @@ export async function computeOpportunities(prisma: AppPrismaClient, tenantId: st
     comercio_top10: cohorts.comercio_top10.length,
   };
 
-  const comLimite = uso1 + uso2 + uso3 + uso4 + uso5 + semUso;
+  const comLimite = USO_BANDAS.reduce((acc, b) => acc + (counts[b.key] ?? 0), 0);
   const faixas = USO_BANDAS.map((b) => ({ ...b, n: counts[b.key] ?? 0 }));
 
   const itens = OPORTUNIDADES.map((o) => {
@@ -241,7 +251,7 @@ export async function computeOpportunities(prisma: AppPrismaClient, tenantId: st
     return { ...o, desc, status, destino, destinoLabel, n: o.status === "historico" ? null : counts[o.key] ?? 0 };
   });
 
-  return { totalClientes: total, comLimite, cortes: [50, 70, 80], faixas, itens };
+  return { totalClientes: total, comLimite, cortes: [10, 20, 30, 50, 70, 99], faixas, itens };
 }
 
 /** Ids do público de uma oportunidade (limitado a 5000, como o restante do fluxo de campanha). */
@@ -257,11 +267,11 @@ export async function opportunityAudience(
 
   switch (key) {
     case "inativos": return ids({ statusConta: "INATIVO" });
-    case "semUso": return ids({ faixaUso: "NAO_UTILIZOU" });
-    case "quaseCompleto": return ids({ faixaUso: "QUASE_COMPLETO" });
+    case "semUso": return ids({ faixaUso: "SEM_USO" });
+    case "quaseCompleto": return ids({ faixaUso: "USO_71_99" });
     case "ativosComSaldo": return ids({ statusConta: "ATIVO", saldoDisponivel: { gt: 0 } });
     case "novos30d": return ids({ createdAt: { gte: addDays(new Date(), -30) } });
-    case "uso_1_49": case "uso_50_69": case "uso_70_79": case "uso_80_99": case "uso_100":
+    case "uso_1_10": case "uso_11_20": case "uso_21_30": case "uso_31_50": case "uso_51_70": case "uso_71_99": case "uso_100":
       return ids(bandWhere(key)!);
     case "aniversariantes": {
       const raw = rawFilterSql(filters, 2);
@@ -280,7 +290,7 @@ export async function opportunityAudience(
 
 /** Mensagem sugerida de uma oportunidade (para pré-preencher o assistente de campanha). */
 export function suggestedMessage(key: OpportunityKey): string | undefined {
-  if (key === "quaseCompleto") return USO_BANDAS[4].mensagem;
+  if (key === "quaseCompleto") return USO_BANDAS[6].mensagem;
   const band = USO_BANDAS.find((b) => b.key === key);
   if (band) return band.mensagem;
   return OPORTUNIDADES.find((o) => o.key === key)?.mensagem;

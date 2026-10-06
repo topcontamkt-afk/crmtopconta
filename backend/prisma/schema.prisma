@@ -35,13 +35,14 @@ enum ClientStatus {
 }
 
 enum UsageFaixa {
-  NAO_UTILIZOU
-  BAIXO_USO
-  USO_INICIAL
-  USO_INTERMEDIARIO
-  USO_ALTO
-  QUASE_COMPLETO
-  LIMITE_COMPLETO
+  SEM_USO // 0%
+  USO_1_10
+  USO_11_20
+  USO_21_30
+  USO_31_50
+  USO_51_70
+  USO_71_99
+  USO_100
   INDEFINIDO // limite_total inválido/zero
 }
 
@@ -170,7 +171,7 @@ model Client {
   dataUltimaUtilizacao   DateTime?
 
   percentualUtilizado    Decimal      @default(0) @db.Decimal(6, 2)
-  faixaUso               UsageFaixa   @default(NAO_UTILIZOU)
+  faixaUso               UsageFaixa   @default(SEM_USO)
 
   statusConta            ClientStatus @default(ATIVO)
   origemCliente          String?

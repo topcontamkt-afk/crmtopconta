@@ -2,11 +2,11 @@ import { buildSegmentWhere, INATIVOS_FILTERS } from "./segments";
 
 describe("buildSegmentWhere", () => {
   it("mantém compatibilidade com filtros simples (flat)", () => {
-    const where = buildSegmentWhere("t1", { cidade: ["São Paulo"], faixaUso: ["USO_ALTO"] });
+    const where = buildSegmentWhere("t1", { cidade: ["São Paulo"], faixaUso: ["USO_71_99"] });
     expect(where).toEqual({
       tenantId: "t1",
       cidade: { in: ["São Paulo"] },
-      faixaUso: { in: ["USO_ALTO"] },
+      faixaUso: { in: ["USO_71_99"] },
     });
   });
 
@@ -32,7 +32,7 @@ describe("buildSegmentWhere", () => {
   it("combina condições e sub-grupos no mesmo nível com AND", () => {
     const where: any = buildSegmentWhere("t1", {
       operator: "AND",
-      conditions: { faixaUso: ["USO_ALTO"] },
+      conditions: { faixaUso: ["USO_71_99"] },
       groups: [{ operator: "OR", conditions: { cidade: ["São Paulo"] } }],
     });
     expect(where.AND).toHaveLength(2);

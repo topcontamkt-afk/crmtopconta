@@ -38,7 +38,7 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
       const clients = await prisma.client.findMany({
         where: {
           tenantId,
-          faixaUso: "NAO_UTILIZOU",
+          faixaUso: "SEM_USO",
           createdAt: { lte: cutoff },
           autorizacaoComunicacao: true,
           optOutAt: null,

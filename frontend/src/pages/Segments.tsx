@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api/client";
+import { FAIXA_OPTIONS } from "../utils/faixas";
 
 interface Segment {
   id: string;
@@ -16,15 +17,6 @@ const STATUS_OPTIONS = [
   { value: "BLOQUEADO", label: "Bloqueado" },
 ];
 
-const FAIXA_OPTIONS = [
-  { value: "NAO_UTILIZOU", label: "Não utilizou" },
-  { value: "BAIXO_USO", label: "Baixo uso" },
-  { value: "USO_INICIAL", label: "Uso inicial" },
-  { value: "USO_INTERMEDIARIO", label: "Uso intermediário" },
-  { value: "USO_ALTO", label: "Uso alto" },
-  { value: "QUASE_COMPLETO", label: "Quase completo" },
-  { value: "LIMITE_COMPLETO", label: "Limite completo" },
-];
 
 export default function Segments() {
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -73,7 +65,7 @@ export default function Segments() {
   }
 
   function applyPreset(preset: "recorrentes" | "semUso") {
-    setFaixaUso(preset === "recorrentes" ? ["USO_INTERMEDIARIO", "USO_ALTO", "QUASE_COMPLETO"] : []);
+    setFaixaUso(preset === "recorrentes" ? ["USO_31_50", "USO_51_70", "USO_71_99"] : []);
     setStatusConta([]);
     setSemUsoDiasMin(preset === "semUso" ? "60" : "");
     setUsadoNosUltimosDias(preset === "recorrentes" ? "30" : "");

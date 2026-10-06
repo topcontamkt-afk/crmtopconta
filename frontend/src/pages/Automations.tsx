@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api/client";
+import { FAIXA_OPTIONS } from "../utils/faixas";
 
 interface Rule {
   id: string;
@@ -40,7 +41,7 @@ export default function Automations() {
 
   // Condições por gatilho
   const [dias, setDias] = useState(7);
-  const [faixa, setFaixa] = useState("USO_INICIAL");
+  const [faixa, setFaixa] = useState("USO_21_30");
 
   // Ação "campaign"
   const [channel, setChannel] = useState<"WHATSAPP" | "SMS">("WHATSAPP");
@@ -112,12 +113,9 @@ export default function Automations() {
           <div className="form-row">
             <label>Faixa de uso</label>
             <select value={faixa} onChange={(e) => setFaixa(e.target.value)}>
-              <option value="NAO_UTILIZOU">Não utilizou</option>
-              <option value="BAIXO_USO">Baixo uso</option>
-              <option value="USO_INICIAL">Uso inicial</option>
-              <option value="USO_INTERMEDIARIO">Uso intermediário</option>
-              <option value="USO_ALTO">Uso alto</option>
-              <option value="QUASE_COMPLETO">Quase completo</option>
+              {FAIXA_OPTIONS.map((f) => (
+                <option key={f.value} value={f.value}>{f.label}</option>
+              ))}
             </select>
           </div>
         )}

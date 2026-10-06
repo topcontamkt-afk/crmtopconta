@@ -76,7 +76,7 @@ router.get("/summary", async (req, res) => {
       _sum: { limiteTotal: true, valorUtilizado: true, saldoDisponivel: true },
       _avg: { valorUtilizado: true },
     }),
-    prisma.client.count({ where: { tenantId, faixaUso: "NAO_UTILIZOU" } }),
+    prisma.client.count({ where: { tenantId, faixaUso: "SEM_USO" } }),
     prisma.importJob.findFirst({ where: { tenantId }, orderBy: { startedAt: "desc" } }),
     rankingPorCampo(tenantId, "cidade"),
     // Ranking de "secretarias" (empresa conveniada / convênio de folha) que mais usam o app —
@@ -90,7 +90,7 @@ router.get("/summary", async (req, res) => {
     count: f._count,
   }));
 
-  const limiteCompleto = porFaixaRaw.find((f) => f.faixaUso === "LIMITE_COMPLETO")?._count || 0;
+  const limiteCompleto = porFaixaRaw.find((f) => f.faixaUso === "USO_100")?._count || 0;
 
   res.json({
     totalClientes,
@@ -580,7 +580,7 @@ router.get("/overview", async (req, res) => {
     { key: "base", label: "Base total", count: total },
     { key: "utilizaram", label: "Já utilizaram o limite", count: jaUtilizaram },
     { key: "ativos", label: "Ativos hoje", count: kpis.ativos },
-    { key: "quase", label: "Quase no limite", count: kpis.quaseCompleto },
+    { key: "quase", label: "Com 71 a 99% do limite usado", count: kpis.quaseCompleto },
   ];
   const aniversariantesCount = Number(aniversariantes[0]?.count ?? 0);
   const oportunidades = {
@@ -669,7 +669,7 @@ router.get("/overview", async (req, res) => {
     if (kpis.quaseCompleto > 0) {
       insights.push({
         tipo: "oportunidade",
-        texto: `${kpis.quaseCompleto} cliente(s) estão quase no limite: avalie renovação ou aumento.`,
+        texto: `${kpis.quaseCompleto} cliente(s) estão com 71 a 99% do limite usado: avalie renovação ou aumento.`,
       });
     }
     if (deltas.ativos && baseline && deltas.ativos.abs !== 0) {

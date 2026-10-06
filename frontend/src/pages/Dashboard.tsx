@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { api } from "../api/client";
 import OpportunityQueue from "../components/OpportunityQueue";
+import { FAIXA_LABELS, FAIXA_OPTIONS } from "../utils/faixas";
 
 type Delta = { abs: number; pct: number | null } | null;
 
@@ -114,17 +115,7 @@ const COLOR = { primary: "#4f7cff", accent: "#ff6907", success: "#35c17a", warni
 const GRID = "#2a3346";
 const MUTED = "#9aa4b8";
 
-const FAIXA_LABELS: Record<string, string> = {
-  NAO_UTILIZOU: "Não utilizou",
-  BAIXO_USO: "Baixo uso",
-  USO_INICIAL: "Uso inicial",
-  USO_INTERMEDIARIO: "Uso intermediário",
-  USO_ALTO: "Uso alto",
-  QUASE_COMPLETO: "Quase completo",
-  LIMITE_COMPLETO: "Limite completo",
-  INDEFINIDO: "Sem limite cadastrado",
-};
-const FAIXA_ORDER = Object.keys(FAIXA_LABELS);
+const FAIXA_ORDER = [...FAIXA_OPTIONS.map((f) => f.value as string), "INDEFINIDO"];
 
 const CHART_TABS: { key: ChartTab; label: string }[] = [
   { key: "uso", label: "Uso do limite" },
@@ -408,7 +399,7 @@ export default function Dashboard() {
               <Tooltip content={<ChartTooltip countLabel="clientes" />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
               <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={20} animationDuration={600}>
                 {faixas.map((f) => (
-                  <Cell key={f.faixa} fill={f.faixa === "NAO_UTILIZOU" ? COLOR.warning : COLOR.primary} />
+                  <Cell key={f.faixa} fill={f.faixa === "SEM_USO" ? COLOR.warning : COLOR.primary} />
                 ))}
               </Bar>
             </BarChart>

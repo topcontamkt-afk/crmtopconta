@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../../api/client";
+import { FAIXA_OPTIONS } from "../../utils/faixas";
 
 const STEPS = ["Nome/objetivo", "Público", "Canal & mensagem", "Agenda & throttling", "Confirmação"];
 
@@ -225,13 +226,9 @@ export default function CampaignWizard() {
                   <input placeholder="Cidade" value={cidade} onChange={(e) => setCidade(e.target.value)} />
                   <select value={faixaUso} onChange={(e) => setFaixaUso(e.target.value)}>
                     <option value="">Qualquer faixa</option>
-                    <option value="NAO_UTILIZOU">Não utilizou</option>
-                    <option value="BAIXO_USO">Baixo uso</option>
-                    <option value="USO_INICIAL">Uso inicial</option>
-                    <option value="USO_INTERMEDIARIO">Uso intermediário</option>
-                    <option value="USO_ALTO">Uso alto</option>
-                    <option value="QUASE_COMPLETO">Quase completo</option>
-                    <option value="LIMITE_COMPLETO">Limite completo</option>
+                    {FAIXA_OPTIONS.map((f) => (
+                      <option key={f.value} value={f.value}>{f.label}</option>
+                    ))}
                   </select>
                   <select value={statusConta} onChange={(e) => setStatusConta(e.target.value)}>
                     <option value="">Qualquer status</option>

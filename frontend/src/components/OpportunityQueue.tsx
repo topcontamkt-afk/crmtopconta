@@ -44,7 +44,7 @@ const GREY = "#6f7b96";
 const tipoDaFaixa = (key: string) => (key === "uso_0" ? "semUso" : key);
 
 /**
- * Fila de oportunidades: faixas de uso do limite (cortes 50/70/80%) + públicos de ativação, comércio
+ * Fila de oportunidades: faixas de uso do limite (0%, 1-10, 11-20, 21-30, 31-50, 51-70, 71-99 e 100%) + públicos de ativação, comércio
  * e relacionamento prontos para campanha, itens de qualidade de dados e os que dependem de histórico.
  * Tudo vem de GET /api/dashboard/oportunidades (dados reais); "Criar campanha" abre o assistente com
  * o público e a mensagem sugerida já preenchidos.
