@@ -1,5 +1,6 @@
 import { ChangeEvent, Fragment, useEffect, useState } from "react";
 import { api } from "../api/client";
+import { useAuth } from "../context/AuthContext";
 import { parseCsv } from "../utils/csv";
 import { autoMapColumns, CARD_ACCOUNT_FIELDS, IMPORT_FIELDS, ImportFieldDef } from "../utils/importFields";
 
@@ -34,6 +35,22 @@ export default function Imports() {
   const [quality, setQuality] = useState<Quality | null>(null);
   const [jobs, setJobs] = useState<ImportJob[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
+
+  const { user } = useAuth();
+  const [purgeText, setPurgeText] = useState("");
+  const [purgeMsg, setPurgeMsg] = useState<string | null>(null);
+
+  async function handlePurge() {
+    setPurgeMsg(null);
+    try {
+      const r = await api<{ clients: number }>("/clients/purge", { method: "POST", body: { confirm: purgeText } });
+      setPurgeMsg(`Base limpa: ${r.clients} clientes removidos. Já pode importar a planilha correta.`);
+      setPurgeText("");
+      load();
+    } catch (err: any) {
+      setPurgeMsg(err?.message || "Falha ao limpar a base");
+    }
+  }
 
   const [format, setFormat] = useState<UploadFormat>("cartoes");
   const [fileName, setFileName] = useState<string | null>(null);
@@ -325,6 +342,24 @@ export default function Imports() {
           </tbody>
         </table>
       </div>
+
+      {user?.role === "ADMIN" && (
+        <div className="card" style={{ marginTop: 16, borderColor: "var(--danger, #d9534f)" }}>
+          <h3>Limpar base</h3>
+          <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
+            Apaga <strong>todos os clientes</strong>, com movimentações e eventos de mensagem. Use quando subiu a
+            planilha errada. Não dá para desfazer. Campanhas, segmentos, templates e o histórico de importações são mantidos.
+          </p>
+          <div className="form-row">
+            <label>Digite LIMPAR BASE para confirmar</label>
+            <input value={purgeText} onChange={(e) => setPurgeText(e.target.value)} />
+          </div>
+          <button className="btn danger" disabled={purgeText !== "LIMPAR BASE"} onClick={handlePurge}>
+            Limpar base
+          </button>
+          {purgeMsg && <p style={{ marginTop: 10, fontSize: 13 }}>{purgeMsg}</p>}
+        </div>
+      )}
     </div>
   );
 }

@@ -59,9 +59,14 @@ export default function Segments() {
     };
   }
 
-  function applyPreset(preset: "recorrentes" | "semUso" | "inativos") {
+  async function createInativos() {
+    await api("/segments/presets/inativos", { method: "POST" });
+    load();
+  }
+
+  function applyPreset(preset: "recorrentes" | "semUso") {
     setFaixaUso(preset === "recorrentes" ? ["USO_INTERMEDIARIO", "USO_ALTO", "QUASE_COMPLETO"] : []);
-    setStatusConta(preset === "inativos" ? ["INATIVO"] : []);
+    setStatusConta([]);
     setSemUsoDiasMin(preset === "semUso" ? "60" : "");
     setUsadoNosUltimosDias(preset === "recorrentes" ? "30" : "");
     setPreview(null);
@@ -101,8 +106,8 @@ export default function Segments() {
           <button type="button" className="btn secondary" onClick={() => applyPreset("semUso")}>
             Sem uso
           </button>
-          <button type="button" className="btn secondary" onClick={() => applyPreset("inativos")}>
-            Inativos
+          <button type="button" className="btn secondary" onClick={createInativos}>
+            Criar categoria Inativos
           </button>
         </div>
 

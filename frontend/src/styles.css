@@ -677,6 +677,8 @@ th { color: var(--text-muted); font-weight: 500; }
 
 .btn:hover { background: var(--primary-hover); }
 .btn.secondary { background: var(--surface-alt); border: 1px solid var(--border); color: var(--text); }
+.btn.danger { background: var(--danger); }
+.btn.danger:hover { background: var(--danger); filter: brightness(0.9); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 input, select, textarea {

@@ -10,6 +10,7 @@ export interface SegmentFilters {
   autorizacaoComunicacao?: boolean;
   semUsoDiasMin?: number; // dataUltimaUtilizacao mais antiga que N dias (ou nunca usou) — "sem uso"/"inativo"
   usadoNosUltimosDias?: number; // dataUltimaUtilizacao dentro dos últimos N dias — "recorrente"/"ativo"
+  contaEncerrada?: boolean; // conta encerrada (encerradoEm preenchido) ou statusConta=INATIVO
   tags?: string[];
   search?: string; // busca livre por nome/telefone
   clientIds?: string[]; // seleção explícita de clientes (usado pelo motor de automação e por
@@ -45,6 +46,9 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
   if (filters.semUsoDiasMin !== undefined) {
     const cutoff = new Date(Date.now() - filters.semUsoDiasMin * 24 * 60 * 60 * 1000);
     and.push({ OR: [{ dataUltimaUtilizacao: null }, { dataUltimaUtilizacao: { lte: cutoff } }] });
+  }
+  if (filters.contaEncerrada) {
+    and.push({ OR: [{ encerradoEm: { not: null } }, { statusConta: "INATIVO" }] });
   }
   if (filters.usadoNosUltimosDias !== undefined) {
     const cutoff = new Date(Date.now() - filters.usadoNosUltimosDias * 24 * 60 * 60 * 1000);
@@ -92,3 +96,14 @@ export function buildSegmentWhere(
   }
   return buildLeafWhere(tenantId, filtersOrGroup as SegmentFilters);
 }
+
+/** Público "Inativos": conta encerrada/inativa OU mais de 90 dias sem uso (grupos combinados em OR). */
+export const INATIVOS_SEGMENT_NAME = "Inativos";
+export const INATIVOS_SEMUSO_DIAS = 90;
+export const INATIVOS_FILTERS: SegmentGroup = {
+  operator: "OR",
+  groups: [
+    { operator: "AND", conditions: { contaEncerrada: true } },
+    { operator: "AND", conditions: { semUsoDiasMin: INATIVOS_SEMUSO_DIAS } },
+  ],
+};

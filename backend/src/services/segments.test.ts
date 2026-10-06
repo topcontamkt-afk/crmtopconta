@@ -1,4 +1,4 @@
-import { buildSegmentWhere } from "./segments";
+import { buildSegmentWhere, INATIVOS_FILTERS } from "./segments";
 
 describe("buildSegmentWhere", () => {
   it("mantém compatibilidade com filtros simples (flat)", () => {
@@ -46,6 +46,13 @@ describe("buildSegmentWhere", () => {
     // cutoff deve ser ~30 dias atrás (com folga de alguns ms pelo tempo de execução do teste)
     expect(cutoff.getTime()).toBeGreaterThanOrEqual(before - 30 * 24 * 60 * 60 * 1000 - 1000);
     expect(cutoff.getTime()).toBeLessThanOrEqual(before - 30 * 24 * 60 * 60 * 1000 + 1000);
+  });
+
+  it("público Inativos: conta encerrada/inativa OU 90+ dias sem uso", () => {
+    const where: any = buildSegmentWhere("t1", INATIVOS_FILTERS);
+    expect(where.OR).toHaveLength(2);
+    expect(where.OR[0].AND[0].OR).toEqual([{ encerradoEm: { not: null } }, { statusConta: "INATIVO" }]);
+    expect(where.OR[1].AND[0].OR[0]).toEqual({ dataUltimaUtilizacao: null });
   });
 
   it("retorna apenas o filtro por tenant quando não há filtros", () => {
