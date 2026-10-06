@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://crmtopconta-backend-git-claud-5213f3-topcontamkt-4608s-projects.vercel.app/api/:path*"
+      "destination": "https://crmtopconta-backend.vercel.app/api/:path*"
     },
     {
       "source": "/(.*)",
