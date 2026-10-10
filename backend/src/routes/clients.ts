@@ -175,4 +175,36 @@ router.post("/bulk", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   res.json({ affected: clients.length });
 });
 
+/**
+ * POST /api/clients/purge — "Limpar base": apaga TODOS os clientes do tenant (e as movimentações
+ * e eventos de mensagem que dependem deles). Usado para descartar uma base importada por engano
+ * antes de reimportar. Irreversível, só ADMIN, exige a frase de confirmação. Campanhas, segmentos,
+ * templates e histórico de importações são preservados; a ação fica na Auditoria (só contagens).
+ */
+const PURGE_CONFIRMATION = "LIMPAR BASE";
+
+router.post("/purge", requireRole("ADMIN"), async (req, res) => {
+  const { tenantId, id: userId } = req.user!;
+  if (req.body?.confirm !== PURGE_CONFIRMATION) {
+    return res.status(400).json({ error: `Confirmação inválida. Digite exatamente: ${PURGE_CONFIRMATION}` });
+  }
+
+  const [messageEvents, movements, clients] = await prisma.$transaction([
+    prisma.messageEvent.deleteMany({ where: { client: { tenantId } } }),
+    prisma.movement.deleteMany({ where: { client: { tenantId } } }),
+    prisma.client.deleteMany({ where: { tenantId } }),
+  ]);
+  // Segmentos dinâmicos passam a refletir a base vazia até a próxima recontagem.
+  await prisma.segmentDefinition.updateMany({ where: { tenantId }, data: { lastCount: 0, lastRefreshedAt: new Date() } });
+
+  await logAudit({
+    tenantId,
+    userId,
+    action: "PURGE_CLIENTS",
+    target: "Client",
+    details: { clients: clients.count, movements: movements.count, messageEvents: messageEvents.count },
+  });
+  res.json({ clients: clients.count, movements: movements.count, messageEvents: messageEvents.count });
+});
+
 export default router;

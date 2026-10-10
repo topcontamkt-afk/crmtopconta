@@ -1,4 +1,4 @@
-import { buildSegmentWhere } from "./segments";
+import { buildSegmentWhere, INATIVOS_FILTERS } from "./segments";
 
 describe("buildSegmentWhere", () => {
   it("mantém compatibilidade com filtros simples (flat)", () => {
@@ -48,8 +48,35 @@ describe("buildSegmentWhere", () => {
     expect(cutoff.getTime()).toBeLessThanOrEqual(before - 30 * 24 * 60 * 60 * 1000 + 1000);
   });
 
+  it("público Inativos: conta encerrada/inativa OU 90+ dias sem uso", () => {
+    const where: any = buildSegmentWhere("t1", INATIVOS_FILTERS);
+    expect(where.OR).toHaveLength(2);
+    expect(where.OR[0].AND[0].OR).toEqual([{ encerradoEm: { not: null } }, { statusConta: "INATIVO" }]);
+    expect(where.OR[1].AND[0].OR[0]).toEqual({ dataUltimaUtilizacao: null });
+  });
+
   it("retorna apenas o filtro por tenant quando não há filtros", () => {
     expect(buildSegmentWhere("t1", undefined)).toEqual({ tenantId: "t1" });
     expect(buildSegmentWhere("t1", {})).toEqual({ tenantId: "t1" });
+  });
+});
+
+describe("filtros de comércio credenciado (compras)", () => {
+  it("categoriasCompra vira purchases.some com merchant.category e tenantId", () => {
+    const where: any = buildSegmentWhere("t1", { categoriasCompra: ["SUPERMERCADO", "POSTO"] });
+    expect(where.AND[0].purchases.some).toEqual({ tenantId: "t1", merchant: { category: { in: ["SUPERMERCADO", "POSTO"] } } });
+  });
+
+  it("só o prazo vale para qualquer compra no comércio (lojista não nulo) dentro da janela", () => {
+    const where: any = buildSegmentWhere("t1", { compraNosUltimosDias: 30 });
+    const some = where.AND[0].purchases.some;
+    expect(some.merchantId).toEqual({ not: null });
+    expect(some.occurredAt.gte).toBeInstanceOf(Date);
+    expect(some.occurredAt.gte.getTime()).toBeLessThan(Date.now());
+  });
+
+  it("sem filtro de compra não adiciona condição de purchases", () => {
+    const where: any = buildSegmentWhere("t1", { cidade: ["Boquim"] });
+    expect(JSON.stringify(where)).not.toContain("purchases");
   });
 });

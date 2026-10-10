@@ -10,11 +10,19 @@ export interface SegmentFilters {
   autorizacaoComunicacao?: boolean;
   semUsoDiasMin?: number; // dataUltimaUtilizacao mais antiga que N dias (ou nunca usou) — "sem uso"/"inativo"
   usadoNosUltimosDias?: number; // dataUltimaUtilizacao dentro dos últimos N dias — "recorrente"/"ativo"
+  contaEncerrada?: boolean; // conta encerrada (encerradoEm preenchido) ou statusConta=INATIVO
   tags?: string[];
   search?: string; // busca livre por nome/telefone
   clientIds?: string[]; // seleção explícita de clientes (usado pelo motor de automação e por
   // públicos pré-montados no Dashboard, ex.: aniversariantes do mês)
   empresaConveniada?: string[]; // convênio/secretaria de vínculo (só populado no formato "Cartões e contas"/"SaldoCartao")
+  // Comércio credenciado (aba "Todas as Compras"): clientes que compraram em lojistas de certas
+  // categorias (ex.: SUPERMERCADO, POSTO) e/ou em lojistas específicos, opcionalmente dentro de uma
+  // janela de dias. Sem categoria nem lojista, `compraNosUltimosDias` vale para qualquer compra no
+  // comércio credenciado.
+  categoriasCompra?: string[];
+  lojistaIds?: string[];
+  compraNosUltimosDias?: number;
 }
 
 /**
@@ -46,9 +54,22 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
     const cutoff = new Date(Date.now() - filters.semUsoDiasMin * 24 * 60 * 60 * 1000);
     and.push({ OR: [{ dataUltimaUtilizacao: null }, { dataUltimaUtilizacao: { lte: cutoff } }] });
   }
+  if (filters.contaEncerrada) {
+    and.push({ OR: [{ encerradoEm: { not: null } }, { statusConta: "INATIVO" }] });
+  }
   if (filters.usadoNosUltimosDias !== undefined) {
     const cutoff = new Date(Date.now() - filters.usadoNosUltimosDias * 24 * 60 * 60 * 1000);
     and.push({ dataUltimaUtilizacao: { gte: cutoff } });
+  }
+  if (filters.categoriasCompra?.length || filters.lojistaIds?.length || filters.compraNosUltimosDias !== undefined) {
+    const purchase: Prisma.PurchaseWhereInput = { tenantId };
+    if (filters.categoriasCompra?.length) purchase.merchant = { category: { in: filters.categoriasCompra } };
+    if (filters.lojistaIds?.length) purchase.merchantId = { in: filters.lojistaIds };
+    if (!filters.categoriasCompra?.length && !filters.lojistaIds?.length) purchase.merchantId = { not: null };
+    if (filters.compraNosUltimosDias !== undefined) {
+      purchase.occurredAt = { gte: new Date(Date.now() - filters.compraNosUltimosDias * 24 * 60 * 60 * 1000) };
+    }
+    and.push({ purchases: { some: purchase } });
   }
   if (filters.search) {
     and.push({
@@ -92,3 +113,14 @@ export function buildSegmentWhere(
   }
   return buildLeafWhere(tenantId, filtersOrGroup as SegmentFilters);
 }
+
+/** Público "Inativos": conta encerrada/inativa OU mais de 90 dias sem uso (grupos combinados em OR). */
+export const INATIVOS_SEGMENT_NAME = "Inativos";
+export const INATIVOS_SEMUSO_DIAS = 90;
+export const INATIVOS_FILTERS: SegmentGroup = {
+  operator: "OR",
+  groups: [
+    { operator: "AND", conditions: { contaEncerrada: true } },
+    { operator: "AND", conditions: { semUsoDiasMin: INATIVOS_SEMUSO_DIAS } },
+  ],
+};

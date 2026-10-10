@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { buildSegmentWhere } from "../services/segments";
+import { buildSegmentWhere, INATIVOS_FILTERS, INATIVOS_SEGMENT_NAME } from "../services/segments";
 
 const router = Router();
 router.use(requireAuth);
@@ -21,10 +21,14 @@ const filtersSchema = z.object({
   statusConta: z.array(z.string()).optional(),
   autorizacaoComunicacao: z.boolean().optional(),
   semUsoDiasMin: z.number().optional(),
+  contaEncerrada: z.boolean().optional(),
   usadoNosUltimosDias: z.number().optional(),
   tags: z.array(z.string()).optional(),
   search: z.string().optional(),
   empresaConveniada: z.array(z.string()).optional(),
+  categoriasCompra: z.array(z.string()).optional(),
+  lojistaIds: z.array(z.string()).optional(),
+  compraNosUltimosDias: z.number().optional(),
 });
 
 // Grupo de filtros combináveis (AND/OR aninhados) — segment builder avançado (Fase 2).
@@ -77,6 +81,23 @@ router.post("/", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) =
     },
   });
   res.status(201).json(segment);
+});
+
+/**
+ * POST /api/segments/presets/inativos — cria (ou recontabiliza, se já existir) o segmento
+ * dinâmico "Inativos": conta encerrada/inativa OU mais de 90 dias sem uso.
+ */
+router.post("/presets/inativos", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
+  const { tenantId } = req.user!;
+  const count = await prisma.client.count({ where: buildSegmentWhere(tenantId, INATIVOS_FILTERS) });
+  const existing = await prisma.segmentDefinition.findFirst({ where: { tenantId, name: INATIVOS_SEGMENT_NAME } });
+  const data = { filters: INATIVOS_FILTERS as any, lastCount: count, lastRefreshedAt: new Date() };
+  const segment = existing
+    ? await prisma.segmentDefinition.update({ where: { id: existing.id }, data })
+    : await prisma.segmentDefinition.create({
+        data: { tenantId, name: INATIVOS_SEGMENT_NAME, dynamic: true, operator: "OR", ...data },
+      });
+  res.status(existing ? 200 : 201).json(segment);
 });
 
 /** POST /api/segments/:id/refresh — recontagem manual (a automática roda via scheduler para segmentos dinâmicos). */
