@@ -1,14 +1,13 @@
 import { ChangeEvent, Fragment, useEffect, useState } from "react";
 import { api } from "../api/client";
 import { parseCsv } from "../utils/csv";
-import { autoMapColumns, CARD_ACCOUNT_FIELDS, IMPORT_FIELDS, ImportFieldDef, TRANSACTION_FIELDS } from "../utils/importFields";
+import { autoMapColumns, CARD_ACCOUNT_FIELDS, IMPORT_FIELDS, ImportFieldDef } from "../utils/importFields";
 
-type UploadFormat = "cartoes" | "transacoes" | "generico";
+type UploadFormat = "cartoes" | "generico";
 
-const FORMAT_CONFIG: Record<UploadFormat, { label: string; fields: ImportFieldDef[]; endpoint: string; unit: string }> = {
-  cartoes: { label: "Cartões e contas (cadastro/ativação de cartão)", fields: CARD_ACCOUNT_FIELDS, endpoint: "/imports/cartoes", unit: "clientes" },
-  transacoes: { label: "Transações (extrato de antecipações, compras e assinaturas)", fields: TRANSACTION_FIELDS, endpoint: "/imports/transacoes", unit: "transações" },
-  generico: { label: "Genérico (id_cliente, status_conta, autorização LGPD...)", fields: IMPORT_FIELDS, endpoint: "/imports/csv", unit: "clientes" },
+const FORMAT_CONFIG: Record<UploadFormat, { label: string; fields: ImportFieldDef[]; endpoint: string }> = {
+  cartoes: { label: "Cartões e contas (cadastro/ativação de cartão)", fields: CARD_ACCOUNT_FIELDS, endpoint: "/imports/cartoes" },
+  generico: { label: "Genérico (id_cliente, status_conta, autorização LGPD...)", fields: IMPORT_FIELDS, endpoint: "/imports/csv" },
 };
 
 interface Quality {
@@ -117,26 +116,21 @@ export default function Imports() {
     let added = 0;
     let updated = 0;
     let errors = 0;
-    let duplicates = 0;
 
     try {
       for (let i = 0; i < totalBatches; i++) {
         const batch = rows.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE);
         setUploadStatus(`Importando lote ${i + 1} de ${totalBatches} (${added + updated} de ${rows.length} processados até agora)...`);
-        const resp = await api<{ addedCount: number; updatedCount: number; errorCount: number; duplicateCount?: number }>(
+        const resp = await api<{ addedCount: number; updatedCount: number; errorCount: number }>(
           FORMAT_CONFIG[format].endpoint,
           { method: "POST", body: { rows: batch } }
         );
         added += resp.addedCount;
         updated += resp.updatedCount;
         errors += resp.errorCount;
-        duplicates += resp.duplicateCount ?? 0;
       }
-      // Transações são imutáveis: reenviar uma já importada é ignorado, não "atualizado".
       setUploadStatus(
-        (format === "transacoes"
-          ? `Importado: ${added} transações novas, ${duplicates} já existentes (ignoradas), ${errors} com erro/aviso.`
-          : `Importado: ${added} novos, ${updated} atualizados, ${errors} com erro/aviso.`) +
+        `Importado: ${added} novos, ${updated} atualizados, ${errors} com erro/aviso.` +
           (errors > 0 ? " Veja o detalhe no histórico abaixo." : "")
       );
       resetUpload();
@@ -173,15 +167,6 @@ export default function Imports() {
             ))}
           </select>
         </div>
-        {format === "transacoes" && (
-          <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
-            Importe primeiro <strong>Cartões e contas</strong>, para as transações já herdarem cidade e
-            convênio do cliente (a ordem não é obrigatória: transações de clientes ainda não cadastrados
-            ficam guardadas e são ligadas quando o cliente chegar). Pode reenviar o mesmo extrato ou um
-            com dias repetidos — transações já importadas são ignoradas. Só antecipação e compra contam
-            como uso; assinatura e tipos desconhecidos não.
-          </p>
-        )}
         <input type="file" accept=".csv,text/csv" onChange={handleFile} />
         {uploadError && <p className="error-text" style={{ marginTop: 8 }}>{uploadError}</p>}
         {uploadStatus && <p style={{ marginTop: 8 }}>{uploadStatus}</p>}
@@ -251,7 +236,7 @@ export default function Imports() {
                 disabled={importing || requiredMissing.length > 0}
                 onClick={handleImport}
               >
-                {importing ? "Importando..." : `Importar ${dataRows.length} ${FORMAT_CONFIG[format].unit}`}
+                {importing ? "Importando..." : `Importar ${dataRows.length} clientes`}
               </button>{" "}
               <button className="btn secondary" onClick={resetUpload} disabled={importing}>Cancelar</button>
             </div>

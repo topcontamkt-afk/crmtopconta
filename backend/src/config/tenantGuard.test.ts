@@ -162,8 +162,7 @@ describe("TENANT_SCOPED_MODELS", () => {
         "ChannelConfig",
         "MessageTemplate",
         "Notification",
-        "Transaction",
-        "AccountSnapshot",
+              "AccountSnapshot",
       ].sort()
     );
   });

@@ -114,14 +114,6 @@ export async function runRetentionSweep(prisma: AppPrismaClient) {
             anonymizedAt: new Date(),
           },
         });
-        // As transações do cliente guardam o mesmo cpfHash (pseudônimo reversível por quem
-        // conhece o CPF + salt) — precisa receber a mesma troca que Client.cpfHash, senão a
-        // anonimização do cliente seria desfeita pela tabela de transações. Valores e datas
-        // ficam: sem o hash, são só estatística agregada.
-        await prisma.transaction.updateMany({
-          where: { tenantId: tenant.id, clientId: client.id },
-          data: { cpfHash: `anon-${client.id}` },
-        });
         await logAudit({
           tenantId: tenant.id,
           action: "RETENTION_ANONYMIZE",

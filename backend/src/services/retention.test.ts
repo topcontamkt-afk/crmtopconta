@@ -9,7 +9,6 @@ jest.mock("../config/db", () => ({
   prisma: {
     tenant: { findMany: jest.fn() },
     client: { findMany: jest.fn(), update: jest.fn() },
-    transaction: { updateMany: jest.fn() },
     // findFirst: usado por logAudit() (via getLastAuditHash(), hash-chain — achado #11) toda
     // vez que o sweep registra a própria ação de anonimização no AuditLog.
     auditLog: { findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), create: jest.fn() },
@@ -30,7 +29,6 @@ type FakeAuditLog = {
 const mockPrisma = prisma as unknown as {
   tenant: { findMany: jest.Mock };
   client: { findMany: jest.Mock; update: jest.Mock };
-  transaction: { updateMany: jest.Mock };
   auditLog: { findMany: jest.Mock; findFirst: jest.Mock; update: jest.Mock; create: jest.Mock };
 };
 
@@ -50,7 +48,6 @@ describe("runRetentionSweep — cascata de redação de PII em AuditLog", () => 
       { id: "client-1", tenantId: "tenant-1", dataUltimaUtilizacao: null, createdAt: new Date("2020-01-01") },
     ]);
     mockPrisma.client.update.mockImplementation(async ({ where, data }: any) => ({ id: where.id, ...data }));
-    mockPrisma.transaction.updateMany.mockResolvedValue({ count: 0 });
     mockPrisma.auditLog.create.mockResolvedValue({ id: "new-log" });
     mockPrisma.auditLog.findFirst.mockResolvedValue(null); // hash-chain: sem entrada anterior nestes testes
 
@@ -160,15 +157,6 @@ describe("runRetentionSweep — cascata de redação de PII em AuditLog", () => 
         cidade: null,
         tags: [],
       }),
-    });
-  });
-
-  it("troca o cpfHash das transações do cliente anonimizado (senão a anonimização seria desfeita)", async () => {
-    await runRetentionSweep(prisma as any);
-
-    expect(mockPrisma.transaction.updateMany).toHaveBeenCalledWith({
-      where: { tenantId: "tenant-1", clientId: "client-1" },
-      data: { cpfHash: "anon-client-1" },
     });
   });
 

@@ -76,23 +76,6 @@ export const CARD_ACCOUNT_FIELDS: ImportFieldDef[] = [
   { key: "vinculo_empregaticio", label: "Vínculo empregatício", required: false, synonyms: ["vinculoempregaticio", "vinculo_empregaticio"] },
 ];
 
-/**
- * Extrato de transações do cartão (antecipação, compra, assinatura) — mesmos campos de
- * backend/src/services/transactionImport.ts (TransactionRow). Nome/telefone/e-mail do extrato
- * ficam de fora de propósito: o cadastro vem da base de "Cartões e contas", ligado por CPF/CNPJ.
- */
-export const TRANSACTION_FIELDS: ImportFieldDef[] = [
-  { key: "id_transacao", label: "ID da transação", required: true, synonyms: ["idtransacao", "id_transacao", "transacao"] },
-  { key: "data_confirmada", label: "Data de confirmação (dd/mm/aaaa hh:mm:ss)", required: true, synonyms: ["dtconfirmada", "dt_confirmada", "data_confirmada", "dataconfirmada"] },
-  { key: "documento", label: "CPF/CNPJ", required: true, synonyms: ["cpfcnpjcliente", "cpf_cnpj_cliente", "cpfcnpj", "cpf_cnpj", "cpf", "cnpj", "documento"] },
-  { key: "descricao", label: "Descrição (tipo da operação)", required: true, synonyms: ["descricao", "tipo", "tipo_operacao"] },
-  { key: "valor_parcela", label: "Valor total (principal + juros)", required: false, synonyms: ["valor_parcela", "valorparcela", "valor_total", "valortotal"] },
-  { key: "valor_principal", label: "Valor principal", required: false, synonyms: ["valorprincipal", "valor_principal", "principal"] },
-  { key: "juros", label: "Juros (lucro)", required: false, synonyms: ["juros"] },
-  { key: "nome_fantasia", label: "Nome fantasia (produto/estabelecimento)", required: false, synonyms: ["nomefantasia", "nome_fantasia"] },
-  { key: "razao_social", label: "Razão social (convênio)", required: false, synonyms: ["razaosocial", "razao_social"] },
-];
-
 /** Para cada campo, encontra o índice da coluna do CSV cujo cabeçalho normalizado bate com algum sinônimo. */
 export function autoMapColumns(headers: string[], fields: ImportFieldDef[] = IMPORT_FIELDS): Record<string, number> {
   const normalized = headers.map(normalizeHeader);

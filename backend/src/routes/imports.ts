@@ -5,7 +5,6 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { runImport, RawSheetRow } from "../services/importService";
 import { runCardAccountImport, CardAccountRow } from "../services/cardAccountImport";
-import { runTransactionImport, TransactionRow } from "../services/transactionImport";
 import { DEFAULT_COLUMN_MAPPING, fetchSheetRows } from "../services/googleSheets";
 import { notify } from "../services/notifications";
 import { importLimiter } from "../middleware/rateLimit";
@@ -188,33 +187,6 @@ router.post("/cartoes", importLimiter, requireRole("ADMIN", "OPERATOR"), async (
     userId
   );
   await logAudit({ tenantId, userId, action: "IMPORT_CARTOES_CONTAS", target: "ImportJob", targetId: importJobId, details: result });
-  res.json({ importJobId, ...result });
-});
-
-/**
- * POST /api/imports/transacoes — extrato de transações do cartão (antecipação, compra,
- * assinatura). É a fonte do "uso real" do cliente — a planilha de contas só traz o saldo atual.
- * Importar depois de "Cartões e contas" (para as transações já herdarem cidade/convênio), mas a
- * ordem não é obrigatória: transações de clientes ainda não cadastrados ficam sem vínculo e são
- * ligadas quando o cliente chegar. Reenviar o mesmo extrato (ou com sobreposição de dias) não
- * duplica nada. Ver services/transactionImport.ts.
- */
-const transactionSchema = z.object({
-  rows: z.array(z.record(z.any())).min(1),
-});
-
-router.post("/transacoes", importLimiter, requireRole("ADMIN", "OPERATOR"), async (req, res) => {
-  const parsed = transactionSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { tenantId, id: userId } = req.user!;
-
-  const { importJobId, result } = await runTransactionImport(
-    prisma,
-    tenantId,
-    parsed.data.rows as TransactionRow[],
-    userId
-  );
-  await logAudit({ tenantId, userId, action: "IMPORT_TRANSACOES", target: "ImportJob", targetId: importJobId, details: result });
   res.json({ importJobId, ...result });
 });
 

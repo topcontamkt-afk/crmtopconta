@@ -4,7 +4,6 @@ import { computeUsage } from "./usage";
 import { hashDocument, isValidDocument, maskDocument, detectDocumentType, normalizePhone } from "./masking";
 import { notify } from "./notifications";
 import { ImportRunResult } from "./importService";
-import { relinkOrphanTransactions } from "./transactionImport";
 import { recordAccountSnapshots, SnapshotCandidate } from "./accountSnapshot";
 
 /**
@@ -357,12 +356,6 @@ export async function runCardAccountImport(
 
   // Histórico de saldo/limite/status (AccountSnapshot) — não derruba a importação se falhar.
   await recordAccountSnapshots(prisma, tenantId, snapshotCandidates, job.id);
-
-  // Transações que chegaram antes do cadastro do cliente (clientId nulo) são ligadas agora que
-  // ele existe. Não derruba a importação: refeito na próxima importação, de contas ou transações.
-  if (added > 0) {
-    await relinkOrphanTransactions(prisma, tenantId).catch(() => {});
-  }
 
   const hardErrors = errors.filter((e) => !e.motivo.startsWith("Aviso:"));
   const status =

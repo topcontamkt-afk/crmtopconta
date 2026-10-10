@@ -1,11 +1,12 @@
 import { AppPrismaClient } from "../config/db";
 import { computeABSignificance } from "./statistics";
+import { classifyTransaction } from "./transactionClassifier";
 
 /**
- * Resultado de campanha medido pelo USO REAL do cliente (transações), não pela renovação de
- * limite. Regras (confirmadas com o cliente, 2026-10-10):
- *  - conta como uso só antecipação e compra (Transaction.countsAsUsage); assinatura e tipos
- *    desconhecidos nunca;
+ * Resultado de campanha medido pelo USO REAL do cliente (Purchase = extrato de transações do
+ * cartão), não pela renovação de limite. Regras (confirmadas com o cliente, 2026-10-10):
+ *  - conta como uso só antecipação e compra (classifyTransaction sobre Purchase.tipo); assinatura,
+ *    débito de fatura e tipos desconhecidos nunca;
  *  - curva de conversão em D0, D1, D3, D7, D14 e D30, em DIAS DE CALENDÁRIO de Brasília
  *    (D0 = "no mesmo dia do disparo", a partir da hora do envio);
  *  - quando o cliente recebe mais de uma campanha, o uso conta para a MAIS RECENTE;
@@ -356,9 +357,9 @@ export async function loadCampaignEvaluations(
 
   for (const ids of chunk(clientIds, BATCH)) {
     const [txs, others, snaps] = await Promise.all([
-      prisma.transaction.findMany({
-        where: { tenantId, clientId: { in: ids }, countsAsUsage: true, confirmedAt: { gte: minRef, lte: windowEnd } },
-        select: { clientId: true, confirmedAt: true, kind: true, valorPrincipal: true, juros: true },
+      prisma.purchase.findMany({
+        where: { tenantId, clientId: { in: ids }, occurredAt: { gte: minRef, lte: windowEnd } },
+        select: { clientId: true, occurredAt: true, tipo: true, valorPrincipal: true, juros: true },
       }),
       prisma.messageEvent.findMany({
         where: {
@@ -378,14 +379,16 @@ export async function loadCampaignEvaluations(
     ]);
 
     for (const t of txs) {
-      if (!t.clientId) continue;
+      // Purchase guarda todo tipo de operação; só antecipação e compra contam como uso.
+      const { kind, countsAsUsage } = classifyTransaction(t.tipo);
+      if (!countsAsUsage) continue;
       const list = txByClient.get(t.clientId) ?? [];
       list.push({
         clientId: t.clientId,
-        confirmedAt: t.confirmedAt,
-        kind: t.kind as UsageKind,
+        confirmedAt: t.occurredAt,
+        kind: kind as UsageKind,
         valorPrincipal: Number(t.valorPrincipal),
-        juros: Number(t.juros),
+        juros: Number(t.juros ?? 0),
       });
       txByClient.set(t.clientId, list);
     }

@@ -45,14 +45,6 @@ enum UsageFaixa {
   INDEFINIDO // limite_total inválido/zero
 }
 
-// Tipo de operação do extrato de transações (ver services/transactionClassifier.ts).
-enum TransactionKind {
-  ANTECIPACAO // saque/antecipação salarial via "Débito Pix Cartão" — gera lucro (Juros)
-  COMPRA      // compra à vista no comércio credenciado — taxa paga pelo comerciante (sem dado)
-  ASSINATURA  // mensalidade fixa do benefício/convênio — cobrança automática, sem lucro
-  OUTRO       // descrição não reconhecida — guardada, mas NÃO conta como uso
-}
-
 enum Channel {
   WHATSAPP
   SMS
@@ -118,7 +110,6 @@ model Tenant {
   channelConfigs     ChannelConfig[]
   messageTemplates   MessageTemplate[]
   notifications      Notification[]
-  transactions       Transaction[]
   accountSnapshots   AccountSnapshot[]
 }
 
@@ -221,7 +212,6 @@ model Client {
 
   movements              Movement[]
   messageEvents          MessageEvent[]
-  transactions           Transaction[]
   accountSnapshots       AccountSnapshot[]
 
   @@unique([tenantId, cpfHash])
@@ -285,39 +275,6 @@ model AccountSnapshot {
 
   @@index([tenantId, clientId, recordedAt])
   @@index([tenantId, recordedAt])
-}
-
-// Extrato de transações do cartão (uma linha por operação confirmada) — fonte do "uso real",
-// ao contrário de Client.valorUtilizado/dataUltimaUtilizacao, que são só o retrato mais recente
-// e oscilam com o ciclo da folha (a fatura é descontada e o limite renova). Importado por
-// services/transactionImport.ts; imutável (a mesma idTransacao reenviada é ignorada).
-//
-// clientId é opcional de propósito: o extrato pode chegar antes do cadastro do cliente. cpfHash
-// (mesmo HMAC por tenant de Client.cpfHash — nunca o documento em claro) permite religar depois.
-model Transaction {
-  id             String          @id @default(uuid())
-  tenantId       String
-  tenant         Tenant          @relation(fields: [tenantId], references: [id])
-  clientId       String?
-  client         Client?         @relation(fields: [clientId], references: [id])
-  cpfHash        String
-  externalId     String          // idTransacao do sistema de origem
-  confirmedAt    DateTime        // DtConfirmada (horário de Brasília convertido para UTC)
-  descricao      String
-  nomeFantasia   String?
-  razaoSocial    String?         // promotora/associação (convênio) — mesma coluna da base de contas
-  kind           TransactionKind
-  countsAsUsage  Boolean         // false para ASSINATURA/OUTRO — nunca entra em conversão/retenção
-  valorTotal     Decimal         @db.Decimal(14, 2) // valor_parcela: principal + juros
-  valorPrincipal Decimal         @db.Decimal(14, 2) // valor movimentado
-  juros          Decimal         @default(0) @db.Decimal(14, 2) // lucro da antecipação
-  importJobId    String?
-  createdAt      DateTime        @default(now())
-
-  @@unique([tenantId, externalId])
-  @@index([tenantId, clientId, confirmedAt])
-  @@index([tenantId, cpfHash])
-  @@index([tenantId, confirmedAt])
 }
 
 model SegmentDefinition {

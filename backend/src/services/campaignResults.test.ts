@@ -287,7 +287,7 @@ describe("loadCampaignEvaluations", () => {
           return opts.events;
         }),
       },
-      transaction: {
+      purchase: {
         findMany: jest.fn(async (args: any) => {
           calls.tx = args;
           return opts.txs ?? [];
@@ -311,8 +311,11 @@ describe("loadCampaignEvaluations", () => {
     const { prisma, calls } = fakePrisma({
       events: [sentEv("e1", "c1", "2026-10-05T10:00:00-03:00")],
       txs: [
-        { clientId: "c1", confirmedAt: at("2026-10-06T10:00:00-03:00"), kind: "ANTECIPACAO", valorPrincipal: "310", juros: "46.5" },
-        { clientId: "c1", confirmedAt: at("2026-10-12T10:00:00-03:00"), kind: "COMPRA", valorPrincipal: "45", juros: "0" },
+        { clientId: "c1", occurredAt: at("2026-10-06T10:00:00-03:00"), tipo: "Débito Pix Cartão", valorPrincipal: "310", juros: "46.5" },
+        { clientId: "c1", occurredAt: at("2026-10-12T10:00:00-03:00"), tipo: "Compra à Vista Cartão Top Convênio", valorPrincipal: "45", juros: null },
+        // não são uso do cliente: mensalidade e desconto de fatura em folha
+        { clientId: "c1", occurredAt: at("2026-10-06T11:00:00-03:00"), tipo: "Assinatura AMEF-Gleebem", valorPrincipal: "29.9", juros: "0" },
+        { clientId: "c1", occurredAt: at("2026-10-07T11:00:00-03:00"), tipo: "Débito de Fatura", valorPrincipal: "500", juros: null },
       ],
       others: [{ clientId: "c1", sentAt: at("2026-10-10T10:00:00-03:00") }],
       snaps: [{ clientId: "c1", recordedAt: at("2026-10-01T09:00:00-03:00"), saldoDisponivel: "1500" }],
@@ -321,13 +324,13 @@ describe("loadCampaignEvaluations", () => {
     const out = await loadCampaignEvaluations(prisma, "t1", "camp1");
 
     expect(out).toHaveLength(1);
-    expect(out[0].usos).toHaveLength(1); // a compra de 12/10 é da campanha de 10/10
+    expect(out[0].usos).toHaveLength(1); // a compra de 12/10 é da campanha de 10/10; assinatura e fatura não são uso
     expect(out[0].usos[0]).toMatchObject({ kind: "ANTECIPACAO", valorPrincipal: 310, juros: 46.5, dayOffset: 1 });
     expect(out[0].saldoNoEnvio).toBe(1500);
     expect(out[0].grupoSaldo).toBe("COM_SALDO");
 
-    // só conta como uso o que Transaction.countsAsUsage marca, sempre escopado por tenant
-    expect(calls.tx.where).toMatchObject({ tenantId: "t1", countsAsUsage: true });
+    // sempre escopado por tenant; o que conta como uso é decidido pelo classificador do tipo
+    expect(calls.tx.where).toMatchObject({ tenantId: "t1" });
     expect(calls.snaps.where.tenantId).toBe("t1");
     // outras campanhas: do mesmo tenant e fora do sandbox
     expect(calls.others.where.campaign).toEqual({ tenantId: "t1", isSandbox: false });
@@ -357,12 +360,12 @@ describe("loadCampaignEvaluations", () => {
       events: [{ id: "k1", clientId: "c3", variant: "A", status: "CONTROLE", sentAt: null }],
     });
     expect(await loadCampaignEvaluations(prisma, "t1", "camp1")).toEqual([]);
-    expect(prisma.transaction.findMany).not.toHaveBeenCalled();
+    expect(prisma.purchase.findMany).not.toHaveBeenCalled();
   });
 
   it("sem eventos enviados, não consulta o banco à toa", async () => {
     const { prisma } = fakePrisma({ events: [] });
     expect(await loadCampaignEvaluations(prisma, "t1", "camp1")).toEqual([]);
-    expect(prisma.transaction.findMany).not.toHaveBeenCalled();
+    expect(prisma.purchase.findMany).not.toHaveBeenCalled();
   });
 });
