@@ -1,5 +1,6 @@
 import { AppPrismaClient } from "../config/db";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
+import { refreshUsageColumns } from "./usageRefresh";
 import { addDays, computeKpis, todayBrt } from "./dashboardMetrics";
 
 /**
@@ -62,6 +63,7 @@ export async function runSnapshotJob(prisma: AppPrismaClient) {
   for (const t of tenants) {
     try {
       await runWithTenantContextAsync(t.id, async () => {
+        await refreshUsageColumns(t.id).catch((e) => console.error(`[snapshots] uso real do tenant ${t.id}:`, e));
         await captureSnapshot(prisma, t.id);
       });
       results.push({ tenantId: t.id, ok: true });

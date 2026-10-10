@@ -1,3 +1,4 @@
+import { ETAPA_CASE_SQL } from "../services/etapaUso";
 import { ENVIAVEL_WHERE } from "../services/segments";
 import { LIMITE_MAXIMO, LIMITE_TETO, PERFIL_LABELS, PERFIS_RENDA, estimarSalario } from "../services/rendaPerfil";
 import { Router } from "express";
@@ -736,7 +737,7 @@ router.get("/perfis-renda", async (req, res) => {
   const { tenantId } = req.user!;
   const raw = rawFilterSql({ cidade: parsed.data.cidade, empresaConveniada: parsed.data.empresaConveniada }, 5);
   const rows = await tenantRaw.query<
-    Array<{ perfil: string | null; faixa: string; n: bigint; no_teto: bigint; sem_saldo: bigint }>
+    Array<{ perfil: string | null; faixa: string; etapa: string; n: bigint; no_teto: bigint; sem_saldo: bigint }>
   >(
     `SELECT
        CASE
@@ -747,12 +748,13 @@ router.get("/perfis-renda", async (req, res) => {
          ELSE 'PF4'
        END AS perfil,
        "faixaUso"::text AS faixa,
+       ${ETAPA_CASE_SQL} AS etapa,
        COUNT(*)::bigint AS n,
        COUNT(*) FILTER (WHERE "limiteTotal" = ${LIMITE_TETO})::bigint AS no_teto,
        COUNT(*) FILTER (WHERE "faixaUso" = 'USO_100')::bigint AS sem_saldo
      FROM "Client"
      WHERE "tenantId" = $1 ${raw.sql}
-     GROUP BY 1, 2`,
+     GROUP BY 1, 2, 3`,
     tenantId,
     LIMITE_MAXIMO.PF1,
     LIMITE_MAXIMO.PF2,
@@ -763,12 +765,18 @@ router.get("/perfis-renda", async (req, res) => {
     const mine = rows.filter((r) => r.perfil === p);
     const faixas: Record<string, number> = {};
     for (const r of mine) faixas[r.faixa] = (faixas[r.faixa] ?? 0) + Number(r.n);
+    const etapas: Record<string, number> = {};
+    for (const r of mine) etapas[r.etapa] = (etapas[r.etapa] ?? 0) + Number(r.n);
     const total = mine.reduce((a, r) => a + Number(r.n), 0);
     const noTeto = mine.reduce((a, r) => a + Number(r.no_teto), 0);
-    return { perfil: p, label: PERFIL_LABELS[p], total, noTeto, faixas };
+    return { perfil: p, label: PERFIL_LABELS[p], total, noTeto, faixas, etapas };
   });
   const semLimite = rows.filter((r) => r.perfil === null).reduce((a, r) => a + Number(r.n), 0);
-  res.json({ perfis, semLimite, fatorSalario: estimarSalario(1) });
+  const [cob] = await tenantRaw.query<Array<{ primeira: Date | null; ultima: Date | null }>>(
+    `SELECT MIN("occurredAt") AS primeira, MAX("occurredAt") AS ultima FROM "Purchase" WHERE "tenantId" = $1`,
+    tenantId
+  );
+  res.json({ perfis, semLimite, fatorSalario: estimarSalario(1), extrato: { primeira: cob?.primeira ?? null, ultima: cob?.ultima ?? null } });
 });
 
 /**

@@ -1,3 +1,4 @@
+import { etapaWhere, EtapaUso } from "./etapaUso";
 import { Prisma } from "@prisma/client";
 import { limiteRange, LIMITE_TETO, PerfilRenda } from "./rendaPerfil";
 
@@ -31,6 +32,11 @@ export interface SegmentFilters {
   noTetoLimite?: boolean;
   // Saldo disponível mínimo (R$): "com saldo" = podia usar no momento.
   saldoDisponivelMin?: number;
+  etapaUso?: EtapaUso[]; // etapa pelo extrato (ver etapaUso.ts)
+  usosMin?: number; // mínimo de usos reais nos últimos 90 dias
+  usosMax?: number; // máximo de usos reais nos últimos 90 dias
+  diasSemUsoRealMin?: number; // último uso real há pelo menos N dias (ou nunca usou)
+  diasSemUsoRealMax?: number; // último uso real há no máximo N dias
 }
 
 /**
@@ -89,6 +95,16 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
   }
   if (filters.noTetoLimite) and.push({ limiteTotal: LIMITE_TETO });
   if (filters.saldoDisponivelMin !== undefined) and.push({ saldoDisponivel: { gte: filters.saldoDisponivelMin } });
+  if (filters.etapaUso?.length) and.push({ OR: filters.etapaUso.map((e) => etapaWhere(e)) });
+  if (filters.usosMin !== undefined) and.push({ usosUltimos90d: { gte: filters.usosMin } });
+  if (filters.usosMax !== undefined) and.push({ usosUltimos90d: { lte: filters.usosMax } });
+  if (filters.diasSemUsoRealMin !== undefined) {
+    const cutoff = new Date(Date.now() - filters.diasSemUsoRealMin * 86400000);
+    and.push({ OR: [{ ultimoUsoReal: null }, { ultimoUsoReal: { lte: cutoff } }] });
+  }
+  if (filters.diasSemUsoRealMax !== undefined) {
+    and.push({ ultimoUsoReal: { gte: new Date(Date.now() - filters.diasSemUsoRealMax * 86400000) } });
+  }
   if (filters.search) {
     and.push({
       OR: [
@@ -177,4 +193,13 @@ export const PERFIL_RENDA_PRESETS: SegmentPreset[] = [
   { name: "PF2+ · no teto de R$ 2.000", filters: { noTetoLimite: true } },
   { name: "PF3 · base geral", filters: { perfilRenda: ["PF3"] } },
   { name: "PF4 · base geral", filters: { perfilRenda: ["PF4"] } },
+];
+
+/** Segmentos prontos por etapa de uso real (combine com perfil de renda no filtro ou no assistente). */
+export const ETAPA_USO_PRESETS: SegmentPreset[] = [
+  { name: "Etapa · nunca usou", filters: { etapaUso: ["NUNCA_USOU"] } },
+  { name: "Etapa · recorrentes", filters: { etapaUso: ["RECORRENTE"] } },
+  { name: "Etapa · ocasionais", filters: { etapaUso: ["OCASIONAL"] } },
+  { name: "Etapa · em risco (31–90 dias sem uso)", filters: { etapaUso: ["EM_RISCO"] } },
+  { name: "Etapa · inativos (+90 dias sem uso)", filters: { etapaUso: ["INATIVO"] } },
 ];

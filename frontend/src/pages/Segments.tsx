@@ -17,6 +17,14 @@ const STATUS_OPTIONS = [
   { value: "BLOQUEADO", label: "Bloqueado" },
 ];
 
+const ETAPA_OPTIONS = [
+  { value: "NUNCA_USOU", label: "Nunca usou" },
+  { value: "RECORRENTE", label: "Recorrente (3+ usos em 90 dias)" },
+  { value: "OCASIONAL", label: "Ocasional (1–2 usos)" },
+  { value: "EM_RISCO", label: "Em risco (31–90 dias sem uso)" },
+  { value: "INATIVO", label: "Inativo (+90 dias sem uso)" },
+];
+
 const PERFIL_OPTIONS = [
   { value: "PF1", label: "PF1 (até R$ 4.000)" },
   { value: "PF2", label: "PF2 (4.001 a 8.000)" },
@@ -31,6 +39,9 @@ export default function Segments() {
   const [faixaUso, setFaixaUso] = useState<string[]>([]);
   const [statusConta, setStatusConta] = useState<string[]>([]);
   const [perfilRenda, setPerfilRenda] = useState<string[]>([]);
+  const [etapaUso, setEtapaUso] = useState<string[]>([]);
+  const [usosMin, setUsosMin] = useState("");
+  const [diasSemUsoRealMin, setDiasSemUsoRealMin] = useState("");
   const [semUsoDiasMin, setSemUsoDiasMin] = useState("");
   const [usadoNosUltimosDias, setUsadoNosUltimosDias] = useState("");
   const [tags, setTags] = useState("");
@@ -59,6 +70,9 @@ export default function Segments() {
       faixaUso: faixaUso.length ? faixaUso : undefined,
       statusConta: statusConta.length ? statusConta : undefined,
       perfilRenda: perfilRenda.length ? perfilRenda : undefined,
+      etapaUso: etapaUso.length ? etapaUso : undefined,
+      usosMin: usosMin ? Number(usosMin) : undefined,
+      diasSemUsoRealMin: diasSemUsoRealMin ? Number(diasSemUsoRealMin) : undefined,
       semUsoDiasMin: semUsoDiasMin ? Number(semUsoDiasMin) : undefined,
       usadoNosUltimosDias: usadoNosUltimosDias ? Number(usadoNosUltimosDias) : undefined,
       tags: tags.trim() ? tags.split(",").map((t) => t.trim()).filter(Boolean) : undefined,
@@ -74,6 +88,11 @@ export default function Segments() {
 
   async function createPerfisRenda() {
     await api("/segments/presets/perfis-renda", { method: "POST" });
+    load();
+  }
+
+  async function createEtapasUso() {
+    await api("/segments/presets/etapas-uso", { method: "POST" });
     load();
   }
 
@@ -125,6 +144,9 @@ export default function Segments() {
           <button type="button" className="btn secondary" onClick={createPerfisRenda}>
             Criar segmentos de perfil de renda (PF1–PF4)
           </button>
+          <button type="button" className="btn secondary" onClick={createEtapasUso}>
+            Criar segmentos por etapa de uso
+          </button>
         </div>
 
         <div className="form-row">
@@ -166,6 +188,26 @@ export default function Segments() {
                 {opt.label}
               </label>
             ))}
+          </div>
+        </div>
+
+        <div className="form-row">
+          <label>Etapa de uso (pelo extrato de compras)</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
+            {ETAPA_OPTIONS.map((opt) => (
+              <label key={opt.value} style={{ fontSize: 13, fontWeight: 400 }}>
+                <input
+                  type="checkbox"
+                  checked={etapaUso.includes(opt.value)}
+                  onChange={() => toggle(etapaUso, opt.value, setEtapaUso)}
+                />{" "}
+                {opt.label}
+              </label>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+            <input type="number" min={0} placeholder="Mín. de usos em 90 dias" value={usosMin} onChange={(e) => setUsosMin(e.target.value)} />
+            <input type="number" min={0} placeholder="Sem uso há (dias, uso real)" value={diasSemUsoRealMin} onChange={(e) => setDiasSemUsoRealMin(e.target.value)} />
           </div>
         </div>
 

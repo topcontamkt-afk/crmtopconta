@@ -1,3 +1,4 @@
+import { refreshUsageColumns } from "./usageRefresh";
 import { AppPrismaClient, tenantRaw } from "../config/db";
 import { hashDocument } from "./masking";
 import { categorizeMerchant, normalizeMerchantName } from "./merchantCategories";
@@ -196,6 +197,9 @@ export async function runPurchaseImport(
       Array.from(lastUse.values()).map((d) => d.toISOString())
     );
   }
+
+  // Recalcula uso real/etapa (recorrência, dias sem uso). Falha aqui não derruba a importação.
+  await refreshUsageColumns(tenantId).catch((e) => console.error('[purchaseImport] uso real:', e));
 
   const storedErrors: RowError[] = errors.slice(0, MAX_ERRORS_STORED);
   if (unmatched.length > 0) {

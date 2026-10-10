@@ -47,6 +47,7 @@ export default function CampaignWizard() {
   const [faixaUso, setFaixaUso] = useState("");
   const [statusConta, setStatusConta] = useState("");
   const [perfilRenda, setPerfilRenda] = useState("");
+  const [etapaUso, setEtapaUso] = useState("");
   const [limiteCheio, setLimiteCheio] = useState<number | null>(null);
   const [semUsoDiasMin, setSemUsoDiasMin] = useState("");
   const [usadoNosUltimosDias, setUsadoNosUltimosDias] = useState("");
@@ -96,6 +97,7 @@ export default function CampaignWizard() {
       faixaUso: faixaUso ? [faixaUso] : undefined,
       statusConta: statusConta ? [statusConta] : undefined,
       perfilRenda: perfilRenda ? [perfilRenda] : undefined,
+      etapaUso: etapaUso ? [etapaUso] : undefined,
       semUsoDiasMin: semUsoDiasMin ? Number(semUsoDiasMin) : undefined,
       usadoNosUltimosDias: usadoNosUltimosDias ? Number(usadoNosUltimosDias) : undefined,
       categoriasCompra: categoriaCompra ? [categoriaCompra] : undefined,
@@ -252,6 +254,14 @@ export default function CampaignWizard() {
                     <option value="PF2">PF2 (4.001 a 8.000)</option>
                     <option value="PF3">PF3 (8.001 a 12.000)</option>
                     <option value="PF4">PF4 (12.001 a 100.000)</option>
+                  </select>
+                  <select value={etapaUso} onChange={(e) => setEtapaUso(e.target.value)}>
+                    <option value="">Qualquer etapa de uso</option>
+                    <option value="NUNCA_USOU">Nunca usou</option>
+                    <option value="RECORRENTE">Recorrente</option>
+                    <option value="OCASIONAL">Ocasional</option>
+                    <option value="EM_RISCO">Em risco (31–90 dias)</option>
+                    <option value="INATIVO">Inativo (+90 dias)</option>
                   </select>
                   <select value={statusConta} onChange={(e) => setStatusConta(e.target.value)}>
                     <option value="">Qualquer status</option>

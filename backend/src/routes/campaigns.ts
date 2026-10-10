@@ -1,3 +1,4 @@
+import { ETAPAS_USO } from "../services/etapaUso";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
@@ -55,6 +56,11 @@ const adHocFiltersSchema = z
     perfilRenda: z.array(z.enum(PERFIS_RENDA)).optional(),
     noTetoLimite: z.boolean().optional(),
     saldoDisponivelMin: z.number().optional(),
+    etapaUso: z.array(z.enum(ETAPAS_USO)).optional(),
+    usosMin: z.number().int().min(0).optional(),
+    usosMax: z.number().int().min(0).optional(),
+    diasSemUsoRealMin: z.number().int().min(0).optional(),
+    diasSemUsoRealMax: z.number().int().min(0).optional(),
     categoriasCompra: z.array(z.string()).optional(),
     lojistaIds: z.array(z.string()).optional(),
     compraNosUltimosDias: z.number().optional(),

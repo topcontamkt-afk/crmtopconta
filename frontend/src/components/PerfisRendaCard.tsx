@@ -9,10 +9,12 @@ interface Perfil {
   total: number;
   noTeto: number;
   faixas: Record<string, number>;
+  etapas: Record<string, number>;
 }
 interface Resp {
   perfis: Perfil[];
   semLimite: number;
+  extrato: { primeira: string | null; ultima: string | null };
 }
 
 const fmt = (n: number) => n.toLocaleString("pt-BR");
@@ -46,6 +48,11 @@ export default function PerfisRendaCard({ cidade, convenio }: { cidade: string; 
         Salário estimado = limite ÷ 0,40. O limite tem teto de R$ 2.000, então quem está no teto fica em PF2
         mesmo podendo ganhar mais. {fmt(data.semLimite)} clientes sem limite (comércio credenciado) ficam fora.
       </p>
+      <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+        {data.extrato.ultima
+          ? `Etapas de uso calculadas do extrato de compras de ${new Date(data.extrato.primeira!).toLocaleDateString("pt-BR")} a ${new Date(data.extrato.ultima).toLocaleDateString("pt-BR")}. Quem usou antes dessa data aparece como "nunca usou".`
+          : "Nenhum extrato de compras importado ainda: as etapas de uso aparecem como \"nunca usou\" até o primeiro envio."}
+      </p>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12 }}>
         {data.perfis.map((p) => {
           const semUso = p.faixas["SEM_USO"] ?? 0;
@@ -62,6 +69,12 @@ export default function PerfisRendaCard({ cidade, convenio }: { cidade: string; 
                 {FAIXA_LABELS["SEM_USO"]}: <strong>{fmt(semUso)}</strong>
                 <br />
                 {FAIXA_LABELS["USO_100"]}: <strong>{fmt(cheio)}</strong>
+                <hr style={{ margin: "6px 0", border: 0, borderTop: "1px solid var(--border, #e5e7eb)" }} />
+                Recorrentes: <strong>{fmt(p.etapas["RECORRENTE"] ?? 0)}</strong> · Ocasionais: <strong>{fmt(p.etapas["OCASIONAL"] ?? 0)}</strong>
+                <br />
+                Em risco: <strong>{fmt(p.etapas["EM_RISCO"] ?? 0)}</strong> · Inativos: <strong>{fmt(p.etapas["INATIVO"] ?? 0)}</strong>
+                <br />
+                Nunca usaram: <strong>{fmt(p.etapas["NUNCA_USOU"] ?? 0)}</strong>
               </div>
             </div>
           );

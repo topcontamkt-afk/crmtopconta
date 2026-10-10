@@ -171,6 +171,10 @@ model Client {
   saldoDisponivel        Decimal      @default(0) @db.Decimal(14, 2)
   valorAntecipado        Decimal      @default(0) @db.Decimal(14, 2)
   dataUltimaUtilizacao   DateTime?
+  // Uso REAL pelo extrato (antecipação/compra), refeito por services/usageRefresh.ts
+  ultimoUsoReal          DateTime?
+  usosUltimos90d         Int          @default(0)
+  usosTotal              Int          @default(0)
 
   percentualUtilizado    Decimal      @default(0) @db.Decimal(6, 2)
   faixaUso               UsageFaixa   @default(SEM_USO)
@@ -223,6 +227,7 @@ model Client {
   @@index([tenantId, telefone])
   @@index([tenantId, cidade])
   @@index([tenantId, faixaUso])
+  @@index([tenantId, ultimoUsoReal])
   @@index([tenantId, statusConta])
 }
 

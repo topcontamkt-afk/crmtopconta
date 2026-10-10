@@ -1,8 +1,9 @@
+import { ETAPAS_USO } from "../services/etapaUso";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { buildSegmentWhere, INATIVOS_FILTERS, INATIVOS_SEGMENT_NAME, PERFIL_RENDA_PRESETS } from "../services/segments";
+import { buildSegmentWhere, INATIVOS_FILTERS, INATIVOS_SEGMENT_NAME, PERFIL_RENDA_PRESETS, ETAPA_USO_PRESETS, SegmentPreset } from "../services/segments";
 import { PERFIS_RENDA } from "../services/rendaPerfil";
 
 const router = Router();
@@ -33,6 +34,11 @@ const filtersSchema = z.object({
   perfilRenda: z.array(z.enum(PERFIS_RENDA)).optional(),
   noTetoLimite: z.boolean().optional(),
   saldoDisponivelMin: z.number().optional(),
+  etapaUso: z.array(z.enum(ETAPAS_USO)).optional(),
+  usosMin: z.number().int().min(0).optional(),
+  usosMax: z.number().int().min(0).optional(),
+  diasSemUsoRealMin: z.number().int().min(0).optional(),
+  diasSemUsoRealMax: z.number().int().min(0).optional(),
 });
 
 // Grupo de filtros combináveis (AND/OR aninhados) — segment builder avançado (Fase 2).
@@ -110,11 +116,10 @@ router.post("/presets/inativos", requireRole("ADMIN", "OPERATOR", "ANALYST"), as
  * duplica nada e não mexe em segmentos com outros nomes. A renda é estimada pelo limite
  * (services/rendaPerfil.ts); os segmentos são dinâmicos e se recontam sozinhos.
  */
-router.post("/presets/perfis-renda", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
-  const { tenantId } = req.user!;
+async function applyPresets(tenantId: string, presets: SegmentPreset[]) {
   const out: Array<{ id: string; name: string; count: number; created: boolean }> = [];
   // Sequencial de propósito: cada contagem é uma transaction e o pool de conexões é pequeno.
-  for (const preset of PERFIL_RENDA_PRESETS) {
+  for (const preset of presets) {
     const count = await prisma.client.count({ where: buildSegmentWhere(tenantId, preset.filters) });
     const existing = await prisma.segmentDefinition.findFirst({ where: { tenantId, name: preset.name } });
     const data = { filters: preset.filters as any, lastCount: count, lastRefreshedAt: new Date() };
@@ -123,7 +128,16 @@ router.post("/presets/perfis-renda", requireRole("ADMIN", "OPERATOR", "ANALYST")
       : await prisma.segmentDefinition.create({ data: { tenantId, name: preset.name, dynamic: true, operator: "AND", ...data } });
     out.push({ id: segment.id, name: segment.name, count, created: !existing });
   }
-  res.status(201).json({ segments: out, criados: out.filter((s) => s.created).length });
+  return { segments: out, criados: out.filter((x) => x.created).length };
+}
+
+router.post("/presets/perfis-renda", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
+  res.status(201).json(await applyPresets(req.user!.tenantId, PERFIL_RENDA_PRESETS));
+});
+
+/** POST /api/segments/presets/etapas-uso — segmentos prontos por etapa de uso real (etapaUso.ts). */
+router.post("/presets/etapas-uso", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
+  res.status(201).json(await applyPresets(req.user!.tenantId, ETAPA_USO_PRESETS));
 });
 
 /** POST /api/segments/:id/refresh — recontagem manual (a automática roda via scheduler para segmentos dinâmicos). */

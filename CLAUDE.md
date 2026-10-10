@@ -180,6 +180,17 @@ assistente de campanha). O limite tem teto de R$ 2.000 (`noTetoLimite`), por iss
 bloqueia o evento por garantia. `POST /api/segments/presets/perfis-renda` cria/atualiza os segmentos prontos
 (`PERFIL_RENDA_PRESETS`) e `GET /api/dashboard/perfis-renda` alimenta o card do dashboard.
 
+### Etapa de uso real (recorrência e dias sem uso)
+
+`services/etapaUso.ts` classifica cada cliente pelo **extrato** (`Purchase`, só antecipação e compra à vista) em
+NUNCA_USOU / RECORRENTE (3+ usos em 90 dias e uso nos últimos 30) / OCASIONAL / EM_RISCO (31–90 dias) / INATIVO
+(+90). Três colunas em `Client` (`ultimoUsoReal`, `usosUltimos90d`, `usosTotal`) são refeitas por
+`services/usageRefresh.ts` após cada importação de compras e no job diário de snapshot (a janela de 90 dias anda
+sozinha). Filtros: `etapaUso`, `usosMin/usosMax`, `diasSemUsoRealMin/Max` (diferentes de `dataUltimaUtilizacao`,
+que também recebe a data de ativação da planilha de contas). "Nunca usou" vale para o período coberto pelo
+extrato. SQL em `backend/prisma/sql/2026-10-uso-real-cliente.sql` (rodar antes do deploy). Presets:
+`POST /api/segments/presets/etapas-uso`.
+
 ### Comércio credenciado (compras por categoria)
 
 A aba "Todas as Compras" da planilha (transações do cartão) entra por `POST /api/purchases/import`
