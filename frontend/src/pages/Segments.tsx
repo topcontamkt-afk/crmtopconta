@@ -17,6 +17,12 @@ const STATUS_OPTIONS = [
   { value: "BLOQUEADO", label: "Bloqueado" },
 ];
 
+const PERFIL_OPTIONS = [
+  { value: "PF1", label: "PF1 (até R$ 4.000)" },
+  { value: "PF2", label: "PF2 (4.001 a 8.000)" },
+  { value: "PF3", label: "PF3 (8.001 a 12.000)" },
+  { value: "PF4", label: "PF4 (12.001 a 100.000)" },
+];
 
 export default function Segments() {
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -24,6 +30,7 @@ export default function Segments() {
   const [cidade, setCidade] = useState("");
   const [faixaUso, setFaixaUso] = useState<string[]>([]);
   const [statusConta, setStatusConta] = useState<string[]>([]);
+  const [perfilRenda, setPerfilRenda] = useState<string[]>([]);
   const [semUsoDiasMin, setSemUsoDiasMin] = useState("");
   const [usadoNosUltimosDias, setUsadoNosUltimosDias] = useState("");
   const [tags, setTags] = useState("");
@@ -51,6 +58,7 @@ export default function Segments() {
       cidade: cidade ? [cidade] : undefined,
       faixaUso: faixaUso.length ? faixaUso : undefined,
       statusConta: statusConta.length ? statusConta : undefined,
+      perfilRenda: perfilRenda.length ? perfilRenda : undefined,
       semUsoDiasMin: semUsoDiasMin ? Number(semUsoDiasMin) : undefined,
       usadoNosUltimosDias: usadoNosUltimosDias ? Number(usadoNosUltimosDias) : undefined,
       tags: tags.trim() ? tags.split(",").map((t) => t.trim()).filter(Boolean) : undefined,
@@ -61,6 +69,11 @@ export default function Segments() {
 
   async function createInativos() {
     await api("/segments/presets/inativos", { method: "POST" });
+    load();
+  }
+
+  async function createPerfisRenda() {
+    await api("/segments/presets/perfis-renda", { method: "POST" });
     load();
   }
 
@@ -109,6 +122,9 @@ export default function Segments() {
           <button type="button" className="btn secondary" onClick={createInativos}>
             Criar categoria Inativos
           </button>
+          <button type="button" className="btn secondary" onClick={createPerfisRenda}>
+            Criar segmentos de perfil de renda (PF1–PF4)
+          </button>
         </div>
 
         <div className="form-row">
@@ -130,6 +146,22 @@ export default function Segments() {
                   type="checkbox"
                   checked={faixaUso.includes(opt.value)}
                   onChange={() => toggle(faixaUso, opt.value, setFaixaUso)}
+                />{" "}
+                {opt.label}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div className="form-row">
+          <label>Perfil de renda (estimado pelo limite)</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
+            {PERFIL_OPTIONS.map((opt) => (
+              <label key={opt.value} style={{ fontSize: 13, fontWeight: 400 }}>
+                <input
+                  type="checkbox"
+                  checked={perfilRenda.includes(opt.value)}
+                  onChange={() => toggle(perfilRenda, opt.value, setPerfilRenda)}
                 />{" "}
                 {opt.label}
               </label>

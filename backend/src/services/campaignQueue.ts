@@ -2,7 +2,7 @@ import { AppPrismaClient } from "../config/db";
 import { ChannelAdapter, SendResult } from "./channels/types";
 import { MockSMSAdapter, TwilioSMSAdapter, ZenviaSMSAdapter } from "./channels/sms";
 import { MockWhatsAppAdapter, WhatsAppCloudAdapter } from "./channels/whatsapp";
-import { buildSegmentWhere, SegmentFilters, SegmentGroup } from "./segments";
+import { buildSegmentWhere, ENVIAVEL_WHERE, SegmentFilters, SegmentGroup } from "./segments";
 import { decryptSecret, isEncryptedPayload } from "./crypto";
 
 /**
@@ -140,6 +140,8 @@ export async function buildAudience(prisma: AppPrismaClient, tenantId: string, c
       autorizacaoComunicacao: true,
       optOutAt: null,
       statusConta: { not: "BLOQUEADO" },
+      // sem limite = comércio credenciado, nunca é público de disparo de cartão
+      ...ENVIAVEL_WHERE,
     },
   });
 }
@@ -244,6 +246,14 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
       await prisma.messageEvent.update({
         where: { id: evt.id },
         data: { status: "BLOQUEADO", error: "Cliente sem autorização/opt-out" },
+      });
+      continue;
+    }
+    // Garantia no envio: mensagem já na fila de quem (ainda) não tem limite não sai.
+    if (!(Number(evt.client.limiteTotal) > 0)) {
+      await prisma.messageEvent.update({
+        where: { id: evt.id },
+        data: { status: "BLOQUEADO", error: "Cliente sem limite (comércio credenciado)" },
       });
       continue;
     }

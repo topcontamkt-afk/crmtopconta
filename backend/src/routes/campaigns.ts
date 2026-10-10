@@ -3,7 +3,8 @@ import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
-import { buildSegmentWhere } from "../services/segments";
+import { buildSegmentWhere, ENVIAVEL_WHERE } from "../services/segments";
+import { PERFIS_RENDA } from "../services/rendaPerfil";
 import {
   buildAudience,
   enqueueCampaign,
@@ -51,6 +52,9 @@ const adHocFiltersSchema = z
     tags: z.array(z.string()).optional(),
     search: z.string().optional(),
     empresaConveniada: z.array(z.string()).optional(),
+    perfilRenda: z.array(z.enum(PERFIS_RENDA)).optional(),
+    noTetoLimite: z.boolean().optional(),
+    saldoDisponivelMin: z.number().optional(),
     categoriasCompra: z.array(z.string()).optional(),
     lojistaIds: z.array(z.string()).optional(),
     compraNosUltimosDias: z.number().optional(),
@@ -108,7 +112,7 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
     : d.adHocFilters;
   const where = buildSegmentWhere(tenantId, (filters as any) || {});
   const estimatedAudience = await prisma.client.count({
-    where: { ...where, autorizacaoComunicacao: true, optOutAt: null, statusConta: { not: "BLOQUEADO" } },
+    where: { ...where, autorizacaoComunicacao: true, optOutAt: null, statusConta: { not: "BLOQUEADO" }, ...ENVIAVEL_WHERE },
   });
 
   const campaign = await prisma.campaign.create({

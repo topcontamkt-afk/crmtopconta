@@ -170,6 +170,16 @@ mensagem sugerida; o assistente de campanha recebe tudo via router state (`prese
 podem usar as variáveis de `services/templateVariables.ts` (`nome`, `cidade`, `percentual`, `saldo`,
 `limite`), que o envio de fato preenche; `opportunities.test.ts` garante isso.
 
+### Perfil de renda PF1–PF4
+
+`services/rendaPerfil.ts` estima o salário pelo **limite total** (limite ÷ 0,40; nunca o saldo disponível) e
+classifica em PF1 (até R$ 4.000, inclui quem estaria abaixo do piso), PF2 (até 8.000), PF3 (até 12.000) e PF4
+(acima). Cálculo puro, sem coluna nova: `limiteRange` vira o filtro `perfilRenda` em `SegmentFilters` (e no
+assistente de campanha). O limite tem teto de R$ 2.000 (`noTetoLimite`), por isso PF3/PF4 aparecem quase vazios.
+**Limite zero/vazio = comércio credenciado**: `ENVIAVEL_WHERE` o exclui de todo público de campanha e o envio
+bloqueia o evento por garantia. `POST /api/segments/presets/perfis-renda` cria/atualiza os segmentos prontos
+(`PERFIL_RENDA_PRESETS`) e `GET /api/dashboard/perfis-renda` alimenta o card do dashboard.
+
 ### Comércio credenciado (compras por categoria)
 
 A aba "Todas as Compras" da planilha (transações do cartão) entra por `POST /api/purchases/import`

@@ -1,4 +1,4 @@
-import { buildSegmentWhere, INATIVOS_FILTERS } from "./segments";
+import { buildSegmentWhere, INATIVOS_FILTERS, ENVIAVEL_WHERE, PERFIL_RENDA_PRESETS } from "./segments";
 
 describe("buildSegmentWhere", () => {
   it("mantém compatibilidade com filtros simples (flat)", () => {
@@ -78,5 +78,38 @@ describe("filtros de comércio credenciado (compras)", () => {
   it("sem filtro de compra não adiciona condição de purchases", () => {
     const where: any = buildSegmentWhere("t1", { cidade: ["Boquim"] });
     expect(JSON.stringify(where)).not.toContain("purchases");
+  });
+});
+
+describe("perfil de renda e público enviável", () => {
+  it("perfilRenda vira intervalos de limite combinados com OR", () => {
+    const where: any = buildSegmentWhere("t1", { perfilRenda: ["PF1", "PF4"] });
+    expect(where.AND[0].OR).toEqual([
+      { limiteTotal: { gt: 0, lte: 1600 } },
+      { limiteTotal: { gt: 4800 } },
+    ]);
+  });
+
+  it("noTetoLimite filtra o limite exatamente no teto de R$ 2.000", () => {
+    const where: any = buildSegmentWhere("t1", { noTetoLimite: true });
+    expect(where.AND[0]).toEqual({ limiteTotal: 2000 });
+  });
+
+  it("saldoDisponivelMin filtra por saldo mínimo", () => {
+    const where: any = buildSegmentWhere("t1", { saldoDisponivelMin: 10 });
+    expect(where.AND[0]).toEqual({ saldoDisponivel: { gte: 10 } });
+  });
+
+  it("ENVIAVEL_WHERE exclui quem não tem limite (comércio credenciado)", () => {
+    expect(ENVIAVEL_WHERE).toEqual({ limiteTotal: { gt: 0 } });
+  });
+
+  it("os presets de perfil têm nomes únicos e filtram por perfil", () => {
+    const nomes = PERFIL_RENDA_PRESETS.map((p) => p.name);
+    expect(new Set(nomes).size).toBe(nomes.length);
+    for (const p of PERFIL_RENDA_PRESETS) {
+      const w: any = buildSegmentWhere("t1", p.filters);
+      expect(JSON.stringify(w)).toContain("limiteTotal");
+    }
   });
 });

@@ -88,3 +88,12 @@ describe("enqueueCampaign — grupo de controle", () => {
     expect(dedupeWheres[0].status).toEqual({ not: "CONTROLE" });
   });
 });
+
+describe("enqueueCampaign — público enviável", () => {
+  it("nunca inclui cliente sem limite (comércio credenciado) no público", async () => {
+    const { prisma } = makeFakePrisma({}, 2);
+    await enqueueCampaign(prisma, "t1", "camp1");
+    const where = prisma.client.findMany.mock.calls[0][0].where;
+    expect(where.limiteTotal).toEqual({ gt: 0 });
+  });
+});

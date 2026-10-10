@@ -1,3 +1,4 @@
+import { ENVIAVEL_WHERE } from "../services/segments";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma, tenantRaw } from "../config/db";
@@ -195,7 +196,7 @@ router.get("/audiencia", async (req, res) => {
   const porFrequencia = [1, 2, 3].map((min) => porCliente.filter((c) => c.n >= min).length);
   const ids = porCliente.filter((c) => c.n >= parsed.data.minCompras).map((c) => c.id).slice(0, 5000);
   const autorizados = ids.length
-    ? await prisma.client.count({ where: { tenantId, id: { in: ids }, autorizacaoComunicacao: true, optOutAt: null } })
+    ? await prisma.client.count({ where: { tenantId, id: { in: ids }, autorizacaoComunicacao: true, optOutAt: null, ...ENVIAVEL_WHERE } })
     : 0;
   res.json({ total: ids.length, autorizados, porFrequencia, clientIds: ids, mensagem: messageForCategories(categorias) });
 });

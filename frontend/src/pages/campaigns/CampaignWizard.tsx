@@ -46,6 +46,8 @@ export default function CampaignWizard() {
   const [cidade, setCidade] = useState("");
   const [faixaUso, setFaixaUso] = useState("");
   const [statusConta, setStatusConta] = useState("");
+  const [perfilRenda, setPerfilRenda] = useState("");
+  const [limiteCheio, setLimiteCheio] = useState<number | null>(null);
   const [semUsoDiasMin, setSemUsoDiasMin] = useState("");
   const [usadoNosUltimosDias, setUsadoNosUltimosDias] = useState("");
   const [categoriaCompra, setCategoriaCompra] = useState("");
@@ -93,6 +95,7 @@ export default function CampaignWizard() {
       cidade: cidade ? [cidade] : undefined,
       faixaUso: faixaUso ? [faixaUso] : undefined,
       statusConta: statusConta ? [statusConta] : undefined,
+      perfilRenda: perfilRenda ? [perfilRenda] : undefined,
       semUsoDiasMin: semUsoDiasMin ? Number(semUsoDiasMin) : undefined,
       usadoNosUltimosDias: usadoNosUltimosDias ? Number(usadoNosUltimosDias) : undefined,
       categoriasCompra: categoriaCompra ? [categoriaCompra] : undefined,
@@ -109,6 +112,16 @@ export default function CampaignWizard() {
     }
     const resp = await api<{ count: number }>("/segments/preview", { method: "POST", body: adHocFilters() });
     setAudiencePreview(resp.count);
+    // Quem já usou 100% do limite não tem crédito para oferecer: avisa quantos estão no público.
+    if (!faixaUso || faixaUso === "USO_100") {
+      const cheio = await api<{ count: number }>("/segments/preview", {
+        method: "POST",
+        body: { ...adHocFilters(), faixaUso: ["USO_100"] },
+      });
+      setLimiteCheio(cheio.count);
+    } else {
+      setLimiteCheio(0);
+    }
   }
 
   function selectSegment(id: string) {
@@ -233,6 +246,13 @@ export default function CampaignWizard() {
                       <option key={f.value} value={f.value}>{f.label}</option>
                     ))}
                   </select>
+                  <select value={perfilRenda} onChange={(e) => setPerfilRenda(e.target.value)}>
+                    <option value="">Qualquer perfil de renda</option>
+                    <option value="PF1">PF1 (até R$ 4.000)</option>
+                    <option value="PF2">PF2 (4.001 a 8.000)</option>
+                    <option value="PF3">PF3 (8.001 a 12.000)</option>
+                    <option value="PF4">PF4 (12.001 a 100.000)</option>
+                  </select>
                   <select value={statusConta} onChange={(e) => setStatusConta(e.target.value)}>
                     <option value="">Qualquer status</option>
                     <option value="ATIVO">Ativo</option>
@@ -283,7 +303,13 @@ export default function CampaignWizard() {
 
             {audiencePreview !== null && (
               <p>
-                <strong>{audiencePreview}</strong> clientes elegíveis (opt-outs já excluídos automaticamente)
+                <strong>{audiencePreview}</strong> clientes elegíveis (opt-outs e clientes sem limite já excluídos automaticamente)
+              </p>
+            )}
+            {!!limiteCheio && (
+              <p style={{ color: "#b45309", fontSize: 13 }}>
+                Atenção: {limiteCheio} desses clientes já usaram 100% do limite — não há crédito novo para
+                oferecer a eles. Prefira uma mensagem de relacionamento ou exclua a faixa "100% usado".
               </p>
             )}
           </div>

@@ -2,7 +2,8 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { buildSegmentWhere, INATIVOS_FILTERS, INATIVOS_SEGMENT_NAME } from "../services/segments";
+import { buildSegmentWhere, INATIVOS_FILTERS, INATIVOS_SEGMENT_NAME, PERFIL_RENDA_PRESETS } from "../services/segments";
+import { PERFIS_RENDA } from "../services/rendaPerfil";
 
 const router = Router();
 router.use(requireAuth);
@@ -29,6 +30,9 @@ const filtersSchema = z.object({
   categoriasCompra: z.array(z.string()).optional(),
   lojistaIds: z.array(z.string()).optional(),
   compraNosUltimosDias: z.number().optional(),
+  perfilRenda: z.array(z.enum(PERFIS_RENDA)).optional(),
+  noTetoLimite: z.boolean().optional(),
+  saldoDisponivelMin: z.number().optional(),
 });
 
 // Grupo de filtros combináveis (AND/OR aninhados) — segment builder avançado (Fase 2).
@@ -98,6 +102,28 @@ router.post("/presets/inativos", requireRole("ADMIN", "OPERATOR", "ANALYST"), as
         data: { tenantId, name: INATIVOS_SEGMENT_NAME, dynamic: true, operator: "OR", ...data },
       });
   res.status(existing ? 200 : 201).json(segment);
+});
+
+/**
+ * POST /api/segments/presets/perfis-renda — cria (ou apenas recontabiliza, se já existirem) os
+ * segmentos prontos de perfil de renda PF1–PF4 × uso. Idempotente por nome: rodar de novo não
+ * duplica nada e não mexe em segmentos com outros nomes. A renda é estimada pelo limite
+ * (services/rendaPerfil.ts); os segmentos são dinâmicos e se recontam sozinhos.
+ */
+router.post("/presets/perfis-renda", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
+  const { tenantId } = req.user!;
+  const out: Array<{ id: string; name: string; count: number; created: boolean }> = [];
+  // Sequencial de propósito: cada contagem é uma transaction e o pool de conexões é pequeno.
+  for (const preset of PERFIL_RENDA_PRESETS) {
+    const count = await prisma.client.count({ where: buildSegmentWhere(tenantId, preset.filters) });
+    const existing = await prisma.segmentDefinition.findFirst({ where: { tenantId, name: preset.name } });
+    const data = { filters: preset.filters as any, lastCount: count, lastRefreshedAt: new Date() };
+    const segment = existing
+      ? await prisma.segmentDefinition.update({ where: { id: existing.id }, data })
+      : await prisma.segmentDefinition.create({ data: { tenantId, name: preset.name, dynamic: true, operator: "AND", ...data } });
+    out.push({ id: segment.id, name: segment.name, count, created: !existing });
+  }
+  res.status(201).json({ segments: out, criados: out.filter((s) => s.created).length });
 });
 
 /** POST /api/segments/:id/refresh — recontagem manual (a automática roda via scheduler para segmentos dinâmicos). */

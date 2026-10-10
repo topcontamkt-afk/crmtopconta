@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { limiteRange, LIMITE_TETO, PerfilRenda } from "./rendaPerfil";
 
 /**
  * Definição de filtros de segmento (UI: filtros + preview count).
@@ -23,6 +24,13 @@ export interface SegmentFilters {
   categoriasCompra?: string[];
   lojistaIds?: string[];
   compraNosUltimosDias?: number;
+  // Perfil de renda PF1–PF4, estimado pelo limite (limite ÷ 0,40) — ver services/rendaPerfil.ts.
+  // Vários perfis se combinam em OR. Clientes sem limite (comércio credenciado) não têm perfil.
+  perfilRenda?: PerfilRenda[];
+  // Limite exatamente no teto de R$ 2.000 (renda real de R$ 5.000 ou mais, sem separar).
+  noTetoLimite?: boolean;
+  // Saldo disponível mínimo (R$): "com saldo" = podia usar no momento.
+  saldoDisponivelMin?: number;
 }
 
 /**
@@ -71,6 +79,16 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
     }
     and.push({ purchases: { some: purchase } });
   }
+  if (filters.perfilRenda?.length) {
+    and.push({
+      OR: filters.perfilRenda.map((p) => {
+        const r = limiteRange(p);
+        return { limiteTotal: r.lte === undefined ? { gt: r.gt } : { gt: r.gt, lte: r.lte } };
+      }),
+    });
+  }
+  if (filters.noTetoLimite) and.push({ limiteTotal: LIMITE_TETO });
+  if (filters.saldoDisponivelMin !== undefined) and.push({ saldoDisponivel: { gte: filters.saldoDisponivelMin } });
   if (filters.search) {
     and.push({
       OR: [
@@ -124,3 +142,39 @@ export const INATIVOS_FILTERS: SegmentGroup = {
     { operator: "AND", conditions: { semUsoDiasMin: INATIVOS_SEMUSO_DIAS } },
   ],
 };
+
+/**
+ * Quem pode receber disparo de consumidor: tem limite. Cliente sem limite (zero) é comércio
+ * credenciado — está na base como cadastro, mas não é público de campanha de cartão. Aplicado na
+ * montagem do público (campaignQueue.buildAudience), na estimativa do assistente e, por garantia,
+ * no envio da fila.
+ */
+export const ENVIAVEL_WHERE: Prisma.ClientWhereInput = { limiteTotal: { gt: 0 } };
+
+/** Saldo disponível mínimo (R$) para considerar que o cliente "tem saldo" (podia usar). */
+export const SALDO_MINIMO_ELEGIVEL = 10;
+
+export interface SegmentPreset {
+  name: string;
+  filters: SegmentFilters;
+}
+
+/**
+ * Segmentos prontos de perfil de renda × uso. Criados de uma vez por
+ * POST /api/segments/presets/perfis-renda (idempotente: o mesmo nome só é recontado).
+ * "Sem uso no momento" = limite todo disponível hoje; NÃO prova que nunca usou (quem usou e já teve
+ * a fatura descontada em folha também fica com o limite cheio). Só o histórico de compras separa.
+ */
+export const PERFIL_RENDA_PRESETS: SegmentPreset[] = [
+  { name: "PF1 · base geral", filters: { perfilRenda: ["PF1"] } },
+  { name: "PF1 · sem uso no momento", filters: { perfilRenda: ["PF1"], faixaUso: ["SEM_USO"] } },
+  { name: "PF1 · com saldo", filters: { perfilRenda: ["PF1"], saldoDisponivelMin: SALDO_MINIMO_ELEGIVEL } },
+  { name: "PF1 · limite 100% usado", filters: { perfilRenda: ["PF1"], faixaUso: ["USO_100"] } },
+  { name: "PF2 · base geral", filters: { perfilRenda: ["PF2"] } },
+  { name: "PF2 · sem uso no momento", filters: { perfilRenda: ["PF2"], faixaUso: ["SEM_USO"] } },
+  { name: "PF2 · com saldo", filters: { perfilRenda: ["PF2"], saldoDisponivelMin: SALDO_MINIMO_ELEGIVEL } },
+  { name: "PF2 · limite 100% usado", filters: { perfilRenda: ["PF2"], faixaUso: ["USO_100"] } },
+  { name: "PF2+ · no teto de R$ 2.000", filters: { noTetoLimite: true } },
+  { name: "PF3 · base geral", filters: { perfilRenda: ["PF3"] } },
+  { name: "PF4 · base geral", filters: { perfilRenda: ["PF4"] } },
+];
