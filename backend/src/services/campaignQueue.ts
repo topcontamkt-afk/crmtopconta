@@ -135,6 +135,7 @@ export async function enqueueCampaign(prisma: AppPrismaClient, tenantId: string,
 
   const dedupeCutoff = new Date(Date.now() - campaign.dedupeWindowHrs * 60 * 60 * 1000);
   let queued = 0;
+  let control = 0;
   let skippedDedupe = 0;
 
   for (const client of audience) {
@@ -143,10 +144,24 @@ export async function enqueueCampaign(prisma: AppPrismaClient, tenantId: string,
         clientId: client.id,
         campaign: { messageTemplate: campaign.messageTemplate, tenantId },
         queuedAt: { gte: dedupeCutoff },
+        // Quem ficou no grupo de controle de uma campanha anterior NÃO recebeu a mensagem, então
+        // não conta para a janela de dedupe (senão seria excluído de campanhas futuras à toa).
+        status: { not: "CONTROLE" },
       },
     });
     if (recentSameCampaignType) {
       skippedDedupe++;
+      continue;
+    }
+
+    // Grupo de controle (opcional): parte do público fica de fora do envio, só para comparar o uso
+    // de quem recebeu com o de quem não recebeu. É sorteado ANTES da variante A/B, para o
+    // controle não distorcer a divisão entre A e B.
+    if (campaign.controlGroupPercent && Math.random() * 100 < campaign.controlGroupPercent) {
+      await prisma.messageEvent.create({
+        data: { campaignId, clientId: client.id, channel: campaign.channel, status: "CONTROLE", variant: "A" },
+      });
+      control++;
       continue;
     }
 
@@ -170,7 +185,7 @@ export async function enqueueCampaign(prisma: AppPrismaClient, tenantId: string,
     data: { audienceCount: audience.length, status: "AGENDADA" },
   });
 
-  return { audienceSize: audience.length, queued, skippedDedupe };
+  return { audienceSize: audience.length, queued, control, skippedDedupe };
 }
 
 /** Quantas mensagens já foram enviadas pelo tenant no último minuto (para o rate limit global). */
@@ -270,35 +285,4 @@ export async function sendTestMessages(
     results.push({ phone, status: sendResult.status, provider: sendResult.provider, error: sendResult.error });
   }
   return { body, results };
-}
-
-/**
- * Atribuição de conversão: para cada MessageEvent enviado, verifica se houve Movement do
- * cliente dentro da janela (campaign.attributionDays) após o envio. Regra de exclusividade:
- * primeira movimentação dentro da janela conta como conversão; o valor dessa movimentação é
- * guardado em convertedValue para cálculo de ROI (Fase 2).
- */
-export async function computeAttribution(prisma: AppPrismaClient, campaignId: string) {
-  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
-  const events = await prisma.messageEvent.findMany({
-    where: { campaignId, status: { in: ["ENVIADO", "ENTREGUE", "LIDO", "RESPONDIDO"] }, convertedAt: null },
-  });
-
-  let conversions = 0;
-  for (const evt of events) {
-    if (!evt.sentAt) continue;
-    const windowEnd = new Date(evt.sentAt.getTime() + campaign.attributionDays * 24 * 60 * 60 * 1000);
-    const movement = await prisma.movement.findFirst({
-      where: { clientId: evt.clientId, data: { gte: evt.sentAt, lte: windowEnd } },
-      orderBy: { data: "asc" },
-    });
-    if (movement) {
-      await prisma.messageEvent.update({
-        where: { id: evt.id },
-        data: { convertedAt: movement.data, convertedValue: movement.valor },
-      });
-      conversions++;
-    }
-  }
-  return { evaluated: events.length, conversions };
 }

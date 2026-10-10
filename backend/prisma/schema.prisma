@@ -75,6 +75,7 @@ enum MessageStatus {
   RESPONDIDO
   FALHA
   BLOQUEADO
+  CONTROLE // grupo de controle: fazia parte do público, mas NÃO recebeu a mensagem (mede o lift real)
 }
 
 enum ImportStatus {
@@ -366,6 +367,9 @@ model Campaign {
   throttlePerMin  Int            @default(60)
   dedupeWindowHrs Int            @default(72) // janela mínima entre envios da mesma msg ao mesmo cliente
   attributionDays Int            @default(7)
+  // Grupo de controle (opcional): % do público reservado que NÃO recebe a mensagem, só para
+  // comparar o uso de quem recebeu com o de quem não recebeu. Nulo/0 = desligado.
+  controlGroupPercent Int?
   costPerMessage  Decimal        @default(0) @db.Decimal(10, 4)
 
   audienceCount   Int?

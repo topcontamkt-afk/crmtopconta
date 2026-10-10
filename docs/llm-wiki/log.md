@@ -25,3 +25,8 @@
 
 - **Operação**: pipeline de importação atualizado com o histórico de saldo/limite/status.
 - **Sanitização**: sem PII nem identificadores operacionais.
+
+## 2026-10-10 — Resultado de campanha por uso real
+
+- **Operação**: página de campanhas atualizada com a conversão por transações, curva D0–D30, saldo no envio e grupo de controle.
+- **Sanitização**: sem PII nem identificadores operacionais.

@@ -36,7 +36,10 @@ flowchart LR
 - Failover entre provedores SMS por prioridade.
 - `test-send` para amostra sem tocar no público real.
 - Variante A/B e teste z de duas proporções, com alerta para amostras pequenas.
-- Relatório de status, custo, conversão, valor atribuído e exportação CSV.
+- Relatório de status, custo, conversão, lucro atribuído e exportação CSV com a lista nominal de quem usou.
+- Conversão medida pelo uso real (transações de antecipação e compra; assinatura não conta), em curva acumulada D0 a D30 por dia de calendário de Brasília, calculada na consulta. O uso vai para a campanha mais recente do cliente.
+- Separação de quem tinha saldo na data do envio (histórico `AccountSnapshot`) de quem não tinha ou de saldo desconhecido.
+- Grupo de controle opcional (`MessageStatus.CONTROLE`): parte do público fica sem mensagem; o relatório mostra o lift real e o lucro incremental.
 
 ## Segurança operacional
 

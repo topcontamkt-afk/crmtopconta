@@ -126,6 +126,22 @@ processes a batch. Channels are abstracted behind `ChannelAdapter`
 API and SMS (Twilio as the reference provider, `ChannelConfig.priority`
 enables multi-provider failover) plus mock adapters for credential-free dev.
 
+
+Campaign results are measured by *real usage*, not limit renewals
+(`services/campaignResults.ts`, computed on request from `Transaction` — no
+stored attribution state, so late-imported usage shows up on its own): a
+conversion is an antecipação or compra after the send (subscription never
+counts), reported as a cumulative D0/D1/D3/D7/D14/D30 curve in Brasília
+calendar days. If a client got several campaigns, usage is credited to the
+most recent one. Clients are split by balance at send time (`AccountSnapshot`
+as-of lookup; `MIN_SALDO_ELEGIVEL`) into com saldo / sem saldo / desconhecido
+(no history yet). Optional control group: `Campaign.controlGroupPercent` leaves
+that share of the audience unmessaged as `MessageStatus.CONTROLE`; since the
+send is spread over days, each control client is assigned the timestamp of a
+real send (matched by quantile) so both windows start alike, and the report
+shows lift (two-proportion z-test) and incremental profit. Profit is only
+`Juros` of antecipações — compra à vista profit (merchant fee) is unknown, so
+it's excluded from profit/ROI rather than counted as zero.
 ### Automation engine
 
 `services/automationEngine.ts` evaluates active `AutomationRule`s on a timer,
