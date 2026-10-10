@@ -36,7 +36,7 @@ Limite ausente ou menor/igual a zero não gera divisão inválida nem falsa clas
 - Google Sheets via Service Account e mapeamento configurável.
 - CSV com linhas parseadas.
 - Formato específico de cartões e contas, alimentado pela aba `SaldoCartao`.
-- Extrato de transações (`POST /api/imports/transacoes`): uma linha por operação, ligada ao cliente pelo hash de CPF/CNPJ, idempotente por `idTransacao`. `transactionClassifier.ts` separa antecipação (conta como uso, `Juros` é lucro), compra à vista (conta como uso, sem dado de lucro) e assinatura (não conta como uso); descrição desconhecida fica guardada fora do uso.
+- Extrato de transações: entra pela `Purchase` (`/api/purchases/import`). `transactionClassifier.ts` decide pelo tipo o que conta como uso: antecipação via Pix (`Juros` é lucro) e compra à vista contam; assinatura, débito de fatura e tipos desconhecidos não.
 - Histórico de conta (`AccountSnapshot`): a importação de cartões e contas registra mudanças de saldo, limite e status (e a primeira aparição do cliente), permitindo saber o saldo numa data passada e quando o limite voltou após o desconto em folha.
 
 ## Relações

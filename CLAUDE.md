@@ -77,19 +77,14 @@ alternative input shape feeding the same pipeline. Usage percentage/tier
 (`services/usage.ts`) uses safe division — a zero/missing `limite_total`
 yields tier `INDEFINIDO`, never an error or false "no usage".
 
-`POST /api/imports/transacoes` (`services/transactionImport.ts`) imports the
-card transaction statement — the source of *real* usage, since `Client`
+The card transaction statement is the source of *real* usage, since `Client`
 only holds the latest snapshot (which swings with the payroll cycle: the
-invoice is deducted from payroll and the limit renews). Rows link to
-`Client` by CPF/CNPJ hash (`Transaction.clientId` is nullable; orphans are
-relinked by `relinkOrphanTransactions` when accounts are imported), are
-idempotent on `(tenantId, idTransacao)`, and are classified by
-`services/transactionClassifier.ts`: `Débito Pix Cartão` = salary advance
+invoice is deducted from payroll and the limit renews). It lives in `Purchase`
+(see "Comércio credenciado" below); `services/transactionClassifier.ts` decides
+what counts as usage from `Purchase.tipo`: `Débito Pix Cartão` = salary advance
 (`Juros` is profit), `Compra à Vista` = purchase at partner stores (no profit
-data), `Assinatura` = fixed monthly fee — only the first two count as usage
-(`countsAsUsage`); subscription and unknown descriptions never do. Dates are
-`dd/mm/yyyy` in Brasília time (never `new Date(str)`, which reads month-first).
-Schema changes for this table are in `backend/prisma/sql/` (run on Supabase).
+data) — subscription (`Assinatura`, fixed monthly fee), invoice debit and any
+unknown description never count.
 
 The "Cartões e contas" import also records `AccountSnapshot` rows
 (`services/accountSnapshot.ts`): a change log of saldo/limite/status, written
@@ -128,7 +123,7 @@ enables multi-provider failover) plus mock adapters for credential-free dev.
 
 
 Campaign results are measured by *real usage*, not limit renewals
-(`services/campaignResults.ts`, computed on request from `Transaction` — no
+(`services/campaignResults.ts`, computed on request from `Purchase` — no
 stored attribution state, so late-imported usage shows up on its own): a
 conversion is an antecipação or compra after the send (subscription never
 counts), reported as a cumulative D0/D1/D3/D7/D14/D30 curve in Brasília
