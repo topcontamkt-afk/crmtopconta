@@ -6,12 +6,18 @@ import { logAudit } from "../middleware/audit";
 import { buildSegmentWhere } from "../services/segments";
 import {
   buildAudience,
-  computeAttribution,
   enqueueCampaign,
   processQueueBatch,
   sendTestMessages,
 } from "../services/campaignQueue";
 import { computeABSignificance } from "../services/statistics";
+import {
+  buildCampaignResults,
+  liftAtDay,
+  loadCampaignEvaluations,
+  MAX_DAY,
+  statsAtDay,
+} from "../services/campaignResults";
 
 const router = Router();
 router.use(requireAuth);
@@ -71,6 +77,8 @@ const createSchema = z
     throttlePerMin: z.number().int().positive().default(60),
     dedupeWindowHrs: z.number().int().positive().default(72),
     attributionDays: z.number().int().positive().default(7),
+    // Grupo de controle (opcional): % do público que NÃO recebe a mensagem, para medir o lift real.
+    controlGroupPercent: z.number().int().min(0).max(50).optional(),
     costPerMessage: z.number().nonnegative().default(0),
   })
   .refine((d) => d.templateId || d.messageTemplate, {
@@ -120,6 +128,7 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
       throttlePerMin: d.throttlePerMin,
       dedupeWindowHrs: d.dedupeWindowHrs,
       attributionDays: d.attributionDays,
+      controlGroupPercent: d.controlGroupPercent || null,
       costPerMessage: d.costPerMessage,
       audienceCount: estimatedAudience,
       status: "RASCUNHO",
@@ -149,6 +158,7 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
       throttlePerMin: d.throttlePerMin,
       dedupeWindowHrs: d.dedupeWindowHrs,
       attributionDays: d.attributionDays,
+      controlGroupPercent: d.controlGroupPercent,
       costPerMessage: d.costPerMessage,
       estimatedAudience,
     },
@@ -208,52 +218,50 @@ router.post("/:id/test-send", requireRole("ADMIN", "OPERATOR"), async (req, res)
   res.json(result);
 });
 
-/** GET /api/campaigns/:id/report — métricas de envio, conversão, ROI e breakdown A/B. */
+/**
+ * GET /api/campaigns/:id/report — resultado pelo USO REAL do cliente (transações): curva de
+ * conversão D0 a D30, separação de quem tinha saldo no envio, grupo de controle (se houver),
+ * lucro (Juros) e ROI. Calculado na hora, sem estado guardado — ver services/campaignResults.ts.
+ */
 router.get("/:id/report", async (req, res) => {
   const { tenantId } = req.user!;
   const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
 
-  await computeAttribution(prisma, campaign.id);
-
-  const [grouped, conversions, costAgg, valueAgg, porVariante] = await Promise.all([
+  const [grouped, costAgg, evals] = await Promise.all([
     prisma.messageEvent.groupBy({ by: ["status"], where: { campaignId: campaign.id }, _count: true }),
-    prisma.messageEvent.count({ where: { campaignId: campaign.id, convertedAt: { not: null } } }),
     prisma.messageEvent.aggregate({ where: { campaignId: campaign.id }, _sum: { cost: true } }),
-    prisma.messageEvent.aggregate({ where: { campaignId: campaign.id }, _sum: { convertedValue: true } }),
-    campaign.variantSplitPercent
-      ? prisma.messageEvent.groupBy({
-          by: ["variant"],
-          where: { campaignId: campaign.id, status: { not: "FILA" } },
-          _count: true,
-        })
-      : Promise.resolve(null),
+    loadCampaignEvaluations(prisma, tenantId, campaign.id),
   ]);
 
-  const enviados = grouped.reduce((acc, g) => acc + (g.status !== "FILA" && g.status !== "BLOQUEADO" ? g._count : 0), 0);
+  const treated = evals.filter((e) => e.cohort === "TRATADO");
+  const control = evals.filter((e) => e.cohort === "CONTROLE");
+  const resultados = buildCampaignResults(evals);
+
+  // Janela de cabeçalho = a configurada na campanha (limitada a 30 dias); a curva completa vem em `resultados`.
+  const janelaDias = Math.min(campaign.attributionDays, MAX_DAY);
+  const headline = statsAtDay(treated, janelaDias);
   const custoTotal = Number(costAgg._sum.cost || 0);
-  const valorGerado = Number(valueAgg._sum.convertedValue || 0);
+  const lucro = headline.lucro;
+  const incremental = control.length > 0 ? liftAtDay(treated, control, janelaDias) : null;
 
   let variantBreakdown = null;
   let abSignificance = null;
-  if (porVariante) {
-    const conversoesPorVariante = await prisma.messageEvent.groupBy({
-      by: ["variant"],
-      where: { campaignId: campaign.id, convertedAt: { not: null } },
-      _count: true,
-    });
-    variantBreakdown = porVariante.map((v) => {
-      const conv = conversoesPorVariante.find((c) => c.variant === v.variant)?._count || 0;
-      return { variant: v.variant, enviados: v._count, conversoes: conv, taxaConversao: v._count ? ((conv / v._count) * 100).toFixed(2) : "0.00" };
-    });
+  if (campaign.variantSplitPercent) {
+    const byVariant = new Map<string, typeof treated>();
+    for (const e of treated) byVariant.set(e.variant, [...(byVariant.get(e.variant) ?? []), e]);
+    variantBreakdown = [...byVariant.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([variant, list]) => {
+        const st = statsAtDay(list, janelaDias);
+        return { variant, enviados: st.n, conversoes: st.convertidos, taxaConversao: (st.taxa * 100).toFixed(2) };
+      });
 
     // Significância estatística (Fase 3 — recorte leve): só calculável com as duas variantes.
-    const a = porVariante.find((v) => v.variant === "A");
-    const b = porVariante.find((v) => v.variant === "B");
+    const a = variantBreakdown.find((v) => v.variant === "A");
+    const b = variantBreakdown.find((v) => v.variant === "B");
     if (a && b) {
-      const convA = conversoesPorVariante.find((c) => c.variant === "A")?._count || 0;
-      const convB = conversoesPorVariante.find((c) => c.variant === "B")?._count || 0;
-      const result = computeABSignificance(a._count, convA, b._count, convB);
+      const result = computeABSignificance(a.enviados, a.conversoes, b.enviados, b.conversoes);
       abSignificance = {
         ...result,
         pValue: result.pValue !== null ? Number(result.pValue.toFixed(4)) : null,
@@ -262,50 +270,110 @@ router.get("/:id/report", async (req, res) => {
     }
   }
 
+  // Lista nominal (os 50 usos mais recentes): só nome e cidade — telefone e documento ficam no CSV.
+  const users = treated
+    .filter((e) => e.usos.length > 0)
+    .sort((a, b) => b.usos[0].confirmedAt.getTime() - a.usos[0].confirmedAt.getTime())
+    .slice(0, 50);
+  const clients = users.length
+    ? await prisma.client.findMany({
+        where: { tenantId, id: { in: users.map((u) => u.clientId) } },
+        select: { id: true, nome: true, cidade: true },
+      })
+    : [];
+  const clientById = new Map(clients.map((c) => [c.id, c]));
+  const usuarios = users.map((e) => ({
+    nome: clientById.get(e.clientId)?.nome ?? "—",
+    cidade: clientById.get(e.clientId)?.cidade ?? null,
+    grupoSaldo: e.grupoSaldo,
+    primeiroUsoEm: e.usos[0].confirmedAt.toISOString(),
+    diaPrimeiroUso: e.usos[0].dayOffset,
+    usos: e.usos.slice(0, 5).map((u) => ({
+      tipo: u.kind,
+      valor: u.valorPrincipal,
+      lucro: u.kind === "ANTECIPACAO" ? u.juros : null,
+      em: u.confirmedAt.toISOString(),
+    })),
+    valorMovimentado: Number(e.usos.reduce((acc, u) => acc + u.valorPrincipal, 0).toFixed(2)),
+  }));
+
   res.json({
     campaignId: campaign.id,
     isSandbox: campaign.isSandbox,
     audienceCount: campaign.audienceCount,
     porStatus: grouped.map((g) => ({ status: g.status, count: g._count })),
-    conversoes: conversions,
-    taxaConversao: enviados ? ((conversions / enviados) * 100).toFixed(2) : "0.00",
+    // Campos de cabeçalho (mesmos nomes de antes): agora medidos por uso real, sobre quem de fato recebeu.
+    conversoes: headline.convertidos,
+    taxaConversao: (headline.taxa * 100).toFixed(2),
     custoTotal,
-    valorGerado,
-    roi: custoTotal > 0 ? (((valorGerado - custoTotal) / custoTotal) * 100).toFixed(2) : null,
-    janelaAtribuicaoDias: campaign.attributionDays,
+    valorMovimentado: headline.valorMovimentado,
+    // Lucro = Juros das antecipações (compra à vista não tem lucro conhecido: taxa do comerciante).
+    valorGerado: lucro,
+    roi: custoTotal > 0 ? (((lucro - custoTotal) / custoTotal) * 100).toFixed(2) : null,
+    lucroIncremental: incremental?.lucroIncremental ?? null,
+    roiIncremental:
+      incremental && custoTotal > 0 ? (((incremental.lucroIncremental - custoTotal) / custoTotal) * 100).toFixed(2) : null,
+    janelaAtribuicaoDias: janelaDias,
+    controleEnviados: control.length,
+    resultados,
+    usuarios,
     variantBreakdown,
     abSignificance,
   });
 });
 
-/** GET /api/campaigns/:id/report/export.csv — export do relatório de envios (Fase 2). */
+/**
+ * GET /api/campaigns/:id/report/export.csv — lista nominal de envios com o uso de cada cliente
+ * (saldo no envio, primeiro uso, uso por horizonte D0..D30, valor e lucro em 30 dias).
+ */
 router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
   const { tenantId, id: userId } = req.user!;
   const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
 
-  const events = await prisma.messageEvent.findMany({
-    where: { campaignId: campaign.id },
-    include: { client: { select: { nome: true, telefone: true, cidade: true } } },
-    orderBy: { queuedAt: "asc" },
-  });
+  const [events, evals] = await Promise.all([
+    prisma.messageEvent.findMany({
+      where: { campaignId: campaign.id },
+      include: { client: { select: { nome: true, telefone: true, cidade: true } } },
+      orderBy: { queuedAt: "asc" },
+    }),
+    loadCampaignEvaluations(prisma, tenantId, campaign.id),
+  ]);
+  const evalById = new Map(evals.map((e) => [e.id, e]));
 
-  const header = "cliente,telefone,cidade,variante,status,provedor,custo,enviado_em,convertido_em,valor_convertido\n";
+  const horizons = [0, 1, 3, 7, 14, 30];
+  const header =
+    [
+      "cliente", "telefone", "cidade", "grupo", "variante", "status", "provedor", "custo", "enviado_em",
+      "saldo_no_envio", "situacao_saldo", "primeiro_uso_em", "dia_do_primeiro_uso",
+      ...horizons.map((h) => `usou_ate_d${h}`),
+      "qtd_usos_30d", "valor_movimentado_30d", "lucro_30d",
+    ].join(",") + "\n";
+
   const rows = events
-    .map((e) =>
-      [
+    .map((e) => {
+      const ev = evalById.get(e.id);
+      const usos = ev?.usos ?? [];
+      return [
         csvEscape(e.client.nome),
         e.client.telefone,
         csvEscape(e.client.cidade || ""),
+        e.status === "CONTROLE" ? "CONTROLE" : "TRATADO",
         e.variant,
         e.status,
         e.provider || "",
         Number(e.cost),
         e.sentAt?.toISOString() || "",
-        e.convertedAt?.toISOString() || "",
-        e.convertedValue ? Number(e.convertedValue) : "",
-      ].join(",")
-    )
+        ev?.saldoNoEnvio ?? "",
+        ev?.grupoSaldo ?? "",
+        usos[0]?.confirmedAt.toISOString() ?? "",
+        usos[0]?.dayOffset ?? "",
+        ...horizons.map((h) => (ev ? (usos.some((u) => u.dayOffset <= h) ? "sim" : "nao") : "")),
+        ev ? usos.length : "",
+        ev ? Number(usos.reduce((acc, u) => acc + u.valorPrincipal, 0).toFixed(2)) : "",
+        ev ? Number(usos.reduce((acc, u) => acc + (u.kind === "ANTECIPACAO" ? u.juros : 0), 0).toFixed(2)) : "",
+      ].join(",");
+    })
     .join("\n");
 
   await logAudit({ tenantId, userId, action: "EXPORT_CAMPAIGN_REPORT", target: "Campaign", targetId: campaign.id });
@@ -315,10 +383,13 @@ router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST")
 });
 
 function csvEscape(value: string): string {
-  if (value.includes(",") || value.includes('"') || value.includes("\n")) {
-    return `"${value.replace(/"/g, '""')}"`;
+  // Neutraliza CSV/formula injection (mesmo tratamento de routes/clients.ts): nome/cidade vêm de
+  // importação e, começando com =/+/-/@, virariam fórmula executável no Excel/Sheets.
+  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  if (safe.includes(",") || safe.includes('"') || safe.includes("\n")) {
+    return `"${safe.replace(/"/g, '""')}"`;
   }
-  return value;
+  return safe;
 }
 
 export default router;

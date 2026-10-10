@@ -15,3 +15,18 @@
 - **Operação**: ingestão do inventário técnico do repositório.
 - **Resultado**: resumo da fonte e páginas temáticas criados.
 - **Sanitização**: arquivos de ambiente, segredos, PII e identificadores operacionais não foram incluídos.
+
+## 2026-10-10 — Extrato de transações
+
+- **Operação**: página de pipeline de importação atualizada com o importador de transações.
+- **Sanitização**: sem PII nem identificadores operacionais.
+
+## 2026-10-10 — Histórico de conta
+
+- **Operação**: pipeline de importação atualizado com o histórico de saldo/limite/status.
+- **Sanitização**: sem PII nem identificadores operacionais.
+
+## 2026-10-10 — Resultado de campanha por uso real
+
+- **Operação**: página de campanhas atualizada com a conversão por transações, curva D0–D30, saldo no envio e grupo de controle.
+- **Sanitização**: sem PII nem identificadores operacionais.

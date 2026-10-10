@@ -93,7 +93,8 @@ router.get("/:id", async (req, res) => {
     where: { id: req.params.id, tenantId },
     include: {
       movements: { orderBy: { data: "desc" }, take: 50 },
-      messageEvents: { orderBy: { queuedAt: "desc" }, take: 50, include: { campaign: true } },
+      // CONTROLE = fazia parte do público de uma campanha mas NÃO recebeu a mensagem: não é histórico de envio.
+      messageEvents: { where: { status: { not: "CONTROLE" } }, orderBy: { queuedAt: "desc" }, take: 50, include: { campaign: true } },
     },
   });
   if (!client) return res.status(404).json({ error: "Cliente não encontrado" });

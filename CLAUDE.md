@@ -77,6 +77,24 @@ alternative input shape feeding the same pipeline. Usage percentage/tier
 (`services/usage.ts`) uses safe division — a zero/missing `limite_total`
 yields tier `INDEFINIDO`, never an error or false "no usage".
 
+The card transaction statement is the source of *real* usage, since `Client`
+only holds the latest snapshot (which swings with the payroll cycle: the
+invoice is deducted from payroll and the limit renews). It lives in `Purchase`
+(see "Comércio credenciado" below); `services/transactionClassifier.ts` decides
+what counts as usage from `Purchase.tipo`: `Débito Pix Cartão` = salary advance
+(`Juros` is profit), `Compra à Vista` = purchase at partner stores (no profit
+data) — subscription (`Assinatura`, fixed monthly fee), invoice debit and any
+unknown description never count.
+
+The "Cartões e contas" import also records `AccountSnapshot` rows
+(`services/accountSnapshot.ts`): a change log of saldo/limite/status, written
+only when one of them changes or on a client's first sighting — not a daily
+dump of the whole base. State on date D = latest row with `recordedAt <= D`;
+`saldoAnterior` gives the delta (the limit "returns" after payroll payment, so
+`limiteTotal` often stays flat while `saldoDisponivel` jumps — the existing
+`LIMITE_RENOVADO` automation only looks at `limiteTotal`). Failures never break
+the import.
+
 ### LGPD / security primitives
 
 - CPF: never persisted in plaintext — HMAC-SHA256 hash with a per-tenant salt
@@ -103,6 +121,22 @@ processes a batch. Channels are abstracted behind `ChannelAdapter`
 API and SMS (Twilio as the reference provider, `ChannelConfig.priority`
 enables multi-provider failover) plus mock adapters for credential-free dev.
 
+
+Campaign results are measured by *real usage*, not limit renewals
+(`services/campaignResults.ts`, computed on request from `Purchase` — no
+stored attribution state, so late-imported usage shows up on its own): a
+conversion is an antecipação or compra after the send (subscription never
+counts), reported as a cumulative D0/D1/D3/D7/D14/D30 curve in Brasília
+calendar days. If a client got several campaigns, usage is credited to the
+most recent one. Clients are split by balance at send time (`AccountSnapshot`
+as-of lookup; `MIN_SALDO_ELEGIVEL`) into com saldo / sem saldo / desconhecido
+(no history yet). Optional control group: `Campaign.controlGroupPercent` leaves
+that share of the audience unmessaged as `MessageStatus.CONTROLE`; since the
+send is spread over days, each control client is assigned the timestamp of a
+real send (matched by quantile) so both windows start alike, and the report
+shows lift (two-proportion z-test) and incremental profit. Profit is only
+`Juros` of antecipações — compra à vista profit (merchant fee) is unknown, so
+it's excluded from profit/ROI rather than counted as zero.
 ### Automation engine
 
 `services/automationEngine.ts` evaluates active `AutomationRule`s on a timer,

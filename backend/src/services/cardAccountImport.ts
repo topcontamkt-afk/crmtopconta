@@ -4,6 +4,7 @@ import { computeUsage } from "./usage";
 import { hashDocument, isValidDocument, maskDocument, detectDocumentType, normalizePhone } from "./masking";
 import { notify } from "./notifications";
 import { ImportRunResult } from "./importService";
+import { recordAccountSnapshots, SnapshotCandidate } from "./accountSnapshot";
 import { normalizeDocumentDigits, parseMoney } from "./purchaseParsing";
 
 /**
@@ -148,6 +149,9 @@ interface PreparedRow {
   rowNumber: number;
   cpfHash: string;
   limiteTotal: number;
+  saldoDisponivel: number;
+  valorUtilizado: number;
+  statusConta: "ATIVO" | "INATIVO" | "BLOQUEADO";
   data: Prisma.ClientCreateInput;
 }
 
@@ -254,7 +258,7 @@ function prepareRow(rawIn: CardAccountRow, rowNumber: number, tenantCpfSalt: str
     lastImportJobId: jobId,
   };
 
-  return { rowNumber, cpfHash, limiteTotal, data };
+  return { rowNumber, cpfHash, limiteTotal, saldoDisponivel, valorUtilizado, statusConta, data };
 }
 
 /**
@@ -288,11 +292,14 @@ export async function runCardAccountImport(
   // Fase 2: uma única consulta pra descobrir quem já existe no lote inteiro (em vez de uma
   // consulta por linha) — dá pra saber criado-vs-atualizado e aplicar o opt-out sticky e o
   // registro de renovação de limite sem precisar reconsultar linha a linha.
-  const existingByCpfHash = new Map<string, { id: string; limiteTotal: Prisma.Decimal; optOutAt: Date | null }>();
+  const existingByCpfHash = new Map<
+    string,
+    { id: string; limiteTotal: Prisma.Decimal; saldoDisponivel: Prisma.Decimal; statusConta: "ATIVO" | "INATIVO" | "BLOQUEADO"; optOutAt: Date | null }
+  >();
   if (prepared.length > 0) {
     const existing = await prisma.client.findMany({
       where: { tenantId, cpfHash: { in: prepared.map((p) => p.cpfHash) } },
-      select: { id: true, cpfHash: true, limiteTotal: true, optOutAt: true },
+      select: { id: true, cpfHash: true, limiteTotal: true, saldoDisponivel: true, statusConta: true, optOutAt: true },
     });
     for (const c of existing) existingByCpfHash.set(c.cpfHash, c);
   }
@@ -302,15 +309,34 @@ export async function runCardAccountImport(
   let added = 0;
   let updated = 0;
   const movementsToCreate: { clientId: string; valor: number }[] = [];
+  const snapshotCandidates: SnapshotCandidate[] = [];
 
   await mapWithConcurrency(prepared, CONCURRENCY, async (p) => {
     const existing = existingByCpfHash.get(p.cpfHash);
     const data = { ...p.data, autorizacaoComunicacao: existing?.optOutAt ? false : p.data.autorizacaoComunicacao };
     try {
-      await prisma.client.upsert({
+      const saved = await prisma.client.upsert({
         where: { tenantId_cpfHash: { tenantId, cpfHash: p.cpfHash } },
         create: data,
         update: data,
+        select: { id: true },
+      });
+      snapshotCandidates.push({
+        clientId: saved.id,
+        // estado de ANTES desta importação (lido na Fase 2) — undefined para cliente novo
+        previous: existing
+          ? {
+              limiteTotal: Number(existing.limiteTotal),
+              saldoDisponivel: Number(existing.saldoDisponivel),
+              statusConta: existing.statusConta,
+            }
+          : undefined,
+        current: {
+          limiteTotal: p.limiteTotal,
+          saldoDisponivel: p.saldoDisponivel,
+          valorUtilizado: p.valorUtilizado,
+          statusConta: p.statusConta,
+        },
       });
       if (existing) {
         updated++;
@@ -334,6 +360,9 @@ export async function runCardAccountImport(
       })
       .catch(() => {});
   }
+
+  // Histórico de saldo/limite/status (AccountSnapshot) — não derruba a importação se falhar.
+  await recordAccountSnapshots(prisma, tenantId, snapshotCandidates, job.id);
 
   const hardErrors = errors.filter((e) => !e.motivo.startsWith("Aviso:"));
   const status =

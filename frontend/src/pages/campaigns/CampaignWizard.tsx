@@ -69,6 +69,8 @@ export default function CampaignWizard() {
   const [throttlePerMin, setThrottlePerMin] = useState(60);
   const [dedupeWindowHrs, setDedupeWindowHrs] = useState(72);
   const [attributionDays, setAttributionDays] = useState(7);
+  const [controlEnabled, setControlEnabled] = useState(false);
+  const [controlGroupPercent, setControlGroupPercent] = useState(10);
   const [scheduledAt, setScheduledAt] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -142,6 +144,7 @@ export default function CampaignWizard() {
           throttlePerMin,
           dedupeWindowHrs,
           attributionDays,
+          controlGroupPercent: controlEnabled ? controlGroupPercent : undefined,
           scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : undefined,
         },
       });
@@ -358,6 +361,20 @@ export default function CampaignWizard() {
             </div>
             <div className="form-row">
               <label>
+                <input type="checkbox" checked={controlEnabled} onChange={(e) => setControlEnabled(e.target.checked)} /> Reservar um grupo de controle (não recebe a mensagem)
+              </label>
+              {controlEnabled && (
+                <>
+                  <input type="number" min={1} max={50} value={controlGroupPercent} onChange={(e) => setControlGroupPercent(Math.min(50, Math.max(1, Number(e.target.value) || 1)))} />
+                  <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                    {controlGroupPercent}% do público fica de fora do envio. É a única forma de saber quanto do uso
+                    foi causado pelo disparo e quanto aconteceria de qualquer jeito (o relatório compara os dois grupos).
+                  </p>
+                </>
+              )}
+            </div>
+            <div className="form-row">
+              <label>
                 <input type="checkbox" checked={isSandbox} onChange={(e) => setIsSandbox(e.target.checked)} /> Campanha de teste/sandbox (não conta para relatórios agregados)
               </label>
             </div>
@@ -381,6 +398,7 @@ export default function CampaignWizard() {
             <p><strong>Mensagem (A):</strong> {effectiveMessage}</p>
             {abEnabled && <p><strong>Mensagem (B):</strong> {messageTemplateB} — {variantSplitPercent}% do público</p>}
             <p><strong>Throttle:</strong> {throttlePerMin} msgs/min · Dedupe: {dedupeWindowHrs}h · Atribuição: {attributionDays} dias</p>
+            {controlEnabled && <p><strong>Grupo de controle:</strong> {controlGroupPercent}% do público não recebe a mensagem</p>}
             {isSandbox && <p><span className="badge warn">Sandbox</span> esta campanha é de teste</p>}
             <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
               Após criar, você pode enviar uma amostra de teste (QA) antes de agendar para a base completa, na tela de relatório da campanha.
