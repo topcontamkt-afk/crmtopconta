@@ -118,6 +118,7 @@ model Tenant {
   messageTemplates   MessageTemplate[]
   notifications      Notification[]
   transactions       Transaction[]
+  accountSnapshots   AccountSnapshot[]
 }
 
 model User {
@@ -220,6 +221,7 @@ model Client {
   movements              Movement[]
   messageEvents          MessageEvent[]
   transactions           Transaction[]
+  accountSnapshots       AccountSnapshot[]
 
   @@unique([tenantId, cpfHash])
   @@index([tenantId, telefone])
@@ -255,6 +257,33 @@ model Movement {
   createdAt DateTime @default(now())
 
   @@index([clientId, data])
+}
+
+// Histórico de saldo/limite/status da conta. Client guarda só o estado atual (sobrescrito a cada
+// importação), e o saldo oscila com o ciclo da folha (usa -> fatura descontada -> limite renova);
+// sem histórico não dá para saber QUANDO o limite voltou nem quem tinha saldo na data de um
+// disparo. Gravado por services/accountSnapshot.ts durante a importação de "Cartões e contas".
+//
+// É um registro de MUDANÇAS, não uma foto diária de toda a base: só entra linha quando saldo,
+// limite ou status mudam (ou na primeira vez que o cliente é visto) — a base inteira todo dia
+// seriam milhões de linhas por ano para guardar "nada mudou". Estado numa data D = a última
+// linha com recordedAt <= D. saldoAnterior (nulo na 1ª linha) dá o delta sem precisar de join.
+model AccountSnapshot {
+  id              String       @id @default(uuid())
+  tenantId        String
+  tenant          Tenant       @relation(fields: [tenantId], references: [id])
+  clientId        String
+  client          Client       @relation(fields: [clientId], references: [id])
+  recordedAt      DateTime     @default(now())
+  limiteTotal     Decimal      @db.Decimal(14, 2)
+  saldoDisponivel Decimal      @db.Decimal(14, 2)
+  saldoAnterior   Decimal?     @db.Decimal(14, 2)
+  valorUtilizado  Decimal      @db.Decimal(14, 2)
+  statusConta     ClientStatus
+  importJobId     String?
+
+  @@index([tenantId, clientId, recordedAt])
+  @@index([tenantId, recordedAt])
 }
 
 // Extrato de transações do cartão (uma linha por operação confirmada) — fonte do "uso real",

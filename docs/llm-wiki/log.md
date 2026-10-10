@@ -20,3 +20,8 @@
 
 - **Operação**: página de pipeline de importação atualizada com o importador de transações.
 - **Sanitização**: sem PII nem identificadores operacionais.
+
+## 2026-10-10 — Histórico de conta
+
+- **Operação**: pipeline de importação atualizado com o histórico de saldo/limite/status.
+- **Sanitização**: sem PII nem identificadores operacionais.

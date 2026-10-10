@@ -163,6 +163,7 @@ describe("TENANT_SCOPED_MODELS", () => {
         "MessageTemplate",
         "Notification",
         "Transaction",
+        "AccountSnapshot",
       ].sort()
     );
   });

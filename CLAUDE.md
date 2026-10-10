@@ -91,6 +91,15 @@ data), `Assinatura` = fixed monthly fee — only the first two count as usage
 `dd/mm/yyyy` in Brasília time (never `new Date(str)`, which reads month-first).
 Schema changes for this table are in `backend/prisma/sql/` (run on Supabase).
 
+The "Cartões e contas" import also records `AccountSnapshot` rows
+(`services/accountSnapshot.ts`): a change log of saldo/limite/status, written
+only when one of them changes or on a client's first sighting — not a daily
+dump of the whole base. State on date D = latest row with `recordedAt <= D`;
+`saldoAnterior` gives the delta (the limit "returns" after payroll payment, so
+`limiteTotal` often stays flat while `saldoDisponivel` jumps — the existing
+`LIMITE_RENOVADO` automation only looks at `limiteTotal`). Failures never break
+the import.
+
 ### LGPD / security primitives
 
 - CPF: never persisted in plaintext — HMAC-SHA256 hash with a per-tenant salt
