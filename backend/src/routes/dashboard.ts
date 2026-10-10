@@ -1,7 +1,7 @@
 import { avaliarFrescor, mensagemFrescor } from "../services/dataFreshness";
 import { ETAPA_CASE_SQL } from "../services/etapaUso";
 import { ENVIAVEL_WHERE } from "../services/segments";
-import { LIMITE_MAXIMO, LIMITE_TETO, PERFIL_LABELS, PERFIS_RENDA, estimarSalario } from "../services/rendaPerfil";
+import { limiteRange, isPerfilRenda, LIMITE_MAXIMO, LIMITE_TETO, PERFIL_LABELS, PERFIS_RENDA, estimarSalario } from "../services/rendaPerfil";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma, tenantRaw } from "../config/db";
@@ -788,6 +788,54 @@ router.get("/perfis-renda", async (req, res) => {
     tenantId
   );
   res.json({ perfis, semLimite, fatorSalario: estimarSalario(1), extrato: { primeira: cob?.primeira ?? null, ultima: cob?.ultima ?? null } });
+});
+
+/**
+ * GET /api/dashboard/perfis-renda/:perfil — página de detalhe de um perfil (PF1–PF4): totais,
+ * limite médio, uso do limite (todas as faixas), etapa de uso, cidades e convênios.
+ */
+router.get("/perfis-renda/:perfil", async (req, res) => {
+  const perfil = String(req.params.perfil).toUpperCase();
+  if (!isPerfilRenda(perfil)) return res.status(404).json({ error: "Perfil inexistente" });
+  const { tenantId } = req.user!;
+  const r = limiteRange(perfil);
+  const base = { tenantId, limiteTotal: r.lte === undefined ? { gt: r.gt } : { gt: r.gt, lte: r.lte } };
+  const raw = await tenantRaw.query<Array<{ etapa: string; n: bigint }>>(
+    `SELECT ${ETAPA_CASE_SQL} AS etapa, COUNT(*)::bigint AS n
+     FROM "Client" WHERE "tenantId" = $1 AND "limiteTotal" > $2::numeric ${r.lte === undefined ? "" : "AND \"limiteTotal\" <= $3::numeric"}
+     GROUP BY 1`,
+    ...(r.lte === undefined ? [tenantId, r.gt] : [tenantId, r.gt, r.lte])
+  );
+  const [total, agg, porFaixa, porCidade, porConvenio, noTeto, comSaldo, autorizados] = await Promise.all([
+    prisma.client.count({ where: base }),
+    prisma.client.aggregate({ where: base, _avg: { limiteTotal: true }, _sum: { limiteTotal: true, valorUtilizado: true, saldoDisponivel: true } }),
+    prisma.client.groupBy({ by: ["faixaUso"], where: base, _count: true }),
+    prisma.client.groupBy({ by: ["cidade"], where: { ...base, cidade: { not: null } }, _count: true, orderBy: { _count: { cidade: "desc" } }, take: 10 }),
+    prisma.client.groupBy({ by: ["empresaConveniada"], where: { ...base, empresaConveniada: { not: null } }, _count: true, orderBy: { _count: { empresaConveniada: "desc" } }, take: 10 }),
+    prisma.client.count({ where: { ...base, limiteTotal: 2000 } }),
+    prisma.client.count({ where: { ...base, saldoDisponivel: { gte: 10 } } }),
+    prisma.client.count({ where: { ...base, autorizacaoComunicacao: true, optOutAt: null } }),
+  ]);
+  const etapas: Record<string, number> = {};
+  for (const e of raw) etapas[e.etapa] = Number(e.n);
+  const faixas: Record<string, number> = {};
+  for (const f of porFaixa) faixas[f.faixaUso] = f._count;
+  res.json({
+    perfil,
+    label: PERFIL_LABELS[perfil],
+    total,
+    noTeto,
+    comSaldo,
+    autorizados,
+    limiteMedio: Number(agg._avg.limiteTotal ?? 0),
+    limiteTotal: Number(agg._sum.limiteTotal ?? 0),
+    valorUtilizado: Number(agg._sum.valorUtilizado ?? 0),
+    saldoDisponivel: Number(agg._sum.saldoDisponivel ?? 0),
+    faixas,
+    etapas,
+    cidades: porCidade.map((c) => ({ cidade: c.cidade as string, count: c._count })),
+    convenios: porConvenio.map((c) => ({ convenio: c.empresaConveniada as string, count: c._count })),
+  });
 });
 
 /**

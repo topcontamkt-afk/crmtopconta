@@ -282,9 +282,13 @@ export default function Dashboard() {
         <HealthCard saude={data.saude} />
       </div>
 
+      <FrescorExtrato />
+
       <div className="pd-row">
         <OpportunityQueue cidade={cidade} convenio={convenio} />
-        <FrescorExtrato />
+      </div>
+
+      <div className="pd-row">
         <PerfisRendaCard cidade={cidade} convenio={convenio} />
       </div>
 

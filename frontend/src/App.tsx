@@ -1,3 +1,4 @@
+import PerfisRenda from "./pages/PerfisRenda";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import {
@@ -221,6 +222,7 @@ export default function App() {
                 <Route path="/clients" element={<Clients />} />
                 <Route path="/clients/:id" element={<ClientProfile />} />
                 <Route path="/segments" element={<Segments />} />
+                <Route path="/perfis-renda/:perfil?" element={<PerfisRenda />} />
                 <Route
                   path="/commerce"
                   element={
