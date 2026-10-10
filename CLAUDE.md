@@ -191,6 +191,14 @@ que também recebe a data de ativação da planilha de contas). "Nunca usou" val
 extrato. SQL em `backend/prisma/sql/2026-10-uso-real-cliente.sql` (rodar antes do deploy). Presets:
 `POST /api/segments/presets/etapas-uso`.
 
+### Relatório por perfil, frescor do extrato e automação por etapa
+
+`services/campaignPerfil.ts` quebra o resultado da campanha por PF1–PF4 (limite atual do cliente; controle comparado
+dentro do mesmo perfil) — `porPerfil` em `GET /api/campaigns/:id/report`. `services/dataFreshness.ts` avalia se o
+extrato de compras está em dia (limite 3 dias; `GET /api/dashboard/frescor`, aviso no dashboard e no assistente).
+O gatilho de automação `ETAPA_PERFIL` (condição `etapaUso`, `perfilRenda`, `comSaldo`) dispara por etapa/perfil e
+**não roda com extrato velho** ou ausente.
+
 ### Comércio credenciado (compras por categoria)
 
 A aba "Todas as Compras" da planilha (transações do cartão) entra por `POST /api/purchases/import`

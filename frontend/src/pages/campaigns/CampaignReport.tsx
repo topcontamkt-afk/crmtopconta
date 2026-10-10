@@ -72,6 +72,7 @@ interface Report {
   roiIncremental: string | null;
   controleEnviados: number;
   resultados: Resultados;
+  porPerfil?: { perfil: string; enviados: number; convertidos: number; taxaConversao: string; lucro: number; controle: number; taxaControle: number | null; liftPontos: number | null; significativo95: boolean | null }[];
   usuarios: UsuarioQueUsou[];
   janelaAtribuicaoDias: number;
   variantBreakdown: { variant: string; enviados: number; conversoes: number; taxaConversao: string }[] | null;
@@ -164,6 +165,47 @@ function UsageCurve({ resultados, janelaDias }: { resultados: Resultados; janela
         * ponto parcial: parte dos envios ainda não completou esse número de dias. Lucro = Juros das antecipações;
         compra à vista não tem lucro conhecido (a taxa é paga pelo comerciante), então fica fora do lucro e do ROI.
         {lift && " Lift real = taxa de uso de quem recebeu menos a de quem ficou de fora (controle), sobre quem tinha saldo quando possível."}
+      </p>
+    </div>
+  );
+}
+
+/** Resultado por perfil de renda (PF1–PF4, estimado pelo limite atual do cliente). */
+function PerfilBreakdown({ porPerfil, janelaDias }: { porPerfil: NonNullable<Report["porPerfil"]>; janelaDias: number }) {
+  if (porPerfil.length === 0) return null;
+  const temControle = porPerfil.some((p) => p.controle > 0);
+  const brl = (n: number) => n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <h3>Resultado por perfil de renda</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Perfil</th><th>Envios</th><th>Usaram até D{janelaDias}</th><th>Taxa</th><th>Lucro (juros)</th>
+            {temControle && <><th>Controle</th><th>Lift (p.p.)</th></>}
+          </tr>
+        </thead>
+        <tbody>
+          {porPerfil.map((p) => (
+            <tr key={p.perfil}>
+              <td>{p.perfil === "SEM_PERFIL" ? "Sem limite" : p.perfil}</td>
+              <td>{p.enviados}</td>
+              <td>{p.convertidos}</td>
+              <td>{p.taxaConversao}%</td>
+              <td>{brl(p.lucro)}</td>
+              {temControle && (
+                <>
+                  <td>{p.controle > 0 ? `${p.controle} (${((p.taxaControle ?? 0) * 100).toFixed(1)}%)` : "—"}</td>
+                  <td>{p.liftPontos === null ? "dados insuficientes" : `${p.liftPontos > 0 ? "+" : ""}${p.liftPontos}${p.significativo95 ? " ✓" : ""}`}</td>
+                </>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
+        O perfil usa o limite atual do cliente (limite ÷ 0,40). Perfis com poucos envios oscilam muito: leia a
+        taxa junto com o número de envios.
       </p>
     </div>
   );
@@ -318,6 +360,7 @@ export default function CampaignReport() {
 
       <UsageCurve resultados={report.resultados} janelaDias={report.janelaAtribuicaoDias} />
       <SaldoBreakdown resultados={report.resultados} />
+      <PerfilBreakdown porPerfil={report.porPerfil ?? []} janelaDias={report.janelaAtribuicaoDias} />
       <WhoUsed usuarios={report.usuarios} />
 
 

@@ -2,6 +2,10 @@ import { AppPrismaClient } from "../config/db";
 import { logAudit } from "../middleware/audit";
 import { notify } from "./notifications";
 import { enqueueCampaign, processQueueBatch } from "./campaignQueue";
+import { buildSegmentWhere, ENVIAVEL_WHERE, SALDO_MINIMO_ELEGIVEL } from "./segments";
+import { avaliarFrescor } from "./dataFreshness";
+import { isEtapaUso } from "./etapaUso";
+import { isPerfilRenda } from "./rendaPerfil";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 
 /**
@@ -85,6 +89,38 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
           autorizacaoComunicacao: true,
           optOutAt: null,
           statusConta: "ATIVO",
+        },
+        select: { id: true },
+      });
+      return { clientIds: clients.map((c) => c.id) };
+    }
+
+    case "ETAPA_PERFIL": {
+      // condition: { etapaUso?, perfilRenda?, comSaldo? }. Pelo menos um dos dois filtros é obrigatório
+      // (senão a regra miraria a base inteira). Etapa de uso depende do extrato: com o extrato velho
+      // (ver dataFreshness.ts) a regra não dispara — quem "parou de usar" seria só falta de planilha.
+      const etapa = isEtapaUso(condition?.etapaUso) ? condition.etapaUso : undefined;
+      const perfil = isPerfilRenda(condition?.perfilRenda) ? condition.perfilRenda : undefined;
+      if (!etapa && !perfil) return { clientIds: [] };
+      if (etapa) {
+        const ultima = await prisma.purchase.aggregate({ where: { tenantId }, _max: { occurredAt: true } });
+        const frescor = avaliarFrescor(ultima._max.occurredAt);
+        if (frescor.status !== "OK") {
+          console.warn(`[automation] ETAPA_PERFIL ignorada: extrato de compras ${frescor.status} (tenant ${tenantId})`);
+          return { clientIds: [] };
+        }
+      }
+      const clients = await prisma.client.findMany({
+        where: {
+          AND: [
+            buildSegmentWhere(tenantId, {
+              etapaUso: etapa ? [etapa] : undefined,
+              perfilRenda: perfil ? [perfil] : undefined,
+              saldoDisponivelMin: condition?.comSaldo ? SALDO_MINIMO_ELEGIVEL : undefined,
+            }),
+            ENVIAVEL_WHERE,
+            { autorizacaoComunicacao: true, optOutAt: null, statusConta: "ATIVO" },
+          ],
         },
         select: { id: true },
       });

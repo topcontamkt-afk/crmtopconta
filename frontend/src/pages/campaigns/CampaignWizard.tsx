@@ -1,3 +1,4 @@
+import FrescorExtrato from "../../components/FrescorExtrato";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../../api/client";
@@ -240,6 +241,7 @@ export default function CampaignWizard() {
 
             {!usePreset && !segmentId && (
               <>
+                {etapaUso && <FrescorExtrato />}
                 <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                   <input placeholder="Cidade" value={cidade} onChange={(e) => setCidade(e.target.value)} />
                   <select value={faixaUso} onChange={(e) => setFaixaUso(e.target.value)}>

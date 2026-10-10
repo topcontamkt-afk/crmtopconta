@@ -14,6 +14,7 @@ export const AUTOMATION_TRIGGERS = [
   "LIMITE_RENOVADO",
   "ESTIMULO_FAIXA",
   "OPT_OUT_TELEFONE_INVALIDO",
+  "ETAPA_PERFIL",
 ] as const;
 
 router.get("/", async (req, res) => {

@@ -1,3 +1,5 @@
+import { breakdownByPerfil } from "../services/campaignPerfil";
+import { classificarPerfil } from "../services/rendaPerfil";
 import { ETAPAS_USO } from "../services/etapaUso";
 import { Router } from "express";
 import { z } from "zod";
@@ -307,8 +309,24 @@ router.get("/:id/report", async (req, res) => {
     valorMovimentado: Number(e.usos.reduce((acc, u) => acc + u.valorPrincipal, 0).toFixed(2)),
   }));
 
+  // Quebra por perfil de renda (PF1–PF4) pelo limite atual dos clientes do envio.
+  const limites = new Map<string, number>();
+  const idsAvaliados = [...new Set(evals.map((e) => e.clientId))];
+  for (let i = 0; i < idsAvaliados.length; i += 5000) {
+    const rows = await prisma.client.findMany({
+      where: { tenantId, id: { in: idsAvaliados.slice(i, i + 5000) } },
+      select: { id: true, limiteTotal: true },
+    });
+    for (const r of rows) limites.set(r.id, Number(r.limiteTotal));
+  }
+  const porPerfil = breakdownByPerfil(treated, control, (id) => classificarPerfil(limites.get(id)), janelaDias).map((p) => ({
+    ...p,
+    taxaConversao: (p.taxa * 100).toFixed(2),
+  }));
+
   res.json({
     campaignId: campaign.id,
+    porPerfil,
     isSandbox: campaign.isSandbox,
     audienceCount: campaign.audienceCount,
     porStatus: grouped.map((g) => ({ status: g.status, count: g._count })),

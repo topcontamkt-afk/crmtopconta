@@ -1,3 +1,4 @@
+import { avaliarFrescor, mensagemFrescor } from "../services/dataFreshness";
 import { ETAPA_CASE_SQL } from "../services/etapaUso";
 import { ENVIAVEL_WHERE } from "../services/segments";
 import { LIMITE_MAXIMO, LIMITE_TETO, PERFIL_LABELS, PERFIS_RENDA, estimarSalario } from "../services/rendaPerfil";
@@ -724,6 +725,16 @@ router.get("/overview", async (req, res) => {
 const filtersQuerySchema = z.object({
   cidade: z.string().trim().min(1).max(120).optional(),
   empresaConveniada: z.string().trim().min(1).max(160).optional(),
+});
+
+/** GET /api/dashboard/frescor — o extrato de compras está em dia? (aviso de dado velho) */
+router.get("/frescor", async (req, res) => {
+  const [r] = await tenantRaw.query<Array<{ ultima: Date | null }>>(
+    `SELECT MAX("occurredAt") AS ultima FROM "Purchase" WHERE "tenantId" = $1`,
+    req.user!.tenantId
+  );
+  const f = avaliarFrescor(r?.ultima ?? null);
+  res.json({ ...f, mensagem: mensagemFrescor(f) });
 });
 
 /**
