@@ -15,3 +15,8 @@
 - **Operação**: ingestão do inventário técnico do repositório.
 - **Resultado**: resumo da fonte e páginas temáticas criados.
 - **Sanitização**: arquivos de ambiente, segredos, PII e identificadores operacionais não foram incluídos.
+
+## 2026-10-10 — Extrato de transações
+
+- **Operação**: página de pipeline de importação atualizada com o importador de transações.
+- **Sanitização**: sem PII nem identificadores operacionais.

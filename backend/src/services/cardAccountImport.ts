@@ -4,6 +4,7 @@ import { computeUsage } from "./usage";
 import { hashDocument, isValidDocument, maskDocument, detectDocumentType, normalizePhone } from "./masking";
 import { notify } from "./notifications";
 import { ImportRunResult } from "./importService";
+import { relinkOrphanTransactions } from "./transactionImport";
 
 /**
  * Importador para o formato real de "Cartões e contas" — cadastro/ativação de cartão vinculado
@@ -326,6 +327,12 @@ export async function runCardAccountImport(
         data: movementsToCreate.map((m) => ({ clientId: m.clientId, tipo: "renovacao_limite", valor: m.valor, data: new Date() })),
       })
       .catch(() => {});
+  }
+
+  // Transações que chegaram antes do cadastro do cliente (clientId nulo) são ligadas agora que
+  // ele existe. Não derruba a importação: refeito na próxima importação, de contas ou transações.
+  if (added > 0) {
+    await relinkOrphanTransactions(prisma, tenantId).catch(() => {});
   }
 
   const hardErrors = errors.filter((e) => !e.motivo.startsWith("Aviso:"));
