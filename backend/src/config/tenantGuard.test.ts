@@ -31,6 +31,7 @@ jest.mock("@prisma/client", () => {
 
 import {
   TENANT_SCOPED_MODELS,
+  TENANT_TX_OPTIONS,
   runRawInTenantTx,
   runWithTenantContextAsync as runWithTenantCtxForRaw,
   runWithTenantContext,
@@ -56,13 +57,15 @@ function makeFakeClient() {
   let captured: any;
   const txCalls: Array<{ model: string; operation: string; args: unknown }> = [];
   const executeRawCalls: unknown[][] = [];
+  const txOptions: unknown[] = [];
 
   const fakeClient = {
     $extends(config: any) {
       captured = config.query.$allModels.$allOperations;
       return config;
     },
-    async $transaction(callback: (tx: any) => Promise<any>) {
+    async $transaction(callback: (tx: any) => Promise<any>, options?: unknown) {
+      txOptions.push(options);
       const txBase = {
         $executeRaw: (_strings: TemplateStringsArray, ...values: unknown[]) => {
           executeRawCalls.push(values);
@@ -103,6 +106,7 @@ function makeFakeClient() {
     }) => Promise<any>,
     txCalls,
     executeRawCalls,
+    txOptions,
   };
 }
 
@@ -225,6 +229,16 @@ describe("tenantGuard $allOperations hook — code-level checks (run before any 
 });
 
 describe("tenantGuard $allOperations hook — RLS transaction wrapping (real tenant context)", () => {
+  it("abre a transaction com maxWait/timeout folgados: o pool é pequeno e o painel dispara dezenas de queries em paralelo", async () => {
+    const { hook, txOptions } = makeFakeClient();
+    await runWithTenantContext("tenant-A", () =>
+      hook({ model: "Client", operation: "findMany", args: { where: { tenantId: "tenant-A" } }, query: jest.fn() })
+    );
+    // O padrão do Prisma (maxWait 2s) derrubava o painel com P2028 quando as queries ficavam na fila do pool.
+    expect(txOptions).toEqual([TENANT_TX_OPTIONS]);
+    expect(TENANT_TX_OPTIONS.maxWait).toBeGreaterThan(2000);
+  });
+
   it("opens one transaction, sets app.tenant_id via set_config, and dispatches the real op to tx", async () => {
     const { hook, txCalls, executeRawCalls } = makeFakeClient();
     const args = { where: { tenantId: "t1", cidade: "São Paulo" } };

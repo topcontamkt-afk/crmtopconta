@@ -22,6 +22,17 @@ import { poolerSafeDatabaseUrl } from "./databaseUrl";
  */
 
 /**
+ * Opções das transactions que isolam cada operação por tenant (uma por query, ver o hook abaixo).
+ * O padrão do Prisma é maxWait=2s e timeout=5s. Só que o pool é pequeno (connection_limit=5, ver
+ * databaseUrl.ts) e o dashboard dispara dezenas de queries em paralelo — cada uma é uma
+ * transaction que precisa de uma conexão —, então as que ficam na fila por mais de 2s falhavam
+ * com P2028 "Unable to start a transaction in the given time" e o painel inteiro caía com
+ * "Erro interno do servidor". Aqui elas passam a esperar a vez (até 15s) em vez de falhar; a
+ * query em si continua limitada pelo `timeout`.
+ */
+export const TENANT_TX_OPTIONS = { maxWait: 15_000, timeout: 15_000 } as const;
+
+/**
  * Every Prisma model that carries its own `tenantId` scalar field, per prisma/schema.prisma.
  * Confirmed by grepping the schema for `tenantId` — NOT every model with tenant-owned data:
  * `Movement` (scoped via `Client.tenantId`) and `MessageEvent` (scoped via `Campaign.tenantId`)
@@ -285,7 +296,7 @@ export const tenantGuardExtension = Prisma.defineExtension((client) =>
                   modelToDelegateKey(model)
                 ][operation](args)
             );
-          });
+          }, TENANT_TX_OPTIONS);
         },
       },
     },
@@ -316,5 +327,5 @@ export async function runRawInTenantTx<T>(
   return client.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
     return fn(tx);
-  });
+  }, TENANT_TX_OPTIONS);
 }
