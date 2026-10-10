@@ -2,7 +2,7 @@
 -- importação de "Cartões e contas"). Rodar no SQL Editor do Supabase, ANTES de publicar o
 -- backend novo (senão a gravação do histórico falha — sem derrubar a importação, mas sem
 -- histórico). Gerado com `prisma migrate diff` contra o schema anterior + RLS.
--- Rodar DEPOIS de 2026-10-add-transaction.sql.
+-- Aplicado em produção em 2026-10-10 (migration add_account_snapshot).
 
 -- CreateTable
 CREATE TABLE "AccountSnapshot" (
@@ -33,8 +33,7 @@ ALTER TABLE "AccountSnapshot" ADD CONSTRAINT "AccountSnapshot_tenantId_fkey" FOR
 ALTER TABLE "AccountSnapshot" ADD CONSTRAINT "AccountSnapshot_clientId_fkey" FOREIGN KEY ("clientId") REFERENCES "Client"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 
--- RLS real — mesmo texto da policy de "Transaction" (confira contra as policies de produção:
--- SELECT policyname, qual, with_check FROM pg_policies WHERE tablename = 'Client';).
+-- RLS real — mesma policy das demais tabelas (conferida contra pg_policies de produção).
 ALTER TABLE "AccountSnapshot" ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY tenant_isolation ON "AccountSnapshot"
@@ -42,5 +41,6 @@ CREATE POLICY tenant_isolation ON "AccountSnapshot"
   USING ("tenantId" = current_setting('app.tenant_id', true))
   WITH CHECK ("tenantId" = current_setting('app.tenant_id', true));
 
--- Se o role app_runtime não herda privilégios por default privileges, descomente:
--- GRANT SELECT, INSERT, UPDATE, DELETE ON "AccountSnapshot" TO app_runtime;
+-- O role app_runtime (NOBYPASSRLS) não herda privilégios: as demais tabelas (ex.: Purchase) têm
+-- exatamente SELECT, INSERT, UPDATE, DELETE concedidos a ele, e sem isso a gravação falha.
+GRANT SELECT, INSERT, UPDATE, DELETE ON "AccountSnapshot" TO app_runtime;

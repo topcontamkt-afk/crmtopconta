@@ -1,5 +1,5 @@
 -- Grupo de controle de campanha (services/campaignQueue.ts, services/campaignResults.ts).
--- Rodar no SQL Editor do Supabase ANTES de publicar o backend novo.
+-- Aplicado em produção em 2026-10-10 (migrations add_message_status_controle e add_campaign_control_group_percent).
 --
 -- ATENÇÃO: o ALTER TYPE ... ADD VALUE abaixo NÃO pode rodar dentro de uma transação junto com
 -- outros comandos em versões antigas do Postgres. Rode cada comando separadamente (um por vez)
