@@ -1,3 +1,4 @@
+import { USO_TIPO_SQL } from "../services/usageRefresh";
 import { avaliarFrescor, mensagemFrescor } from "../services/dataFreshness";
 import { ETAPA_CASE_SQL } from "../services/etapaUso";
 import { ENVIAVEL_WHERE } from "../services/segments";
@@ -794,35 +795,80 @@ router.get("/perfis-renda", async (req, res) => {
  * GET /api/dashboard/perfis-renda/:perfil — página de detalhe de um perfil (PF1–PF4): totais,
  * limite médio, uso do limite (todas as faixas), etapa de uso, cidades e convênios.
  */
+const perfilDetalheQuery = z.object({
+  cidade: z.string().min(1).max(120).optional(),
+  de: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  ate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+});
+
 router.get("/perfis-renda/:perfil", async (req, res) => {
   const perfil = String(req.params.perfil).toUpperCase();
   if (!isPerfilRenda(perfil)) return res.status(404).json({ error: "Perfil inexistente" });
+  const q = perfilDetalheQuery.safeParse(req.query);
+  if (!q.success) return res.status(400).json({ error: "Parâmetros inválidos" });
   const { tenantId } = req.user!;
+  const { cidade, de, ate } = q.data;
   const r = limiteRange(perfil);
-  const base = { tenantId, limiteTotal: r.lte === undefined ? { gt: r.gt } : { gt: r.gt, lte: r.lte } };
-  const raw = await tenantRaw.query<Array<{ etapa: string; n: bigint }>>(
-    `SELECT ${ETAPA_CASE_SQL} AS etapa, COUNT(*)::bigint AS n
-     FROM "Client" WHERE "tenantId" = $1 AND "limiteTotal" > $2::numeric ${r.lte === undefined ? "" : "AND \"limiteTotal\" <= $3::numeric"}
-     GROUP BY 1`,
-    ...(r.lte === undefined ? [tenantId, r.gt] : [tenantId, r.gt, r.lte])
+  const faixaLimite = r.lte === undefined ? { gt: r.gt } : { gt: r.gt, lte: r.lte };
+  const base = { tenantId, limiteTotal: faixaLimite, ...(cidade ? { cidade } : {}) };
+
+  // SQL cru: parâmetros $1 tenant, $2 limite mínimo, $3 limite máximo (ou null), $4 cidade (ou null)
+  const params: unknown[] = [tenantId, r.gt, r.lte ?? null, cidade ?? null];
+  const filtroCliente = `c."tenantId" = $1 AND c."limiteTotal" > $2::numeric AND ($3::numeric IS NULL OR c."limiteTotal" <= $3::numeric) AND ($4::text IS NULL OR c."cidade" = $4::text)`;
+  const etapaRows = tenantRaw.query<Array<{ etapa: string; n: bigint }>>(
+    `SELECT ${ETAPA_CASE_SQL.replace(/"(ultimoUsoReal|usosTotal|usosUltimos90d)"/g, 'c."$1"')} AS etapa, COUNT(*)::bigint AS n FROM "Client" c WHERE ${filtroCliente} GROUP BY 1`,
+    ...params
   );
-  const [total, agg, porFaixa, porCidade, porConvenio, noTeto, comSaldo, autorizados] = await Promise.all([
+
+  // Uso no período (extrato): só antecipação e compra à vista. Dias em Brasília (UTC-3).
+  const periodo = de || ate
+    ? {
+        de: de ?? null,
+        ate: ate ?? null,
+      }
+    : null;
+  const usoSql = `FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
+    WHERE ${filtroCliente} AND ${USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"')}
+      AND ($5::date IS NULL OR (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date >= $5::date)
+      AND ($6::date IS NULL OR (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date <= $6::date)`;
+  const usoParams = [...params, de ?? null, ate ?? null];
+  const usoResumo = tenantRaw.query<Array<{ clientes: bigint; usos: bigint; valor: string | null; juros: string | null }>>(
+    `SELECT COUNT(DISTINCT p."clientId")::bigint AS clientes, COUNT(*)::bigint AS usos,
+            COALESCE(SUM(p."valorPrincipal"),0)::text AS valor,
+            COALESCE(SUM(p."juros") FILTER (WHERE p."tipo" ~* '^\\s*d[eé]bito\\s+pix'),0)::text AS juros
+     ${usoSql}`,
+    ...usoParams
+  );
+  const usoSerie = tenantRaw.query<Array<{ dia: string; usos: bigint; clientes: bigint }>>(
+    `SELECT to_char((p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS dia,
+            COUNT(*)::bigint AS usos, COUNT(DISTINCT p."clientId")::bigint AS clientes
+     ${usoSql} GROUP BY 1 ORDER BY 1`,
+    ...usoParams
+  );
+
+  const [total, agg, porFaixa, porCidade, cidadesDisp, porConvenio, noTeto, comSaldo, autorizados, etapaRaw, resumo, serie] = await Promise.all([
     prisma.client.count({ where: base }),
     prisma.client.aggregate({ where: base, _avg: { limiteTotal: true }, _sum: { limiteTotal: true, valorUtilizado: true, saldoDisponivel: true } }),
     prisma.client.groupBy({ by: ["faixaUso"], where: base, _count: true }),
     prisma.client.groupBy({ by: ["cidade"], where: { ...base, cidade: { not: null } }, _count: true, orderBy: { _count: { cidade: "desc" } }, take: 10 }),
+    prisma.client.groupBy({ by: ["cidade"], where: { tenantId, limiteTotal: faixaLimite, cidade: { not: null } }, _count: true, orderBy: { _count: { cidade: "desc" } }, take: 100 }),
     prisma.client.groupBy({ by: ["empresaConveniada"], where: { ...base, empresaConveniada: { not: null } }, _count: true, orderBy: { _count: { empresaConveniada: "desc" } }, take: 10 }),
     prisma.client.count({ where: { ...base, limiteTotal: 2000 } }),
     prisma.client.count({ where: { ...base, saldoDisponivel: { gte: 10 } } }),
     prisma.client.count({ where: { ...base, autorizacaoComunicacao: true, optOutAt: null } }),
+    etapaRows,
+    usoResumo,
+    usoSerie,
   ]);
   const etapas: Record<string, number> = {};
-  for (const e of raw) etapas[e.etapa] = Number(e.n);
+  for (const e of etapaRaw) etapas[e.etapa] = Number(e.n);
   const faixas: Record<string, number> = {};
   for (const f of porFaixa) faixas[f.faixaUso] = f._count;
+  const u = resumo[0];
   res.json({
     perfil,
     label: PERFIL_LABELS[perfil],
+    filtros: { cidade: cidade ?? null, de: de ?? null, ate: ate ?? null },
     total,
     noTeto,
     comSaldo,
@@ -834,7 +880,17 @@ router.get("/perfis-renda/:perfil", async (req, res) => {
     faixas,
     etapas,
     cidades: porCidade.map((c) => ({ cidade: c.cidade as string, count: c._count })),
+    cidadesDisponiveis: cidadesDisp.map((c) => ({ cidade: c.cidade as string, count: c._count })),
     convenios: porConvenio.map((c) => ({ convenio: c.empresaConveniada as string, count: c._count })),
+    // Uso no período (extrato de compras): vale para o recorte de cidade e as datas escolhidas
+    uso: {
+      periodo,
+      clientes: Number(u?.clientes ?? 0),
+      transacoes: Number(u?.usos ?? 0),
+      valorMovimentado: Number(u?.valor ?? 0),
+      lucroJuros: Number(u?.juros ?? 0),
+      serie: serie.map((d) => ({ dia: d.dia, usos: Number(d.usos), clientes: Number(d.clientes) })),
+    },
   });
 });
 
