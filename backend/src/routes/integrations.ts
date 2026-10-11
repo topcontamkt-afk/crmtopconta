@@ -10,6 +10,7 @@ import { env } from "../config/env";
 import { withCrossTenantAccess, runWithTenantContextAsync } from "../config/tenantGuard";
 import { applyTemplateEvent } from "../services/whatsappTemplateSync";
 import { parseTemplateEvents, parseWebhookPayload } from "../services/whatsappPayload";
+import { nextEventStatus } from "../services/whatsappPayload";
 import { applyOutboundStatus } from "../services/whatsappReply";
 import { getOrCacheMessageMedia } from "../services/whatsappMedia";
 import { storeInboundMessage } from "../services/whatsappInbox";
@@ -173,7 +174,7 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
     for (const entry of entries) {
       for (const change of entry.changes || []) {
         for (const status of change.value?.statuses || []) {
-          await applyStatusUpdate(status.id, status.status, status.timestamp);
+          await applyStatusUpdate(status.id, status.status, status.timestamp, status.errors?.[0] ? `${status.errors[0].code ?? ""} ${status.errors[0].title ?? status.errors[0].message ?? ""}`.trim() : null);
         }
       }
     }
@@ -285,27 +286,26 @@ router.post("/webhooks/sms/:provider", webhookLimiter, express.urlencoded({ exte
   res.sendStatus(200);
 });
 
-async function applyStatusUpdate(providerMsgId: string, providerStatus: string, timestamp?: string) {
-  const event = await prisma.messageEvent.findFirst({ where: { providerMsgId } });
-  if (!event) return; // idempotência: evento desconhecido/duplicado é ignorado silenciosamente
+async function applyStatusUpdate(providerMsgId: string, providerStatus: string, timestamp?: string, errorText?: string | null) {
+  // Cross-tenant de propósito: o webhook é público e a única chave é o id da mensagem na Meta (único).
+  // Sem isso a RLS (MessageEvent só enxerga o tenant da sessão) escondia a linha e o status nunca atualizava.
+  await withCrossTenantAccess(async () => {
+    const event = await prisma.messageEvent.findFirst({ where: { providerMsgId } });
+    if (!event) return; // idempotência: evento desconhecido/duplicado é ignorado silenciosamente
 
-  const map: Record<string, string> = {
-    sent: "ENVIADO",
-    delivered: "ENTREGUE",
-    read: "LIDO",
-    replied: "RESPONDIDO",
-    failed: "FALHA",
-    undelivered: "FALHA",
-  };
-  const status = map[providerStatus?.toLowerCase()] || event.status;
+    const next = nextEventStatus(event.status, providerStatus);
+    if (!next) return;
+    const quando = timestamp && Number.isFinite(Number(timestamp)) ? new Date(Number(timestamp) * 1000) : new Date();
 
-  await prisma.messageEvent.update({
-    where: { id: event.id },
-    data: {
-      status: status as any,
-      deliveredAt: status === "ENTREGUE" ? new Date() : event.deliveredAt,
-      respondedAt: status === "RESPONDIDO" ? new Date() : event.respondedAt,
-    },
+    await prisma.messageEvent.update({
+      where: { id: event.id },
+      data: {
+        status: next as any,
+        deliveredAt: (next === "ENTREGUE" || next === "LIDO") && !event.deliveredAt ? quando : event.deliveredAt,
+        respondedAt: next === "RESPONDIDO" ? quando : event.respondedAt,
+        error: next === "FALHA" ? errorText ?? event.error ?? "Falha na entrega" : event.error,
+      },
+    });
   });
 }
 

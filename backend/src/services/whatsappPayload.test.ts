@@ -1,4 +1,4 @@
-import { isOptOutMessage, janelaAte, parseWebhookPayload, phoneCandidates, previewOf } from "./whatsappPayload";
+import { nextEventStatus, isOptOutMessage, janelaAte, parseWebhookPayload, phoneCandidates, previewOf } from "./whatsappPayload";
 
 const wrap = (value: any) => ({ entry: [{ changes: [{ field: "messages", value }] }] });
 const meta = { phone_number_id: "1055" };
@@ -111,5 +111,24 @@ describe("previewOf e janela de 24 horas", () => {
     const t = new Date("2026-10-10T12:00:00Z");
     expect(janelaAte(t)!.toISOString()).toBe("2026-10-11T12:00:00.000Z");
     expect(janelaAte(null)).toBeNull();
+  });
+});
+
+describe("nextEventStatus (status da Meta nas mensagens de campanha)", () => {
+  it("avança: enviado → entregue → lido", () => {
+    expect(nextEventStatus("ENVIADO", "delivered")).toBe("ENTREGUE");
+    expect(nextEventStatus("ENTREGUE", "read")).toBe("LIDO");
+  });
+  it("não volta quando o webhook chega fora de ordem", () => {
+    expect(nextEventStatus("LIDO", "delivered")).toBeNull();
+    expect(nextEventStatus("RESPONDIDO", "read")).toBeNull();
+  });
+  it("falha vale, mas não depois de o cliente ter respondido", () => {
+    expect(nextEventStatus("ENVIADO", "failed")).toBe("FALHA");
+    expect(nextEventStatus("RESPONDIDO", "failed")).toBeNull();
+    expect(nextEventStatus("FALHA", "delivered")).toBe("ENTREGUE");
+  });
+  it("status desconhecido é ignorado", () => {
+    expect(nextEventStatus("ENVIADO", "typing")).toBeNull();
   });
 });

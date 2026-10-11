@@ -227,3 +227,18 @@ export function parseTemplateEvents(body: any): TemplateEvent[] {
   }
   return out;
 }
+
+const EVENT_RANK: Record<string, number> = { FILA: 0, ENVIADO: 1, ENTREGUE: 2, LIDO: 3, RESPONDIDO: 4 };
+
+/**
+ * Próximo status de uma mensagem de CAMPANHA a partir do status da Meta: só avança (a Meta pode entregar
+ * "delivered" depois de "read"; e quem já respondeu não volta para "entregue"). Falha vale, exceto depois de resposta.
+ */
+export function nextEventStatus(current: string, providerStatus: string): string | null {
+  const map: Record<string, string> = { sent: "ENVIADO", delivered: "ENTREGUE", read: "LIDO", replied: "RESPONDIDO", failed: "FALHA", undelivered: "FALHA" };
+  const incoming = map[(providerStatus ?? "").toLowerCase()];
+  if (!incoming) return null;
+  if (incoming === "FALHA") return current === "RESPONDIDO" || current === "FALHA" ? null : "FALHA";
+  if (current === "FALHA") return incoming; // a Meta pode corrigir uma falha transitória
+  return (EVENT_RANK[current] ?? 0) >= EVENT_RANK[incoming] ? null : incoming;
+}
