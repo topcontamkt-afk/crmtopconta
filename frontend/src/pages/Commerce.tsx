@@ -70,6 +70,8 @@ export default function Commerce() {
   const canEdit = user?.role === "ADMIN" || user?.role === "OPERATOR";
 
   const [dias, setDias] = useState(0);
+  const [cidades, setCidades] = useState<string[]>([]); // chaves das cidades escolhidas (vazio = todas)
+  const [opcoesCidade, setOpcoesCidade] = useState<{ chave: string; nome: string; clientes: number }[]>([]);
   const [data, setData] = useState<CategoriasResponse | null>(null);
   const [lojistas, setLojistas] = useState<Lojista[]>([]);
   const [selecionadas, setSelecionadas] = useState<string[]>([]);
@@ -85,10 +87,17 @@ export default function Commerce() {
   const [mensagemEditada, setMensagemEditada] = useState(false);
   const editadaRef = useRef(false); // espelho do estado para o efeito não refazer a busca ao editar o texto
 
+  const cidadeQs = cidades.length ? `&cidades=${encodeURIComponent(cidades.join("|"))}` : "";
+
+  // As cidades listadas dependem só do período (não do filtro de cidade), para dar para marcar mais de uma.
+  useEffect(() => {
+    api<{ chave: string; nome: string; clientes: number }[]>(`/purchases/cidades?days=${dias}`).then(setOpcoesCidade).catch(() => setOpcoesCidade([]));
+  }, [dias]);
+
   const load = useCallback(() => {
     Promise.all([
-      api<CategoriasResponse>(`/purchases/categories?days=${dias}`),
-      api<Lojista[]>(`/purchases/merchants?days=${dias}`),
+      api<CategoriasResponse>(`/purchases/categories?days=${dias}${cidadeQs}`),
+      api<Lojista[]>(`/purchases/merchants?days=${dias}${cidadeQs}`),
     ])
       .then(([c, l]) => {
         setData(c);
@@ -96,7 +105,7 @@ export default function Commerce() {
         setError(null);
       })
       .catch((e) => setError(e.message));
-  }, [dias]);
+  }, [dias, cidadeQs]);
 
   useEffect(load, [load]);
 
@@ -112,7 +121,7 @@ export default function Commerce() {
     }
     let cancelado = false;
     setCarregandoAud(true);
-    api<Audiencia>(`/purchases/audiencia?categorias=${selecionadas.join(",")}&days=${dias}&minCompras=${freq}`)
+    api<Audiencia>(`/purchases/audiencia?categorias=${selecionadas.join(",")}&days=${dias}&minCompras=${freq}${cidadeQs}`)
       .then((r) => {
         if (cancelado) return;
         setAud(r);
@@ -125,7 +134,7 @@ export default function Commerce() {
     return () => {
       cancelado = true;
     };
-  }, [selecionadas, dias, freq]);
+  }, [selecionadas, dias, freq, cidadeQs]);
 
   function criarCampanha() {
     if (!aud || aud.total === 0) return;
@@ -186,6 +195,33 @@ export default function Commerce() {
           ))}
         </div>
       </div>
+
+      {opcoesCidade.length > 0 && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
+            <strong style={{ fontSize: 13 }}>Cidade do cliente</strong>
+            <span className="seg-hint" style={{ margin: 0 }}>
+              O cliente só usa o cartão no comércio da própria cidade; marque uma ou mais para recortar os números e o público da campanha.
+            </span>
+          </div>
+          <div className="chip-group" style={{ marginTop: 8 }}>
+            <label className="chip">
+              <input type="checkbox" checked={cidades.length === 0} onChange={() => setCidades([])} />
+              <span>Todas as cidades</span>
+            </label>
+            {opcoesCidade.map((c) => (
+              <label key={c.chave} className="chip">
+                <input
+                  type="checkbox"
+                  checked={cidades.includes(c.chave)}
+                  onChange={() => setCidades((l) => (l.includes(c.chave) ? l.filter((x) => x !== c.chave) : [...l, c.chave]))}
+                />
+                <span>{c.nome} · {intFmt.format(c.clientes)}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
 
       {error && <div className="error-text">{error}</div>}
 

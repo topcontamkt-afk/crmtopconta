@@ -257,7 +257,9 @@ lojista e alimentam `Client.dataUltimaUtilizacao`. A planilha não traz categori
 do lojista (`services/merchantCategories.ts`) e é editável em /commerce (`categorySource=MANUAL` nunca é
 sobrescrito). Os valores desta aba vêm no formato dos EUA (`R$ 1,591.00`), por isso `parseMoney` deduz o
 separador decimal. Segmentos e campanhas filtram por `categoriasCompra`/`lojistaIds`/`compraNosUltimosDias`
-(`services/segments.ts`).
+(`services/segments.ts`). **Filtro por cidade em /commerce:** o cliente só usa o cartão no comércio da própria cidade, então vale a cidade do CLIENTE
+(`Client.cidade`); nome de empresa/vazio na coluna vira "Sem cidade" (`services/cidades.ts`, regra espelhada em SQL por `cidadeKeySql`). Os endpoints
+`/purchases/categories|merchants|audiencia` aceitam `cidades` (chaves separadas por `|`) e `GET /purchases/cidades` lista as opções.
 
 **SQL cru e RLS:** `prisma.$queryRaw*` não passa pelo hook de tenant e, sob o role `app_runtime`, não
 enxerga nenhuma linha. Use sempre `tenantRaw.query/execute` (`config/db.ts`), que abre a transaction com
