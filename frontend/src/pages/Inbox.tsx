@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { api } from "../api/client";
+import { api, getToken } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 
 interface Status {
@@ -42,6 +42,76 @@ const hora = (iso: string) => {
   const hoje = new Date();
   return d.toDateString() === hoje.toDateString() ? d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
 };
+const urlsMidia = new Map<string, string>(); // mensagem -> URL local do arquivo (vale na sessão)
+
+/** Busca o arquivo com o token (um <img src> não consegue enviar Authorization) e devolve uma URL local. */
+async function carregarMidia(id: string): Promise<string> {
+  const pronto = urlsMidia.get(id);
+  if (pronto) return pronto;
+  const token = getToken();
+  const r = await fetch(`/api/inbox/media/${id}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error(typeof j.error === "string" ? j.error : "Mídia indisponível.");
+  }
+  const url = URL.createObjectURL(await r.blob());
+  urlsMidia.set(id, url);
+  return url;
+}
+
+/** Imagem, figurinha, áudio, vídeo e documento (PDF abre em nova aba). */
+function Midia({ m, onAbrirImagem }: { m: Mensagem; onAbrirImagem: (url: string) => void }) {
+  const [url, setUrl] = useState<string | null>(urlsMidia.get(m.id) ?? null);
+  const [erro, setErro] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const automatica = ["image", "sticker", "audio", "video"].includes(m.tipo);
+
+  const baixar = useCallback(() => {
+    setBusy(true);
+    setErro(null);
+    return carregarMidia(m.id)
+      .then(setUrl)
+      .catch((e) => setErro(e.message))
+      .finally(() => setBusy(false));
+  }, [m.id]);
+
+  useEffect(() => {
+    if (automatica && !url && !erro) baixar();
+  }, [automatica, url, erro, baixar]);
+
+  if (erro) {
+    return (
+      <div className="media">
+        {MIDIA_ROTULO[m.tipo] ?? "Anexo"}: {erro}{" "}
+        <button type="button" className="btn secondary" style={{ padding: "2px 8px", fontSize: 11 }} onClick={baixar}>Tentar de novo</button>
+      </div>
+    );
+  }
+  if (!url) {
+    return automatica ? (
+      <div className="media">{busy ? "Carregando…" : MIDIA_ROTULO[m.tipo]}</div>
+    ) : (
+      <div className="media">
+        {MIDIA_ROTULO[m.tipo] ?? "Anexo"}{m.midia?.nomeArquivo ? ` · ${m.midia.nomeArquivo}` : ""}
+        <button type="button" className="btn secondary" style={{ padding: "2px 8px", fontSize: 11 }} disabled={busy} onClick={baixar}>{busy ? "Carregando…" : "Carregar"}</button>
+      </div>
+    );
+  }
+  if (m.tipo === "image" || m.tipo === "sticker") {
+    return <img className={m.tipo === "sticker" ? "wa-sticker" : "wa-img"} src={url} alt={m.texto ?? "Imagem recebida"} onClick={() => onAbrirImagem(url)} />;
+  }
+  if (m.tipo === "audio") return <audio controls preload="metadata" src={url} style={{ maxWidth: "100%" }} />;
+  if (m.tipo === "video") return <video controls preload="metadata" src={url} style={{ maxWidth: "100%", borderRadius: 8 }} />;
+  const nome = m.midia?.nomeArquivo ?? "documento";
+  return (
+    <div className="media" style={{ flexWrap: "wrap" }}>
+      📄 {nome}
+      <a className="btn secondary" style={{ padding: "2px 8px", fontSize: 11, textDecoration: "none" }} href={url} target="_blank" rel="noreferrer">Abrir</a>
+      <a className="btn secondary" style={{ padding: "2px 8px", fontSize: 11, textDecoration: "none" }} href={url} download={nome}>Baixar</a>
+    </div>
+  );
+}
+
 const MIDIA_ROTULO: Record<string, string> = { image: "📷 Imagem", audio: "🎤 Áudio", video: "🎬 Vídeo", document: "📄 Documento", sticker: "Figurinha" };
 
 function tempoRestante(iso: string | null): string {
@@ -135,6 +205,7 @@ export default function Inbox() {
   const [thread, setThread] = useState<Thread | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [mostrarConexao, setMostrarConexao] = useState(false);
+  const [imagemAberta, setImagemAberta] = useState<string | null>(null);
   const fim = useRef<HTMLDivElement>(null);
   const ultimoTotal = useRef(0);
 
@@ -215,6 +286,12 @@ export default function Inbox() {
       )}
       {erro && <div className="error-text">{erro}</div>}
 
+      {imagemAberta && (
+        <div className="wa-lightbox" onClick={() => setImagemAberta(null)} role="dialog" aria-label="Imagem ampliada">
+          <img src={imagemAberta} alt="Imagem ampliada" />
+        </div>
+      )}
+
       <div className="inbox">
         <div className="inbox-list">
           <div className="inbox-list-head">
@@ -274,9 +351,7 @@ export default function Inbox() {
               <div className="inbox-msgs">
                 {thread.mensagens.map((m) => (
                   <div key={m.id} className={`bubble ${m.direcao === "ENTRADA" ? "in" : "out"}`}>
-                    {m.midia && (
-                      <div className="media">{MIDIA_ROTULO[m.tipo] ?? "Anexo"}{m.midia.nomeArquivo ? ` · ${m.midia.nomeArquivo}` : ""} <em>(visualização na próxima fase)</em></div>
-                    )}
+                    {m.midia && <Midia m={m} onAbrirImagem={setImagemAberta} />}
                     {m.texto && <div>{m.texto}</div>}
                     {!m.texto && !m.midia && <em style={{ color: "var(--text-muted)" }}>[{m.tipo}]</em>}
                     <time>{new Date(m.em).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</time>

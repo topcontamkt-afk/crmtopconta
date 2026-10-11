@@ -11,6 +11,7 @@ import { InboundMessage, isOptOutMessage, phoneCandidates, previewOf } from "./w
  */
 export interface StoreResult {
   stored: boolean; // false = mensagem duplicada (a Meta reenviou o webhook)
+  messageId: string | null;
   conversationId: string;
   clientId: string | null;
   optedOut: boolean;
@@ -55,8 +56,9 @@ export async function storeInboundMessage(
   });
 
   // 3) mensagem — duplicata (mesmo wamid) não conta de novo
+  let messageId: string | null = null;
   try {
-    await prisma.waMessage.create({
+    const created = await prisma.waMessage.create({
       data: {
         tenantId,
         conversationId: conversation.id,
@@ -70,9 +72,10 @@ export async function storeInboundMessage(
         timestamp: m.timestamp,
       },
     });
+    messageId = created.id;
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
-      return { stored: false, conversationId: conversation.id, clientId: conversation.clientId, optedOut: false };
+      return { stored: false, messageId: null, conversationId: conversation.id, clientId: conversation.clientId, optedOut: false };
     }
     throw e;
   }
@@ -118,5 +121,5 @@ export async function storeInboundMessage(
     optedOut = true;
   }
 
-  return { stored: true, conversationId: conversation.id, clientId: client?.id ?? null, optedOut };
+  return { stored: true, messageId, conversationId: conversation.id, clientId: client?.id ?? null, optedOut };
 }

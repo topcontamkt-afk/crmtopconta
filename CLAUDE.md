@@ -218,7 +218,7 @@ janela de 24h) e `services/whatsappInbox.ts` (grava `Conversation` + `WaMessage`
 cliente pelo telefone, marca a `MessageEvent` da campanha como RESPONDIDO e registra opt-out + auditoria).
 `routes/inbox.ts`: `/status`, `PUT /account` (ADMIN), `/conversations`, `/conversations/:id/messages`, `/read`;
 telefones sempre mascarados. Tela `/inbox` (leitura, atualização por polling de 5s). A janela de 24h conta de
-`Conversation.lastInboundAt`. O envio de respostas/templates e o download de mídia ainda NÃO existem (Fases 2–4): hoje
+`Conversation.lastInboundAt`. **Fase 2 (mídia):** `services/whatsappMedia.ts` busca o arquivo na Graph API em 2 passos (`GET /{media-id}` → URL temporária → bytes, com `WHATSAPP_ACCESS_TOKEN`) e guarda a cópia em `WaMediaBlob` (limite de 4 MB: a Vercel não devolve respostas maiores; o webhook já guarda ao receber e a tela tenta de novo se falhar). `GET /api/inbox/media/:messageId` serve o arquivo autenticado (só tipos seguros abrem inline, resto baixa; `nosniff` + CSP restritiva); o front busca com o token e mostra por URL local (imagem com zoom, áudio/vídeo com player, PDF abre/baixa). SQL: `backend/prisma/sql/2026-10-whatsapp-media.sql`. O envio de respostas/templates ainda NÃO existe (Fases 3–4): hoje
 `WhatsAppCloudAdapter` só envia texto livre, que a Meta recusa fora da janela. SQL: `backend/prisma/sql/2026-10-whatsapp-inbox.sql`
 (inclui RLS e GRANT; rodar antes do deploy). Webhook e token da Meta: ver o roteiro da Fase 0.
 

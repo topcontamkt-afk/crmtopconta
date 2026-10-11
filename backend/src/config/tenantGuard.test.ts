@@ -175,6 +175,7 @@ describe("TENANT_SCOPED_MODELS", () => {
         "WhatsAppAccount",
         "Conversation",
         "WaMessage",
+        "WaMediaBlob",
       ].sort()
     );
   });

@@ -9,6 +9,7 @@ import { exportTenantSummaryToSheet } from "../services/biExport";
 import { env } from "../config/env";
 import { withCrossTenantAccess, runWithTenantContextAsync } from "../config/tenantGuard";
 import { parseWebhookPayload } from "../services/whatsappPayload";
+import { getOrCacheMessageMedia } from "../services/whatsappMedia";
 import { storeInboundMessage } from "../services/whatsappInbox";
 import { verifyTwilioSignature, verifyWhatsAppSignature } from "../services/webhookAuth";
 import { webhookLimiter } from "../middleware/rateLimit";
@@ -193,7 +194,16 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
               console.warn(`[webhooks/whatsapp] phone_number_id ${m.phoneNumberId} sem conta cadastrada — mensagem ignorada`);
               continue;
             }
-            await runWithTenantContextAsync(account.tenantId, () => storeInboundMessage(prisma, account.tenantId, account.id, m));
+            await runWithTenantContextAsync(account.tenantId, async () => {
+              const r = await storeInboundMessage(prisma, account.tenantId, account.id, m);
+              // Guarda a mídia já agora (a Meta só a mantém por tempo limitado). Se falhar, a tela
+              // tenta de novo na primeira visualização — nunca derruba o recebimento da mensagem.
+              if (r.stored && r.messageId && m.mediaId && process.env.WHATSAPP_ACCESS_TOKEN) {
+                await getOrCacheMessageMedia(prisma, account.tenantId, { id: r.messageId, mediaId: m.mediaId }).catch((e) =>
+                  console.warn(`[webhooks/whatsapp] mídia ${m.mediaId} não guardada agora: ${e.message}`)
+                );
+              }
+            });
           } catch (e) {
             console.error("[webhooks/whatsapp] falha ao gravar mensagem recebida:", e);
           }

@@ -6,6 +6,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { maskPhone } from "../services/masking";
 import { classificarPerfil } from "../services/rendaPerfil";
+import { getOrCacheMessageMedia, isInlineSafeMime, MediaError, MEDIA_MAX_BYTES } from "../services/whatsappMedia";
 import { janelaAte } from "../services/whatsappPayload";
 
 /**
@@ -187,6 +188,45 @@ router.post("/conversations/:id/read", requireRole("ADMIN", "OPERATOR", "ANALYST
   if (!conversa) return res.status(404).json({ error: "Conversa não encontrada" });
   await prisma.conversation.update({ where: { id: conversa.id }, data: { unreadCount: 0 } });
   res.json({ ok: true });
+});
+
+/**
+ * GET /api/inbox/media/:messageId — o arquivo de uma mensagem (imagem, áudio, PDF...). Autenticado:
+ * o front busca com o token e mostra por URL local. Só tipos seguros abrem no navegador; o resto
+ * baixa. Sempre com `nosniff` e CSP restritiva, porque o conteúdo vem de terceiros.
+ */
+router.get("/media/:messageId", async (req, res) => {
+  const { tenantId } = req.user!;
+  const msg = await prisma.waMessage.findFirst({
+    where: { id: req.params.messageId, tenantId },
+    select: { id: true, mediaId: true, mediaFilename: true },
+  });
+  if (!msg || !msg.mediaId) return res.status(404).json({ error: "Mídia não encontrada" });
+
+  try {
+    const media = await getOrCacheMessageMedia(prisma, tenantId, msg);
+    const inline = isInlineSafeMime(media.mime);
+    const nome = (msg.mediaFilename || `arquivo-${msg.id.slice(0, 8)}`).replace(/[^\w.\- ]+/g, "_");
+    res.setHeader("Content-Type", inline ? media.mime : "application/octet-stream");
+    res.setHeader("Content-Disposition", `${inline ? "inline" : "attachment"}; filename="${nome}"`);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.setHeader("Content-Length", String(media.data.length));
+    return res.status(200).end(media.data);
+  } catch (e) {
+    if (e instanceof MediaError) {
+      const status = e.code === "SEM_TOKEN" ? 503 : e.code === "MUITO_GRANDE" ? 413 : 502;
+      const texto =
+        e.code === "SEM_TOKEN"
+          ? "Configure WHATSAPP_ACCESS_TOKEN na Vercel para baixar mídias."
+          : e.code === "MUITO_GRANDE"
+            ? `Arquivo maior que ${MEDIA_MAX_BYTES / 1048576} MB: não dá para exibir aqui.`
+            : "Mídia indisponível (pode ter expirado na Meta).";
+      return res.status(status).json({ error: texto, codigo: e.code });
+    }
+    throw e;
+  }
 });
 
 export default router;

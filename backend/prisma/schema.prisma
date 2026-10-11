@@ -118,6 +118,7 @@ model Tenant {
   whatsAppAccounts   WhatsAppAccount[]
   conversations      Conversation[]
   waMessages         WaMessage[]
+  waMediaBlobs       WaMediaBlob[]
 }
 
 model User {
@@ -636,4 +637,19 @@ model WaMessage {
 
   @@unique([tenantId, wamid])
   @@index([conversationId, timestamp])
+}
+
+/// Cópia local da mídia recebida (a Meta só guarda por tempo limitado). Limitada a 4 MB porque a
+/// Vercel não devolve respostas maiores que ~4,5 MB; arquivos maiores não são guardados.
+model WaMediaBlob {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  messageId String   @unique
+  mime      String
+  size      Int
+  data      Bytes
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
 }

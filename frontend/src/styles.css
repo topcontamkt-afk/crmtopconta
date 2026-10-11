@@ -1006,3 +1006,8 @@ input, select, textarea {
 .inbox-chip.open { background: var(--success-soft); color: var(--success); }
 .inbox-chip.closed { background: var(--warning-soft); color: var(--warning); }
 @media (max-width: 800px) { .inbox { grid-template-columns: 1fr; height: auto; } .inbox-list { max-height: 320px; border-right: 0; border-bottom: 1px solid var(--border); } .inbox-msgs { min-height: 320px; } }
+
+.wa-img { display: block; max-width: 260px; max-height: 280px; border-radius: 8px; cursor: zoom-in; object-fit: cover; }
+.wa-sticker { display: block; width: 120px; height: 120px; object-fit: contain; }
+.wa-lightbox { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, 0.85); display: flex; align-items: center; justify-content: center; cursor: zoom-out; padding: 24px; }
+.wa-lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; }

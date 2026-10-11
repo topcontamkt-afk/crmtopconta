@@ -19,6 +19,7 @@ function makeFake(opts: { client?: any; duplicate?: boolean; evento?: any; lastI
       create: jest.fn(async (a: any) => {
         if (opts.duplicate) throw new Prisma.PrismaClientKnownRequestError("dup", { code: "P2002", clientVersion: "x" });
         calls.msgCreate.push(a);
+        return { id: "msg1" };
       }),
     },
     messageEvent: {
@@ -40,7 +41,7 @@ describe("storeInboundMessage", () => {
   it("grava a mensagem, liga ao cliente e conta como não lida", async () => {
     const { prisma, calls } = makeFake({ client: { id: "c1", nome: "Maria" } });
     const r = await storeInboundMessage(prisma, "t1", "acc1", msg());
-    expect(r).toMatchObject({ stored: true, clientId: "c1", optedOut: false });
+    expect(r).toMatchObject({ stored: true, messageId: "msg1", clientId: "c1", optedOut: false });
     expect(calls.msgCreate[0].data).toMatchObject({ tenantId: "t1", direction: "ENTRADA", wamid: "wamid.A", body: "Oi" });
     expect(calls.convUpdate[0].data.unreadCount).toEqual({ increment: 1 });
   });
