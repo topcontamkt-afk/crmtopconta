@@ -62,3 +62,38 @@ describe("bandFor", () => {
     expect(bandFor(70).band).toBe("SAUDAVEL");
   });
 });
+
+describe("computeRealHealth — nota por uso real", () => {
+  const base = { nuncaUsou: 0, recorrente: 0, ocasional: 0, emRisco: 0, inativo: 0, bloqueados: 0, total: 100, comLimite: 100 };
+  const { computeRealHealth } = require("./health");
+
+  it("sem clientes com limite não tem nota", () => {
+    expect(computeRealHealth({ ...base, comLimite: 0 })).toBeNull();
+  });
+
+  it("base que nunca usou o cartão é crítica, mesmo 100% ativa e sem bloqueio", () => {
+    const r = computeRealHealth({ ...base, nuncaUsou: 100 });
+    expect(r.score).toBe(10); // só a regularidade (10 pontos) pontua
+    expect(r.band).toBe("CRITICO");
+  });
+
+  it("bate todas as metas: nota 100", () => {
+    // 60 já usaram: 15 recorrentes, 15 ocasionais, 30 em risco; 40 nunca usaram
+    const r = computeRealHealth({ ...base, nuncaUsou: 40, recorrente: 15, ocasional: 15, emRisco: 30 });
+    expect(r.components.find((c: any) => c.key === "alcance").valor).toBe(60);
+    expect(r.components.find((c: any) => c.key === "usoRecente").valor).toBe(30);
+    expect(r.components.find((c: any) => c.key === "recorrencia").valor).toBe(15);
+    expect(r.score).toBe(100);
+  });
+
+  it("retenção cai quando quem usou ficou inativo", () => {
+    const r = computeRealHealth({ ...base, nuncaUsou: 50, inativo: 50 });
+    expect(r.components.find((c: any) => c.key === "retencao").nota).toBe(0);
+    expect(r.components.find((c: any) => c.key === "usoRecente").nota).toBe(0);
+  });
+
+  it("bloqueados reduzem só a regularidade", () => {
+    const r = computeRealHealth({ ...base, nuncaUsou: 100, bloqueados: 50 });
+    expect(r.components.find((c: any) => c.key === "regularidade").nota).toBe(50);
+  });
+});

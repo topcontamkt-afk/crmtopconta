@@ -76,6 +76,8 @@ interface Overview {
     band: "SAUDAVEL" | "ATENCAO" | "CRITICO";
     bandLabel: string;
     delta: Delta;
+    modelo?: "USO_REAL" | "ESTIMADO";
+    aviso?: string | null;
     components: { key: string; label: string; peso: number; nota: number; valor: number; meta: number | null }[];
   } | null;
   funil: { key: string; label: string; count: number }[];
@@ -659,8 +661,15 @@ function HealthCard({ saude }: { saude: Overview["saude"] }) {
           </div>
           <DeltaChip delta={saude.delta} kind="abs" />
           <p className="pd-card-sub" style={{ margin: "6px 0 0" }}>
-            Combina ativação, alcance, uso do limite e regularidade.
+            {saude.modelo === "USO_REAL"
+              ? "Nota por uso real do cartão (extrato de compras): alcance, uso recente, recorrência, retenção e regularidade."
+              : "Nota estimada pelo saldo: ativação, alcance, uso do limite e regularidade."}
           </p>
+          {saude.aviso && (
+            <p className="pd-hint" style={{ color: COLOR.warning }}>
+              {saude.aviso} <Link to="/imports">Importações</Link>
+            </p>
+          )}
         </div>
       </div>
       <div className="pd-label" style={{ marginTop: 14 }}>

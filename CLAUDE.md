@@ -199,6 +199,15 @@ extrato de compras está em dia (limite 3 dias; `GET /api/dashboard/frescor`, av
 O gatilho de automação `ETAPA_PERFIL` (condição `etapaUso`, `perfilRenda`, `comSaldo`) dispara por etapa/perfil e
 **não roda com extrato velho** ou ausente.
 
+### Nota de saúde por uso real
+
+`services/health.ts` tem duas notas. Com extrato de compras em dia (`dataFreshness.ts`), vale a **nota por uso real**
+(`computeRealHealth`, dados em `healthData.ts`): alcance 25 (meta 60% já usaram), uso recente 30 (meta 30% nos
+últimos 30 dias), recorrência 20 (meta 15%), retenção 15 (dos que usaram, % ainda ativos em 90 dias) e
+regularidade 10, só com clientes com limite. Sem extrato ou com extrato parado, cai na nota estimada pelo saldo e o
+dashboard avisa (`saude.modelo`/`saude.aviso`). `DashboardSnapshot.healthScore` guarda a nota real diária (SQL em
+`backend/prisma/sql/2026-10-health-score-real.sql`); a tendência e a variação só usam dias com nota real.
+
 ### Comércio credenciado (compras por categoria)
 
 A aba "Todas as Compras" da planilha (transações do cartão) entra por `POST /api/purchases/import`

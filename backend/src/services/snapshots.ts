@@ -1,5 +1,6 @@
 import { AppPrismaClient } from "../config/db";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
+import { loadRealHealth } from "./healthData";
 import { refreshUsageColumns } from "./usageRefresh";
 import { addDays, computeKpis, todayBrt } from "./dashboardMetrics";
 
@@ -22,7 +23,10 @@ export async function captureSnapshot(prisma: AppPrismaClient, tenantId: string,
     prisma.client.count({ where: { tenantId, encerradoEm: { gte: day, lt: nextDay } } }),
   ]);
 
+  const real = await loadRealHealth(prisma, tenantId, {}, kpis.bloqueados, kpis.totalClientes).catch(() => null);
+
   const data = {
+    healthScore: real?.real?.score ?? null,
     totalClientes: kpis.totalClientes,
     ativos: kpis.ativos,
     inativos: kpis.inativos,

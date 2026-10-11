@@ -9,6 +9,7 @@ import { prisma, tenantRaw } from "../config/db";
 import { requireAuth } from "../middleware/auth";
 import { FAIXA_LABELS } from "../services/usage";
 import { addDays, clientWhere, computeKpis, DashboardFilters, rawFilterSql, todayBrt } from "../services/dashboardMetrics";
+import { loadRealHealth } from "../services/healthData";
 import { computeHealth } from "../services/health";
 import { ensureTodaySnapshot } from "../services/snapshots";
 import { computeOpportunities, OPPORTUNITY_KEYS, OpportunityKey, opportunityAudience, suggestedMessage } from "../services/opportunities";
@@ -505,6 +506,10 @@ router.get("/overview", async (req, res) => {
     valorUtilizado: kpis.valorUtilizado,
   });
 
+  // Nota por uso real (extrato em dia); sem extrato confiável cai na nota estimada e avisa.
+  const realLoad = await loadRealHealth(prisma, tenantId, filters, kpis.bloqueados, total);
+  const usaReal = !!realLoad.real;
+
   // --- Histórico (snapshots) ---------------------------------------------------------------
   const series = snaps.map((s) => {
     const limite = Number(s.limiteTotal);
@@ -531,7 +536,8 @@ router.get("/overview", async (req, res) => {
       ativosPct: s.totalClientes > 0 ? Number(((s.ativos / s.totalClientes) * 100).toFixed(2)) : 0,
       usaramNoDia: s.usaramNoDia,
       encerradosNoDia: s.encerradosNoDia,
-      score: h?.score ?? null,
+      // Nota real só existe nos dias gravados com extrato em dia; misturar com a estimada enganaria a tendência.
+      score: usaReal ? s.healthScore ?? null : h?.score ?? null,
     };
   });
 
@@ -576,7 +582,9 @@ router.get("/overview", async (req, res) => {
     totalClientes: delta(total, bl?.totalClientes),
     inativos: delta(kpis.inativos, bl?.inativos),
     semUso: delta(kpis.semUso, bl?.semUso),
-    score: health && baselineHealth ? delta(health.score, baselineHealth.score) : null,
+    score: usaReal
+      ? realLoad.real && baselineSnap?.healthScore != null ? delta(realLoad.real.score, baselineSnap.healthScore) : null
+      : health && baselineHealth ? delta(health.score, baselineHealth.score) : null,
   };
 
   // --- Funil e oportunidades ---------------------------------------------------------------
@@ -711,7 +719,19 @@ router.get("/overview", async (req, res) => {
     baseline,
     historicoDisponivel: !hasFilters && snaps.length >= 2,
     series: hasFilters ? [] : series,
-    saude: health ? { ...health, delta: deltas.score } : null,
+    saude: realLoad.real
+      ? { ...realLoad.real, delta: deltas.score, modelo: "USO_REAL" as const, aviso: null }
+      : health
+        ? {
+            ...health,
+            delta: deltas.score,
+            modelo: "ESTIMADO" as const,
+            aviso:
+              realLoad.motivo === "EXTRATO_DESATUALIZADO"
+                ? "Nota estimada pelo saldo: o extrato de compras está parado. Atualize a planilha \"Todas as Compras\" para a nota por uso real."
+                : "Nota estimada pelo saldo: ainda não há extrato de compras importado. Com ele, a nota passa a medir o uso real.",
+          }
+        : null,
     funil,
     oportunidades,
     rankingCidades: rankingCidades.map((r) => ({ cidade: r.chave, count: r.count, ativos: r.ativos, valorUtilizado: r.valorUtilizado })),

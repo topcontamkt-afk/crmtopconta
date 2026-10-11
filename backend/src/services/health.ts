@@ -102,3 +102,75 @@ export function computeHealth(input: HealthInput): HealthResult | null {
   const { band, label } = bandFor(score);
   return { score, band, bandLabel: label, components };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Nota por USO REAL (extrato de compras). Substitui a nota estimada quando há extrato em dia.
+//
+// A nota estimada mede cadastro e saldo (ativação 100% sempre, "sem uso" pelo saldo do momento,
+// que varia com a folha). A nota real mede comportamento, a partir das etapas de uso (etapaUso.ts),
+// só com clientes COM limite (quem não tem limite é comércio credenciado e fica fora):
+//
+//  - Alcance (25): % que já usou (antecipação ou compra) no extrato, meta 60%.
+//  - Uso recente (30): % que usou nos últimos 30 dias (recorrente + ocasional), meta 30%.
+//  - Recorrência (20): % recorrente (3+ usos em 90 dias e uso nos últimos 30), meta 15%.
+//  - Retenção (15): entre quem já usou, % que ainda usou nos últimos 90 dias (sem meta).
+//  - Regularidade (10): 100 menos o % de clientes bloqueados.
+//
+// As metas são palpites iniciais, constantes para ajustar com a realidade do negócio.
+// ---------------------------------------------------------------------------------------------
+
+export const HEALTH_REAL_TARGETS = { alcance: 0.6, usoRecente: 0.3, recorrencia: 0.15 };
+export const HEALTH_REAL_WEIGHTS = { alcance: 25, usoRecente: 30, recorrencia: 20, retencao: 15, regularidade: 10 };
+
+export interface RealHealthInput {
+  /** clientes com limite (denominador de tudo, exceto regularidade) */
+  comLimite: number;
+  nuncaUsou: number;
+  recorrente: number;
+  ocasional: number;
+  emRisco: number;
+  inativo: number;
+  bloqueados: number;
+  /** total de clientes (denominador da regularidade) */
+  total: number;
+}
+
+export interface RealHealthComponent {
+  key: "alcance" | "usoRecente" | "recorrencia" | "retencao" | "regularidade";
+  label: string;
+  peso: number;
+  nota: number;
+  valor: number;
+  meta: number | null;
+}
+
+export interface RealHealthResult {
+  score: number;
+  band: HealthBand;
+  bandLabel: string;
+  components: RealHealthComponent[];
+}
+
+export function computeRealHealth(i: RealHealthInput): RealHealthResult | null {
+  if (!i.total || i.total <= 0 || i.comLimite <= 0) return null;
+  const jaUsou = i.recorrente + i.ocasional + i.emRisco + i.inativo;
+  const alcance = (jaUsou / i.comLimite) * 100;
+  const recente = ((i.recorrente + i.ocasional) / i.comLimite) * 100;
+  const recorrencia = (i.recorrente / i.comLimite) * 100;
+  const retencao = jaUsou > 0 ? ((i.recorrente + i.ocasional + i.emRisco) / jaUsou) * 100 : 0;
+  const regularidade = (1 - i.bloqueados / i.total) * 100;
+  const T = HEALTH_REAL_TARGETS;
+  const W = HEALTH_REAL_WEIGHTS;
+  const vs = (valor: number, meta: number) => round1(clamp((valor / (meta * 100)) * 100));
+
+  const components: RealHealthComponent[] = [
+    { key: "alcance", label: "Alcance (já usaram)", peso: W.alcance, valor: round1(clamp(alcance)), meta: T.alcance * 100, nota: vs(alcance, T.alcance) },
+    { key: "usoRecente", label: "Usaram nos últimos 30 dias", peso: W.usoRecente, valor: round1(clamp(recente)), meta: T.usoRecente * 100, nota: vs(recente, T.usoRecente) },
+    { key: "recorrencia", label: "Uso recorrente", peso: W.recorrencia, valor: round1(clamp(recorrencia)), meta: T.recorrencia * 100, nota: vs(recorrencia, T.recorrencia) },
+    { key: "retencao", label: "Retenção (usaram nos últimos 90 dias)", peso: W.retencao, valor: round1(clamp(retencao)), meta: null, nota: round1(clamp(retencao)) },
+    { key: "regularidade", label: "Regularidade", peso: W.regularidade, valor: round1(clamp(regularidade)), meta: null, nota: round1(clamp(regularidade)) },
+  ];
+  const score = Math.round(components.reduce((acc, c) => acc + (c.nota * c.peso) / 100, 0));
+  const { band, label } = bandFor(score);
+  return { score, band, bandLabel: label, components };
+}
