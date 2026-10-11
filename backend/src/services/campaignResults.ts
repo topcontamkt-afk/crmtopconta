@@ -326,7 +326,8 @@ export async function loadCampaignEvaluations(
   campaignId: string
 ): Promise<EventEvaluation[]> {
   const rawEvents = await prisma.messageEvent.findMany({
-    where: { campaignId, status: { in: [...SENT_STATUSES, "CONTROLE"] } },
+    // contato de lista manual ainda sem cliente na base não tem como ser medido (ver linkRecipients)
+    where: { campaignId, clientId: { not: null }, status: { in: [...SENT_STATUSES, "CONTROLE"] } },
     select: { id: true, clientId: true, variant: true, status: true, sentAt: true },
   });
 
@@ -338,10 +339,10 @@ export async function loadCampaignEvaluations(
   );
 
   const events: EvaluableEvent[] = [
-    ...treated.map((e) => ({ id: e.id, clientId: e.clientId, variant: e.variant, cohort: "TRATADO" as const, ref: e.sentAt! })),
+    ...treated.map((e) => ({ id: e.id, clientId: e.clientId!, variant: e.variant, cohort: "TRATADO" as const, ref: e.sentAt! })),
     ...controlRaw
       .filter((e) => controlRefs.has(e.id))
-      .map((e) => ({ id: e.id, clientId: e.clientId, variant: e.variant, cohort: "CONTROLE" as const, ref: controlRefs.get(e.id)! })),
+      .map((e) => ({ id: e.id, clientId: e.clientId!, variant: e.variant, cohort: "CONTROLE" as const, ref: controlRefs.get(e.id)! })),
   ];
   if (events.length === 0) return [];
 
@@ -394,6 +395,7 @@ export async function loadCampaignEvaluations(
     }
     for (const o of others) {
       if (!o.sentAt) continue;
+      if (!o.clientId) continue;
       const list = otherRefsByClient.get(o.clientId) ?? [];
       list.push(o.sentAt);
       otherRefsByClient.set(o.clientId, list);

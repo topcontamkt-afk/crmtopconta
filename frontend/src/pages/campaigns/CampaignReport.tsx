@@ -58,6 +58,7 @@ const SALDO_LABEL: Record<SaldoGroup, string> = {
 };
 
 interface Report {
+  manual?: boolean;
   campaignId: string;
   isSandbox: boolean;
   audienceCount: number | null;
@@ -242,6 +243,72 @@ function SaldoBreakdown({ resultados }: { resultados: Resultados }) {
   );
 }
 
+
+interface Destinatario {
+  id: string;
+  nome: string;
+  telefone: string;
+  naBase: boolean;
+  limiteDisponivel: number | null;
+  status: string | null;
+  erro: string | null;
+  enviadoEm: string | null;
+  usou: boolean | null;
+  diasAteUso: number | null;
+  primeiroUsoEm: string | null;
+  valorMovimentado: number | null;
+}
+
+/** Lista da campanha manual: quem recebeu e, para clientes da base, se usou o limite e em quantos dias. */
+function Destinatarios({ id }: { id: string }) {
+  const [d, setD] = useState<{ total: number; naBase: number; foraDaBase: number; medidos: number; usaram: number; destinatarios: Destinatario[] } | null>(null);
+  const [filtro, setFiltro] = useState<"todos" | "usaram" | "nao" | "fora">("todos");
+  useEffect(() => {
+    api<typeof d>(`/campaigns/${id}/destinatarios`).then(setD);
+  }, [id]);
+  if (!d) return null;
+  const lista = d.destinatarios.filter((r) =>
+    filtro === "usaram" ? r.usou : filtro === "nao" ? r.naBase && r.enviadoEm && !r.usou : filtro === "fora" ? !r.naBase : true
+  );
+  const brl = (n: number | null) => (n === null ? "—" : n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }));
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <h3>Contatos da lista</h3>
+      <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
+        {d.total} contatos: {d.naBase} são clientes da base (medidos pelo uso real do cartão: {d.usaram} de {d.medidos} enviados já usaram) e {d.foraDaBase} estão fora da base.
+        Quando um contato entrar na base por uma importação futura, ele passa a ser medido sozinho.
+      </p>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+        {([["todos", "Todos"], ["usaram", "Usaram"], ["nao", "Ainda não usaram"], ["fora", "Fora da base"]] as const).map(([k, l]) => (
+          <button key={k} className={`btn ${filtro === k ? "" : "secondary"}`} onClick={() => setFiltro(k)}>{l}</button>
+        ))}
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table>
+          <thead>
+            <tr><th>Nome</th><th>Telefone</th><th>Limite (lista)</th><th>Envio</th><th>Na base</th><th>Usou?</th><th>Dias até o uso</th><th>Valor</th></tr>
+          </thead>
+          <tbody>
+            {lista.slice(0, 300).map((r) => (
+              <tr key={r.id}>
+                <td>{r.nome}</td>
+                <td>{r.telefone}</td>
+                <td>{brl(r.limiteDisponivel)}</td>
+                <td>{r.status ?? "—"}{r.erro ? <span title={r.erro}> ⚠</span> : null}</td>
+                <td>{r.naBase ? "Sim" : "Não"}</td>
+                <td>{!r.naBase ? "—" : r.usou === null ? "aguardando envio" : r.usou ? "Sim" : "Não"}</td>
+                <td>{r.diasAteUso === null ? "—" : r.diasAteUso === 0 ? "No dia" : `${r.diasAteUso} dia(s)`}</td>
+                <td>{brl(r.valorMovimentado)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {lista.length > 300 && <p style={{ fontSize: 12 }}>Mostrando 300 de {lista.length}. O CSV do relatório traz a lista completa.</p>}
+    </div>
+  );
+}
+
 function WhoUsed({ usuarios }: { usuarios: UsuarioQueUsou[] }) {
   return (
     <div className="card" style={{ marginTop: 16 }}>
@@ -362,6 +429,7 @@ export default function CampaignReport() {
       <SaldoBreakdown resultados={report.resultados} />
       <PerfilBreakdown porPerfil={report.porPerfil ?? []} janelaDias={report.janelaAtribuicaoDias} />
       <WhoUsed usuarios={report.usuarios} />
+      {report.manual && id && <Destinatarios id={id} />}
 
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>

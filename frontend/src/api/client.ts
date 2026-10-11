@@ -85,3 +85,15 @@ export async function downloadFile(path: string, filename: string): Promise<void
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+/** Busca um arquivo autenticado (ex.: imagem do template) e devolve uma URL local para exibir. */
+export async function fetchBlobUrl(path: string): Promise<string | null> {
+  const token = getToken();
+  try {
+    const resp = await fetch(`/api${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    if (!resp.ok) return null;
+    return URL.createObjectURL(await resp.blob());
+  } catch {
+    return null;
+  }
+}

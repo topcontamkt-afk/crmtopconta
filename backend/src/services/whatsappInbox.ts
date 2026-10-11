@@ -31,7 +31,7 @@ async function resolveWaId(prisma: AppPrismaClient, tenantId: string, accountId:
 export async function recordOutboundTemplateMessage(
   prisma: AppPrismaClient,
   tenantId: string,
-  client: { id: string; telefone: string },
+  client: { id: string | null; telefone: string; nome?: string },
   wamid: string,
   renderedBody: string
 ): Promise<void> {
@@ -43,8 +43,8 @@ export async function recordOutboundTemplateMessage(
   const now = new Date();
   const conversation = await prisma.conversation.upsert({
     where: { accountId_waId: { accountId: account.id, waId } },
-    create: { tenantId, accountId: account.id, waId, clientId: client.id, lastMessageAt: now, lastPreview: `Campanha: ${renderedBody}`.slice(0, 140) },
-    update: { clientId: client.id, lastMessageAt: now, lastPreview: `Campanha: ${renderedBody}`.slice(0, 140) },
+    create: { tenantId, accountId: account.id, waId, clientId: client.id, contactName: client.id ? undefined : client.nome, lastMessageAt: now, lastPreview: `Campanha: ${renderedBody}`.slice(0, 140) },
+    update: { ...(client.id ? { clientId: client.id } : {}), lastMessageAt: now, lastPreview: `Campanha: ${renderedBody}`.slice(0, 140) },
   });
   await prisma.waMessage
     .create({ data: { tenantId, conversationId: conversation.id, direction: "SAIDA", wamid, type: "template", body: renderedBody, status: "sent", timestamp: now } })
@@ -139,6 +139,17 @@ export async function storeInboundMessage(
     }
   }
 
+  // 5b) contato de lista manual que não é cliente: a resposta também conta na campanha dele
+  if (!client && candidates.length) {
+    const desde = new Date(Date.now() - RESPONSE_WINDOW_DAYS * 86_400_000);
+    const evento = await prisma.messageEvent.findFirst({
+      where: { recipient: { tenantId, telefone: { in: candidates } }, channel: "WHATSAPP", status: { in: [...OPEN_STATUSES] }, sentAt: { gte: desde } },
+      orderBy: { sentAt: "desc" },
+      select: { id: true },
+    });
+    if (evento) await prisma.messageEvent.update({ where: { id: evento.id }, data: { status: "RESPONDIDO", respondedAt: m.timestamp } });
+  }
+
   // 6) pedido de descadastro (LGPD): vale na hora e fica no log de auditoria
   let optedOut = false;
   // texto digitado ou toque num botão (ex.: o botão "SAIR" do template)
@@ -152,6 +163,16 @@ export async function storeInboundMessage(
       action: "OPT_OUT_WHATSAPP",
       target: "Client",
       targetId: client.id,
+      details: { conversationId: conversation.id, wamid: m.wamid },
+    });
+    optedOut = true;
+  } else if (!client && candidates.length && ["text", "button", "interactive"].includes(m.type) && isOptOutMessage(m.body)) {
+    // Contato fora da base (lista manual): o pedido de descadastro vale para as próximas listas.
+    await prisma.campaignRecipient.updateMany({ where: { tenantId, telefone: { in: candidates } }, data: { optOutAt: new Date() } });
+    await logAudit({
+      tenantId,
+      action: "OPT_OUT_WHATSAPP",
+      target: "CampaignRecipient",
       details: { conversationId: conversation.id, wamid: m.wamid },
     });
     optedOut = true;

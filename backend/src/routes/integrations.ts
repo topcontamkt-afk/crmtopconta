@@ -149,6 +149,7 @@ function presentWhatsApp(account: any) {
       ? {
           phoneNumberId: account.phoneNumberId,
           wabaId: account.wabaId,
+          appId: account.appId,
           displayName: account.displayName,
           displayPhone: account.displayPhone,
           active: account.active,
@@ -174,6 +175,8 @@ router.get("/whatsapp", requireAuth, async (req, res) => {
 const whatsappSchema = z.object({
   phoneNumberId: z.string().trim().regex(/^\d{5,30}$/, "Phone Number ID são só dígitos"),
   wabaId: z.string().trim().regex(/^\d{5,30}$/, "WABA ID são só dígitos"),
+  // Opcional: só é preciso para criar templates com imagem no cabeçalho
+  appId: z.string().trim().regex(/^\d{5,30}$/, "App ID são só dígitos").optional().or(z.literal("")),
   // Em branco = manter o que já está salvo
   accessToken: z.string().trim().max(1000).optional(),
   appSecret: z.string().trim().max(200).optional(),
@@ -200,6 +203,7 @@ router.put("/whatsapp", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const data = {
     phoneNumberId,
     wabaId,
+    appId: parsed.data.appId === undefined ? current?.appId ?? null : parsed.data.appId || null,
     active: true,
     credentials: encryptCredentials({ accessToken, appSecret }) as any,
     accessTokenHint: hint(accessToken),

@@ -8,17 +8,20 @@ import { credentialsOf } from "../services/whatsappAccount";
 import { SendError } from "../services/whatsappSend";
 import { syncTemplatesFromMeta } from "../services/whatsappTemplateSync";
 import {
-  buildBodyParams,
   buildCreatePayload,
   createMetaTemplate,
   deleteMetaTemplate,
   mapMetaStatus,
-  renderMetaPreview,
   SAMPLE_VALUES,
   TEMPLATE_CATEGORIES,
+  templateParams,
+  templatePreview,
+  uploadTemplateExample,
   validateTemplate,
   variableOrder,
 } from "../services/whatsappTemplates";
+import { applyVariableMap, positionsIn, unmappedPositions, validateVariableMap } from "../services/templateImport";
+import { OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
 
 const router = Router();
 router.use(requireAuth);
@@ -36,7 +39,16 @@ async function metaContext(tenantId: string) {
   };
 }
 
-const present = (t: any) => ({ ...t, variaveis: t.channel === "WHATSAPP" ? variableOrder(t.body) : [] });
+const present = (t: any) => {
+  const { media, ...rest } = t;
+  return {
+    ...rest,
+    variaveis: t.channel === "WHATSAPP" ? (t.metaBody ? positionsIn(t.metaBody).map((n) => `{{${n}}}`) : variableOrder(t.body)) : [],
+    // posições do template importado que ainda não dizem qual variável nossa preenche
+    variaveisSemMapa: unmappedPositions(t.variableMap),
+    imagem: media ? { mime: media.mime, size: media.size, filename: media.filename } : null,
+  };
+};
 
 function sendError(res: any, e: unknown) {
   if (e instanceof SendError) {
@@ -61,6 +73,7 @@ router.get("/", async (req, res) => {
       status: status ? (String(status) as any) : undefined,
     },
     orderBy: { updatedAt: "desc" },
+    include: { media: { select: { mime: true, size: true, filename: true } } },
   });
   res.json(templates.map(present));
 });
@@ -112,6 +125,8 @@ const updateSchema = z.object({
   // Aprovação manual: só existe para ambiente sem Meta (desenvolvimento). Com a Meta conectada o status vem dela.
   status: z.enum(["RASCUNHO", "PENDENTE_APROVACAO", "APROVADO", "REJEITADO"]).optional(),
   rejectionReason: z.string().optional(),
+  // Template importado da Meta: o que cada {{1}}, {{2}}... significa (não muda o conteúdo na Meta).
+  variableMap: z.array(z.string().nullable()).optional(),
 });
 
 router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
@@ -123,7 +138,18 @@ router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   if (!template) return res.status(404).json({ error: "Template não encontrado" });
 
   const data: any = { ...parsed.data };
-  if (template.channel === "WHATSAPP") {
+  delete data.variableMap;
+  if (parsed.data.variableMap !== undefined) {
+    if (!template.metaBody) return res.status(400).json({ error: "Só templates importados da Meta têm mapa de variáveis." });
+    const invalido = validateVariableMap(parsed.data.variableMap, positionsIn(template.metaBody).length);
+    if (invalido) return res.status(400).json({ error: invalido });
+    data.variableMap = parsed.data.variableMap;
+    data.body = applyVariableMap(template.metaBody, parsed.data.variableMap);
+  }
+  if (template.origin === "META" && (parsed.data.body !== undefined || parsed.data.footer !== undefined || parsed.data.quickReplies !== undefined || parsed.data.category !== undefined)) {
+    return res.status(409).json({ error: "Este template veio da Meta: o texto só muda lá. Aqui você pode ajustar o nome e o significado das variáveis, ou criar um template novo." });
+  }
+  if (template.channel === "WHATSAPP" && template.origin !== "META") {
     if (parsed.data.status) {
       const ctx = await metaContext(tenantId);
       if (ctx.configurado) return res.status(409).json({ error: "O status vem da Meta: envie para aprovação ou sincronize. A aprovação manual só existe sem a Meta conectada." });
@@ -168,8 +194,17 @@ router.post("/:id/submit", requireRole("ADMIN", "OPERATOR"), async (req, res) =>
   const ctx = await metaContext(tenantId);
   if (!ctx.configurado) return res.status(409).json({ error: `Falta configurar: ${ctx.faltando.join(", ")}.` });
 
-  const payload = buildCreatePayload({ ...template, quickReplies: (template.quickReplies as string[] | null) ?? [], category: template.category });
   try {
+    // Cabeçalho com imagem: a Meta exige uma imagem de exemplo, enviada por upload resumível (precisa do ID do app).
+    let headerHandle: string | null = null;
+    if (template.headerFormat === "IMAGE") {
+      const media = await prisma.templateMedia.findFirst({ where: { templateId: template.id, tenantId } });
+      if (!media) return res.status(400).json({ error: "Este template tem cabeçalho de imagem, mas a imagem não foi enviada." });
+      if (!ctx.account?.appId) return res.status(409).json({ error: "Para enviar um template com imagem, informe o ID do app da Meta em Integrações > WhatsApp." });
+      headerHandle = await uploadTemplateExample(ctx.account.appId, ctx.token, Buffer.from(media.data), media.mime, media.filename);
+      await prisma.messageTemplate.update({ where: { id: template.id }, data: { headerHandle } });
+    }
+    const payload = buildCreatePayload({ ...template, quickReplies: (template.quickReplies as string[] | null) ?? [], category: template.category, headerHandle });
     const created = await createMetaTemplate(ctx.wabaId!, ctx.token, payload);
     const updated = await prisma.messageTemplate.update({
       where: { id: template.id },
@@ -207,7 +242,8 @@ router.delete("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   if (!template) return res.status(404).json({ error: "Template não encontrado" });
 
   // Remove também na Meta (melhor esforço: se a Meta falhar, o template local sai do mesmo jeito).
-  if (template.channel === "WHATSAPP" && template.metaName) {
+  // Template importado da Meta pode estar em uso por outro sistema: aqui só sai do nosso cadastro.
+  if (template.channel === "WHATSAPP" && template.metaName && template.origin !== "META") {
     const ctx = await metaContext(tenantId);
     if (ctx.configurado) await deleteMetaTemplate(ctx.wabaId!, ctx.token, template.metaName).catch((e) => console.warn("[templates] exclusão na Meta falhou:", e.message));
   }
@@ -216,8 +252,71 @@ router.delete("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   res.status(204).send();
 });
 
+
+const IMAGE_MIMES = ["image/jpeg", "image/png"];
+function looksLikeImage(buf: Buffer, mime: string): boolean {
+  if (mime === "image/png") return buf.length > 8 && buf.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  return buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+}
+
+const headerSchema = z.object({ data: z.string().min(1), mime: z.string(), filename: z.string().min(1).max(200) });
+
+/** PUT /api/templates/:id/header — define a imagem do cabeçalho (JPG/PNG até 3 MB, em base64). */
+router.put("/:id/header", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const parsed = headerSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Envie a imagem (data, mime e filename)." });
+  const { tenantId, id: userId } = req.user!;
+  const template = await prisma.messageTemplate.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!template || template.channel !== "WHATSAPP") return res.status(404).json({ error: "Template do WhatsApp não encontrado" });
+  if (template.origin === "META" && template.metaName) {
+    // Importado: a imagem aqui é só a que ENVIAMOS no cabeçalho (a Meta já aprovou o template com uma imagem de exemplo).
+    if (template.headerFormat !== "IMAGE") return res.status(409).json({ error: "Este template da Meta não tem cabeçalho de imagem." });
+  }
+  const mime = parsed.data.mime.split(";")[0].trim().toLowerCase();
+  if (!IMAGE_MIMES.includes(mime)) return res.status(400).json({ error: "A imagem precisa ser JPG ou PNG." });
+  const buf = Buffer.from(parsed.data.data, "base64");
+  if (buf.length > OUTBOUND_MAX_BYTES) return res.status(413).json({ error: "A imagem passa de 3 MB." });
+  if (!looksLikeImage(buf, mime)) return res.status(400).json({ error: "O arquivo não parece uma imagem JPG/PNG válida." });
+
+  await prisma.templateMedia.upsert({
+    where: { templateId: template.id },
+    create: { tenantId, templateId: template.id, mime, filename: parsed.data.filename, size: buf.length, data: buf },
+    update: { mime, filename: parsed.data.filename, size: buf.length, data: buf },
+  });
+  const data: any = { headerFormat: "IMAGE" };
+  // Template nosso que já foi para a Meta: trocar o cabeçalho é nova versão (precisa de nova aprovação).
+  if (template.origin !== "META" && template.metaName) {
+    Object.assign(data, { version: template.version + 1, metaName: null, providerTemplateId: null, metaStatus: null, submittedAt: null, status: "RASCUNHO", rejectionReason: null, headerHandle: null });
+  }
+  const updated = await prisma.messageTemplate.update({ where: { id: template.id }, data, include: { media: { select: { mime: true, size: true, filename: true } } } });
+  await logAudit({ tenantId, userId, action: "SET_TEMPLATE_HEADER", target: "MessageTemplate", targetId: template.id, details: { size: buf.length } });
+  res.json(present(updated));
+});
+
+/** DELETE /api/templates/:id/header — tira a imagem (só templates nossos que ainda não foram à Meta). */
+router.delete("/:id/header", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const { tenantId, id: userId } = req.user!;
+  const template = await prisma.messageTemplate.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!template) return res.status(404).json({ error: "Template não encontrado" });
+  if (template.origin === "META" || template.metaName) return res.status(409).json({ error: "Este template já tem o cabeçalho de imagem aprovado na Meta." });
+  await prisma.templateMedia.deleteMany({ where: { templateId: template.id, tenantId } });
+  await prisma.messageTemplate.update({ where: { id: template.id }, data: { headerFormat: null, headerHandle: null } });
+  await logAudit({ tenantId, userId, action: "REMOVE_TEMPLATE_HEADER", target: "MessageTemplate", targetId: template.id });
+  res.status(204).send();
+});
+
+/** GET /api/templates/:id/header — a imagem (autenticado, para a pré-visualização). */
+router.get("/:id/header", async (req, res) => {
+  const media = await prisma.templateMedia.findFirst({ where: { templateId: req.params.id, tenantId: req.user!.tenantId } });
+  if (!media) return res.status(404).json({ error: "Sem imagem" });
+  res.setHeader("Content-Type", media.mime);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cache-Control", "private, max-age=300");
+  res.send(Buffer.from(media.data));
+});
+
 const previewSchema = z.object({
-  sample: z.record(z.any()).default({ nome: "Maria Silva", cidade: "São Paulo", percentual: 45, saldo: "R$ 850,00", limite: "R$ 1.500,00" }),
+  sample: z.record(z.any()).default({ nome: "Maria Silva", cidade: "São Paulo", percentual: 45, saldo: "R$ 850,00", limite: "R$ 1.500,00", limite_disponivel: "R$ 850,00" }),
 });
 
 /** POST /api/templates/:id/preview — pré-visualização com as variáveis substituídas. */
@@ -229,7 +328,7 @@ router.post("/:id/preview", async (req, res) => {
 
   const rendered =
     template.channel === "WHATSAPP"
-      ? renderMetaPreview(template.body, buildBodyParams(template.body, { ...SAMPLE_VALUES, ...parsed.data.sample }))
+      ? templatePreview(template, templateParams(template, { ...SAMPLE_VALUES, ...parsed.data.sample }))
       : renderTemplate(template.body, parsed.data.sample);
   res.json({ rendered });
 });

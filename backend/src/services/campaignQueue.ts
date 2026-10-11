@@ -3,10 +3,13 @@ import { ChannelAdapter, SendResult } from "./channels/types";
 import { MockSMSAdapter, TwilioSMSAdapter, ZenviaSMSAdapter } from "./channels/sms";
 import { MockWhatsAppAdapter, WhatsAppCloudAdapter } from "./channels/whatsapp";
 import { buildSegmentWhere, ENVIAVEL_WHERE, SegmentFilters, SegmentGroup } from "./segments";
-import { buildBodyParams, renderMetaPreview } from "./whatsappTemplates";
+import { templateParams, templatePreview } from "./whatsappTemplates";
+import { unmappedPositions } from "./templateImport";
 import { recordOutboundTemplateMessage } from "./whatsappInbox";
 import { credentialsOf } from "./whatsappAccount";
 import { decryptSecret, isEncryptedPayload } from "./crypto";
+import { brl, recipientContext, renderTemplate, templateContext, usesLimiteDisponivel } from "./messageContext";
+export { recipientContext, renderTemplate, templateContext, usesLimiteDisponivel };
 
 /**
  * Processamento de fila de campanha.
@@ -92,12 +95,18 @@ async function resolveProviders(
   return [{ name: "mock", adapter: new MockSMSAdapter() }];
 }
 
+/** O tenant tem um WhatsApp REAL conectado (senão o envio cai no mock, que só simula)? */
+export async function hasRealWhatsApp(prisma: AppPrismaClient, tenantId: string): Promise<boolean> {
+  const providers = await resolveProviders(prisma, tenantId, "WHATSAPP");
+  return providers.some((p) => p.name !== "mock");
+}
+
 /** Tenta os provedores em ordem até um SENT, ou retorna a última falha (failover multi-provider). */
 async function sendWithFailover(
   providers: ResolvedProvider[],
   to: string,
   body: string,
-  template?: { name: string; language: string; params: string[] }
+  template?: { name: string; language: string; params: string[]; headerImageId?: string }
 ): Promise<SendResult & { provider: string }> {
   let last: SendResult = { providerMessageId: "", status: "FAILED", error: "Nenhum provedor configurado" };
   for (const p of providers) {
@@ -124,36 +133,38 @@ export async function resolveWhatsAppTemplate(
   const real = providers.some((p) => p.name !== "mock");
   const template = campaign.templateId ? await prisma.messageTemplate.findFirst({ where: { id: campaign.templateId, tenantId: campaign.tenantId } }) : null;
   const usable = !!template && template.channel === "WHATSAPP" && template.status === "APROVADO" && !!template.metaName && template.metaStatus === "APPROVED";
-  if (usable) return { template };
+  if (usable) {
+    // Template importado da Meta: só envia se todas as variáveis estão mapeadas e o formato é suportado.
+    if (template!.sendIssue) return { template: null, bloqueado: `O template "${template!.name}" não pode ser enviado por aqui: ${template!.sendIssue}` };
+    const faltam = unmappedPositions(template!.variableMap as (string | null)[] | null);
+    if (faltam.length) return { template: null, bloqueado: `Defina o que cada variável do template "${template!.name}" significa (faltam: ${faltam.map((n) => `{{${n}}}`).join(", ")}).` };
+    return { template };
+  }
   if (!real) return { template: null };
   if (!template) return { template: null, bloqueado: "No WhatsApp a campanha precisa de um template aprovado pela Meta. Escolha um template na campanha." };
   return { template: null, bloqueado: `O template "${template.name}" ainda não está aprovado pela Meta (status: ${template.metaStatus ?? "não enviado"}).` };
 }
 
-const brl = (n: unknown) => Number(n ?? 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
-
-/** Contexto de renderização de um cliente real (usado no envio). */
-export function templateContext(client: {
-  nome: string;
-  cidade: string | null;
-  percentualUtilizado: unknown;
-  saldoDisponivel: unknown;
-  limiteTotal: unknown;
-}): Record<string, unknown> {
-  return {
-    nome: client.nome,
-    cidade: client.cidade,
-    percentual: client.percentualUtilizado,
-    saldo: brl(client.saldoDisponivel),
-    limite: brl(client.limiteTotal),
-  };
-}
-
-export function renderTemplate(template: string, client: Record<string, any>): string {
-  return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => {
-    const value = client[key];
-    return value === undefined || value === null ? "" : String(value);
-  });
+/**
+ * Template com imagem no cabeçalho: sobe a imagem para a Meta uma vez por lote e devolve o id usado em
+ * todos os envios do lote (o id vale por ~30 dias, mas subir de novo é barato e evita id vencido).
+ */
+export async function prepareHeaderImage(
+  prisma: AppPrismaClient,
+  tenantId: string,
+  template: { id: string; headerFormat?: string | null; name: string } | null,
+  providers: ResolvedProvider[]
+): Promise<{ imageId?: string; bloqueado?: string }> {
+  if (!template || template.headerFormat !== "IMAGE") return {};
+  const media = await prisma.templateMedia.findFirst({ where: { templateId: template.id, tenantId } });
+  if (!media) return { bloqueado: `O template "${template.name}" precisa da imagem do cabeçalho (Templates > imagem).` };
+  const provider = providers.find((p) => p.adapter.uploadHeaderImage);
+  if (!provider) return { bloqueado: "Nenhum provedor de WhatsApp consegue enviar a imagem do cabeçalho." };
+  try {
+    return { imageId: await provider.adapter.uploadHeaderImage!(Buffer.from(media.data), media.mime, media.filename) };
+  } catch (e: any) {
+    return { bloqueado: `Não consegui enviar a imagem do cabeçalho à Meta: ${e.message}` };
+  }
 }
 
 /** Monta o público da campanha a partir do segmento salvo ou de filtros ad-hoc, sempre excluindo opt-outs. */
@@ -185,6 +196,7 @@ export async function buildAudience(prisma: AppPrismaClient, tenantId: string, c
  */
 export async function enqueueCampaign(prisma: AppPrismaClient, tenantId: string, campaignId: string) {
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
+  if (campaign.manual) return enqueueManualCampaign(prisma, tenantId, campaign);
   const audience = await buildAudience(prisma, tenantId, campaignId);
 
   const dedupeCutoff = new Date(Date.now() - campaign.dedupeWindowHrs * 60 * 60 * 1000);
@@ -242,6 +254,25 @@ export async function enqueueCampaign(prisma: AppPrismaClient, tenantId: string,
   return { audienceSize: audience.length, queued, control, skippedDedupe };
 }
 
+/**
+ * Campanha de lista (planilha): o público são os destinatários guardados; cada um entra na fila uma
+ * única vez (reagendar não duplica). Quem virou opt-out depois de criada a lista é barrado no envio.
+ */
+async function enqueueManualCampaign(prisma: AppPrismaClient, tenantId: string, campaign: { id: string; channel: any }) {
+  const recipients = await prisma.campaignRecipient.findMany({
+    where: { tenantId, campaignId: campaign.id },
+    select: { id: true, clientId: true, messageEvents: { select: { id: true }, take: 1 } },
+  });
+  const novos = recipients.filter((r) => r.messageEvents.length === 0);
+  for (let i = 0; i < novos.length; i += 500) {
+    await prisma.messageEvent.createMany({
+      data: novos.slice(i, i + 500).map((r) => ({ campaignId: campaign.id, clientId: r.clientId, recipientId: r.id, channel: campaign.channel, status: "FILA" as const })),
+    });
+  }
+  await prisma.campaign.update({ where: { id: campaign.id }, data: { audienceCount: recipients.length, status: "AGENDADA" } });
+  return { audienceSize: recipients.length, queued: novos.length, control: 0, skippedDedupe: 0 };
+}
+
 /** Quantas mensagens já foram enviadas pelo tenant no último minuto (para o rate limit global). */
 async function sentInLastMinute(prisma: AppPrismaClient, tenantId: string): Promise<number> {
   const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
@@ -272,48 +303,65 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
     return { processed: 0, remaining: await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } }), results: [], throttled: false, bloqueado };
   }
 
+  const header = await prepareHeaderImage(prisma, campaign.tenantId, metaTemplate, providers);
+  if (header.bloqueado) {
+    return { processed: 0, remaining: await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } }), results: [], throttled: false, bloqueado: header.bloqueado };
+  }
+
   const pending = await prisma.messageEvent.findMany({
     where: { campaignId, status: "FILA" },
     take: batchSize,
-    include: { client: true },
+    include: { client: true, recipient: true },
   });
 
   const results = [];
   for (const evt of pending) {
-    if (!evt.client.autorizacaoComunicacao || evt.client.optOutAt) {
-      await prisma.messageEvent.update({
-        where: { id: evt.id },
-        data: { status: "BLOQUEADO", error: "Cliente sem autorização/opt-out" },
-      });
+    const block = async (error: string) => {
+      await prisma.messageEvent.update({ where: { id: evt.id }, data: { status: "BLOQUEADO", error } });
+    };
+    const client = evt.client;
+    if (client && (!client.autorizacaoComunicacao || client.optOutAt)) {
+      await block("Cliente sem autorização/opt-out");
+      continue;
+    }
+    if (!client && !evt.recipient) {
+      await block("Destinatário sem cliente");
       continue;
     }
     // Garantia no envio: mensagem já na fila de quem (ainda) não tem limite não sai.
-    if (!(Number(evt.client.limiteTotal) > 0)) {
-      await prisma.messageEvent.update({
-        where: { id: evt.id },
-        data: { status: "BLOQUEADO", error: "Cliente sem limite (comércio credenciado)" },
-      });
+    // (Contato de lista manual que não é cliente da base não tem limite cadastrado: vale a lista.)
+    if (client && !(Number(client.limiteTotal) > 0)) {
+      await block("Cliente sem limite (comércio credenciado)");
       continue;
     }
 
+    const ctx = evt.recipient ? recipientContext(evt.recipient, client) : templateContext(client!);
+    const telefone = evt.recipient?.telefone ?? client!.telefone;
     const templateBody = evt.variant === "B" && campaign.messageTemplateB ? campaign.messageTemplateB : campaign.messageTemplate;
-    const body = renderTemplate(templateBody, templateContext(evt.client));
+    if (evt.recipient && evt.recipient.limiteDisponivel === null && usesLimiteDisponivel(metaTemplate ? metaTemplate.body : templateBody)) {
+      await block("Sem limite disponível na planilha (a mensagem usa essa variável)");
+      continue;
+    }
+    const body = renderTemplate(templateBody, ctx);
 
-    // Template da Meta: os parâmetros saem do cadastro do cliente (variante B não existe aqui: a Meta aprova um texto só).
-    const ctx = templateContext(evt.client);
-    const tplParams = metaTemplate ? buildBodyParams(metaTemplate.body, ctx) : null;
+    // Template da Meta: os parâmetros saem do cadastro do cliente / da lista (variante B não existe aqui: a Meta aprova um texto só).
+    const tplParams = metaTemplate ? templateParams(metaTemplate, ctx) : null;
     const sendResult = await sendWithFailover(
       providers,
-      evt.client.telefone,
+      telefone,
       body,
-      metaTemplate ? { name: metaTemplate.metaName, language: metaTemplate.language, params: tplParams! } : undefined
+      metaTemplate ? { name: metaTemplate.metaName, language: metaTemplate.language, params: tplParams!, headerImageId: header.imageId } : undefined
     );
 
     // A conversa da inbox passa a mostrar o que foi enviado (quando o cliente responder, quem atende vê a oferta).
     if (metaTemplate && sendResult.status === "SENT" && sendResult.providerMessageId) {
-      await recordOutboundTemplateMessage(prisma, campaign.tenantId, evt.client, sendResult.providerMessageId, renderMetaPreview(metaTemplate.body, tplParams!)).catch((e) =>
-        console.warn("[campaignQueue] não registrou na inbox:", e.message)
-      );
+      await recordOutboundTemplateMessage(
+        prisma,
+        campaign.tenantId,
+        { id: client?.id ?? null, telefone, nome: evt.recipient?.nome },
+        sendResult.providerMessageId,
+        templatePreview(metaTemplate, tplParams!)
+      ).catch((e) => console.warn("[campaignQueue] não registrou na inbox:", e.message));
     }
 
     await prisma.messageEvent.update({
@@ -327,7 +375,7 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
         sentAt: sendResult.status === "SENT" ? new Date() : undefined,
       },
     });
-    results.push({ clientId: evt.clientId, status: sendResult.status, provider: sendResult.provider });
+    results.push({ clientId: evt.clientId, recipientId: evt.recipientId, status: sendResult.status, provider: sendResult.provider });
   }
 
   const remaining = await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } });
@@ -354,16 +402,18 @@ export async function sendTestMessages(
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
   const providers = await resolveProviders(prisma, tenantId, campaign.channel);
 
-  const sample = { nome: "Cliente Teste", cidade: "São Paulo", percentual: 42, saldo: brl(850), limite: brl(1500) };
+  const sample = { nome: "Cliente Teste", cidade: "São Paulo", percentual: 42, saldo: brl(850), limite: brl(1500), limite_disponivel: brl(850) };
   const body = renderTemplate(campaign.messageTemplate, sample);
 
   const { template: metaTemplate, bloqueado } = await resolveWhatsAppTemplate(prisma, campaign, providers);
   if (bloqueado) throw new Error(bloqueado);
-  const params = metaTemplate ? buildBodyParams(metaTemplate.body, sample) : null;
+  const params = metaTemplate ? templateParams(metaTemplate, sample) : null;
+  const header = await prepareHeaderImage(prisma, tenantId, metaTemplate, providers);
+  if (header.bloqueado) throw new Error(header.bloqueado);
 
   const results = [];
   for (const phone of phones) {
-    const sendResult = await sendWithFailover(providers, phone, body, metaTemplate ? { name: metaTemplate.metaName, language: metaTemplate.language, params: params! } : undefined);
+    const sendResult = await sendWithFailover(providers, phone, body, metaTemplate ? { name: metaTemplate.metaName, language: metaTemplate.language, params: params!, headerImageId: header.imageId } : undefined);
     results.push({ phone, status: sendResult.status, provider: sendResult.provider, error: sendResult.error });
   }
   return { body, results };

@@ -47,6 +47,7 @@ export const TENANT_SCOPED_MODELS = [
   "ImportJob",
   "SegmentDefinition",
   "Campaign",
+  "CampaignRecipient",
   "AutomationRule",
   "AuditLog",
   "SheetConnection",
@@ -61,6 +62,7 @@ export const TENANT_SCOPED_MODELS = [
   "Conversation",
   "WaMessage",
   "WaMediaBlob",
+  "TemplateMedia",
 ] as const;
 
 type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number];

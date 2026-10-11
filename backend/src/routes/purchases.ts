@@ -1,4 +1,5 @@
 import { ENVIAVEL_WHERE } from "../services/segments";
+import { cidadeKeySql, parseCidades, SEM_CIDADE } from "../services/cidades";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma, tenantRaw } from "../config/db";
@@ -37,7 +38,17 @@ router.post("/import", importLimiter, requireRole("ADMIN", "OPERATOR"), async (r
   res.json({ importJobId, addedCount: result.importedCount, updatedCount: result.duplicateCount, ...result });
 });
 
-const periodSchema = z.object({ days: z.coerce.number().int().min(0).max(3650).default(0) });
+const periodSchema = z.object({
+  days: z.coerce.number().int().min(0).max(3650).default(0),
+  cidades: z.string().max(2000).optional(), // chaves separadas por "|" (ver services/cidades.ts); vazio = todas
+});
+/** Filtro de cidade do CLIENTE (ele só compra no comércio da própria cidade). `$n` é o parâmetro text[] com as chaves. */
+const CIDADE_KEY = cidadeKeySql('cl."cidade"');
+const cidadeClause = (n: number) => `AND ($${n}::text[] IS NULL OR ${CIDADE_KEY} = ANY($${n}::text[]))`;
+const cidadesParam = (raw: string | undefined) => {
+  const l = parseCidades(raw);
+  return l.length ? l : null;
+};
 const sinceFor = (days: number) => (days > 0 ? new Date(Date.now() - days * 24 * 60 * 60 * 1000) : new Date(0));
 
 /**
@@ -49,6 +60,7 @@ router.get("/categories", async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
   const { tenantId } = req.user!;
   const since = sinceFor(parsed.data.days);
+  const cidades = cidadesParam(parsed.data.cidades);
 
   const [rows, janela, totais] = await Promise.all([
     tenantRaw.query<Array<{ category: string; clientes: number; compras: number; valor: number; lojistas: number }>>(
@@ -57,12 +69,13 @@ router.get("/categories", async (req, res) => {
               COUNT(*)::int AS compras,
               COALESCE(SUM(p."valorPrincipal"), 0)::float AS valor,
               COUNT(DISTINCT m."id")::int AS lojistas
-       FROM "Purchase" p JOIN "Merchant" m ON m."id" = p."merchantId"
-       WHERE p."tenantId" = $1 AND p."occurredAt" >= $2::timestamptz
+       FROM "Purchase" p JOIN "Merchant" m ON m."id" = p."merchantId" JOIN "Client" cl ON cl."id" = p."clientId"
+       WHERE p."tenantId" = $1 AND p."occurredAt" >= $2::timestamptz ${cidadeClause(3)}
        GROUP BY m."category"
        ORDER BY clientes DESC, compras DESC`,
       tenantId,
-      since.toISOString()
+      since.toISOString(),
+      cidades
     ),
     prisma.purchase.aggregate({
       where: { tenantId },
@@ -73,16 +86,18 @@ router.get("/categories", async (req, res) => {
     tenantRaw.query<Array<{ clientes: number; compras: number; valor: number }>>(
       `SELECT COUNT(DISTINCT p."clientId")::int AS clientes, COUNT(*)::int AS compras,
               COALESCE(SUM(p."valorPrincipal"), 0)::float AS valor
-       FROM "Purchase" p
-       WHERE p."tenantId" = $1 AND p."merchantId" IS NOT NULL AND p."occurredAt" >= $2::timestamptz`,
+       FROM "Purchase" p JOIN "Client" cl ON cl."id" = p."clientId"
+       WHERE p."tenantId" = $1 AND p."merchantId" IS NOT NULL AND p."occurredAt" >= $2::timestamptz ${cidadeClause(3)}`,
       tenantId,
-      since.toISOString()
+      since.toISOString(),
+      cidades
     ),
   ]);
 
   const label = new Map<string, string>(MERCHANT_CATEGORIES.map((c) => [c.key, c.label]));
   res.json({
     dias: parsed.data.days,
+    cidades: cidades ?? [],
     dados: {
       totalTransacoes: janela._count,
       primeira: janela._min.occurredAt,
@@ -99,6 +114,7 @@ const merchantsQuerySchema = z.object({
   category: z.string().optional(),
   search: z.string().trim().max(100).optional(),
   days: z.coerce.number().int().min(0).max(3650).default(0),
+  cidades: z.string().max(2000).optional(),
 });
 
 /** GET /api/purchases/merchants — lojistas com categoria, compras, clientes e valor. */
@@ -108,6 +124,7 @@ router.get("/merchants", async (req, res) => {
   const { tenantId } = req.user!;
   const { category, search, days } = parsed.data;
   const since = sinceFor(days);
+  const cidades = cidadesParam(parsed.data.cidades);
 
   const rows = await tenantRaw.query<
     Array<{ id: string; name: string; category: string; categorySource: string; compras: number; clientes: number; valor: number; ultima: Date | null }>
@@ -119,6 +136,7 @@ router.get("/merchants", async (req, res) => {
             MAX(p."occurredAt") AS ultima
      FROM "Merchant" m
      LEFT JOIN "Purchase" p ON p."merchantId" = m."id" AND p."occurredAt" >= $2::timestamptz
+       AND ($5::text[] IS NULL OR EXISTS (SELECT 1 FROM "Client" cl WHERE cl."id" = p."clientId" AND ${CIDADE_KEY} = ANY($5::text[])))
      WHERE m."tenantId" = $1
        AND ($3::text IS NULL OR m."category" = $3)
        AND ($4::text IS NULL OR m."nameKey" LIKE '%' || lower($4) || '%')
@@ -128,7 +146,8 @@ router.get("/merchants", async (req, res) => {
     tenantId,
     since.toISOString(),
     category && isMerchantCategory(category) ? category : null,
-    search || null
+    search || null,
+    cidades
   );
   res.json(rows);
 });
@@ -159,11 +178,40 @@ router.patch("/merchants/:id", requireRole("ADMIN", "OPERATOR"), async (req, res
   res.json(updated);
 });
 
+/**
+ * GET /api/purchases/cidades?days= — cidades dos clientes que compraram no comércio credenciado, com quantos
+ * clientes em cada. Nome de empresa ou vazio na coluna cidade aparece como "Sem cidade".
+ */
+router.get("/cidades", async (req, res) => {
+  const parsed = periodSchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  const { tenantId } = req.user!;
+  const rows = await tenantRaw.query<Array<{ chave: string; nome: string; clientes: number }>>(
+    `SELECT ${CIDADE_KEY} AS chave,
+            MIN(btrim(cl."cidade")) AS nome,
+            COUNT(DISTINCT p."clientId")::int AS clientes
+     FROM "Purchase" p JOIN "Client" cl ON cl."id" = p."clientId"
+     WHERE p."tenantId" = $1 AND p."merchantId" IS NOT NULL AND p."occurredAt" >= $2::timestamptz
+     GROUP BY 1
+     ORDER BY clientes DESC, chave ASC`,
+    tenantId,
+    sinceFor(parsed.data.days).toISOString()
+  );
+  res.json(
+    rows.map((r) => ({
+      chave: r.chave,
+      nome: r.chave === SEM_CIDADE ? "Sem cidade" : r.nome,
+      clientes: r.clientes,
+    }))
+  );
+});
+
 const audienceSchema = z.object({
   categorias: z.string().optional(), // lista separada por vírgula
   lojistaIds: z.string().optional(),
   days: z.coerce.number().int().min(0).max(3650).default(0),
   minCompras: z.coerce.number().int().min(1).max(50).default(1),
+  cidades: z.string().max(2000).optional(),
 });
 
 /**
@@ -182,15 +230,17 @@ router.get("/audiencia", async (req, res) => {
 
   const porCliente = await tenantRaw.query<Array<{ id: string; n: number }>>(
     `SELECT p."clientId" AS id, COUNT(*)::int AS n
-     FROM "Purchase" p JOIN "Merchant" m ON m."id" = p."merchantId"
+     FROM "Purchase" p JOIN "Merchant" m ON m."id" = p."merchantId" JOIN "Client" cl ON cl."id" = p."clientId"
      WHERE p."tenantId" = $1 AND p."occurredAt" >= $2::timestamptz
        AND ($3::text[] IS NULL OR m."category" = ANY($3::text[]))
        AND ($4::text[] IS NULL OR m."id" = ANY($4::text[]))
+       ${cidadeClause(5)}
      GROUP BY p."clientId"`,
     tenantId,
     sinceFor(parsed.data.days).toISOString(),
     categorias.length ? categorias : null,
-    lojistaIds.length ? lojistaIds : null
+    lojistaIds.length ? lojistaIds : null,
+    cidadesParam(parsed.data.cidades)
   );
 
   const porFrequencia = [1, 2, 3].map((min) => porCliente.filter((c) => c.n >= min).length);

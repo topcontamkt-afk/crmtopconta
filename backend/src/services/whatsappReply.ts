@@ -12,8 +12,9 @@ import {
   uploadMedia,
 } from "./whatsappSend";
 import { previewOf } from "./whatsappPayload";
-import { templateContext } from "./campaignQueue";
-import { buildBodyParams, renderMetaPreview, sendTemplateMessage } from "./whatsappTemplates";
+import { templateContext } from "./messageContext";
+import { sendTemplateMessage, templateParams, templatePreview } from "./whatsappTemplates";
+import { unmappedPositions } from "./templateImport";
 
 /**
  * Responde a um cliente dentro de uma conversa: confere a janela de 24 horas, envia pela Meta e só
@@ -114,8 +115,22 @@ export async function applyOutboundStatus(
 }
 
 /** Template da Meta que pode ser enviado agora (aprovado de verdade, não só marcado como aprovado). */
-export function isSendableTemplate(t: { channel: string; status: string; metaName: string | null; metaStatus: string | null }): boolean {
-  return t.channel === "WHATSAPP" && t.status === "APROVADO" && !!t.metaName && t.metaStatus === "APPROVED";
+export function isSendableTemplate(t: {
+  channel: string;
+  status: string;
+  metaName: string | null;
+  metaStatus: string | null;
+  sendIssue?: string | null;
+  variableMap?: unknown;
+}): boolean {
+  return (
+    t.channel === "WHATSAPP" &&
+    t.status === "APROVADO" &&
+    !!t.metaName &&
+    t.metaStatus === "APPROVED" &&
+    !t.sendIssue &&
+    unmappedPositions(t.variableMap as (string | null)[] | null).length === 0
+  );
 }
 
 /** Variáveis do template para esta conversa: dados do cliente, ou só o nome do perfil se ele não está na base. */
@@ -124,9 +139,9 @@ export function conversationContext(conversation: { contactName: string | null; 
   return { nome: conversation.contactName ?? "" };
 }
 
-export function previewTemplateFor(template: { body: string }, conversation: { contactName: string | null; client: any | null }) {
-  const params = buildBodyParams(template.body, conversationContext(conversation));
-  return { params, texto: renderMetaPreview(template.body, params) };
+export function previewTemplateFor(template: { body: string; metaBody?: string | null; variableMap?: unknown }, conversation: { contactName: string | null; client: any | null }) {
+  const params = templateParams(template, conversationContext(conversation));
+  return { params, texto: templatePreview(template, params) };
 }
 
 /**
@@ -157,7 +172,13 @@ export async function sendTemplateReply(
   if (!template || !isSendableTemplate(template)) throw new SendError("TEMPLATE_INDISPONIVEL", "Este template não está aprovado pela Meta.");
 
   const { params, texto } = previewTemplateFor(template, conversation);
-  const wamid = await sendTemplateMessage(conversation.account.phoneNumberId, token, conversation.waId, template.metaName!, template.language, params, deps.fetchImpl);
+  let headerImageId: string | undefined;
+  if (template.headerFormat === "IMAGE") {
+    const media = await prisma.templateMedia.findFirst({ where: { templateId: template.id, tenantId } });
+    if (!media) throw new SendError("TEMPLATE_INDISPONIVEL", "Este template precisa da imagem do cabeçalho (Templates).");
+    headerImageId = await uploadMedia(conversation.account.phoneNumberId, token, Buffer.from(media.data), media.mime, media.filename, deps.fetchImpl);
+  }
+  const wamid = await sendTemplateMessage(conversation.account.phoneNumberId, token, conversation.waId, template.metaName!, template.language, params, deps.fetchImpl, headerImageId);
   const message = await prisma.waMessage.create({
     data: { tenantId, conversationId: conversation.id, direction: "SAIDA", wamid, type: "template", body: texto, status: "sent", sentByUserId: userId, timestamp: now },
   });

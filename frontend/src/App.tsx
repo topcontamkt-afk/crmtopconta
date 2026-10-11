@@ -28,6 +28,7 @@ import Segments from "./pages/Segments";
 import CampaignList from "./pages/campaigns/CampaignList";
 import CampaignWizard from "./pages/campaigns/CampaignWizard";
 import CampaignReport from "./pages/campaigns/CampaignReport";
+import CampaignWizardClassic from "./pages/campaigns/CampaignWizardClassic";
 import Integrations from "./pages/Integrations";
 import Automations from "./pages/Automations";
 import AuditLog from "./pages/AuditLog";
@@ -237,6 +238,8 @@ export default function App() {
                 />
                 <Route path="/campaigns" element={<CampaignList />} />
                 <Route path="/campaigns/new" element={<CampaignWizard />} />
+                <Route path="/campaigns/classic" element={<CampaignWizardClassic />} />
+                <Route path="/campaigns/manual" element={<Navigate to="/campaigns/new?publico=planilha" replace />} />
                 <Route path="/campaigns/:id/report" element={<CampaignReport />} />
                 <Route path="/templates" element={<Templates />} />
                 <Route path="/automations" element={<Automations />} />
