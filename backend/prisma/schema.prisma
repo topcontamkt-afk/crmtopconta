@@ -631,6 +631,7 @@ model WaMessage {
   mediaMime      String?
   mediaFilename  String?
   status         String?      // só saída: sent | delivered | read | failed
+  sentByUserId   String?      // quem respondeu (só saída)
   errorText      String?
   timestamp      DateTime     // horário da mensagem segundo a Meta
   createdAt      DateTime     @default(now())

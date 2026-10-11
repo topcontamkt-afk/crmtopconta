@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import { api, getToken } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 
@@ -108,6 +108,125 @@ function Midia({ m, onAbrirImagem }: { m: Mensagem; onAbrirImagem: (url: string)
       📄 {nome}
       <a className="btn secondary" style={{ padding: "2px 8px", fontSize: 11, textDecoration: "none" }} href={url} target="_blank" rel="noreferrer">Abrir</a>
       <a className="btn secondary" style={{ padding: "2px 8px", fontSize: 11, textDecoration: "none" }} href={url} download={nome}>Baixar</a>
+    </div>
+  );
+}
+
+/** ✓ enviado, ✓✓ entregue, ✓✓ azul lido, ⚠ falhou */
+function Entrega({ status }: { status: string | null }) {
+  if (status === "failed") return <span style={{ color: "var(--danger)" }}> ⚠</span>;
+  if (status === "read") return <span style={{ color: "#53bdeb" }}> ✓✓</span>;
+  if (status === "delivered") return <span> ✓✓</span>;
+  return <span> ✓</span>;
+}
+
+const MAX_ARQUIVO = 3 * 1024 * 1024;
+const ACEITOS = "image/jpeg,image/png,application/pdf,audio/ogg,audio/mpeg,audio/mp4,audio/aac,audio/amr,video/mp4";
+
+/** O api() devolve o texto do erro já em JSON ("\"mensagem\""): tira as aspas. */
+function textoDoErro(e: any): string {
+  const m = String(e?.message ?? "Erro inesperado");
+  try {
+    const v = JSON.parse(m);
+    return typeof v === "string" ? v : m;
+  } catch {
+    return m;
+  }
+}
+
+function lerBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+    r.onerror = () => reject(new Error("Não foi possível ler o arquivo."));
+    r.readAsDataURL(file);
+  });
+}
+
+function Composer({ conversaId, janelaAberta, podeEnviar, onEnviada }: { conversaId: string; janelaAberta: boolean; podeEnviar: boolean; onEnviada: () => void }) {
+  const [texto, setTexto] = useState("");
+  const [arquivo, setArquivo] = useState<File | null>(null);
+  const [erro, setErro] = useState<string | null>(null);
+  const [enviando, setEnviando] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setTexto("");
+    setArquivo(null);
+    setErro(null);
+  }, [conversaId]);
+
+  if (!podeEnviar) return <div className="inbox-composer">Seu perfil só visualiza conversas. Peça a um operador ou administrador para responder.</div>;
+  if (!janelaAberta) {
+    return (
+      <div className="inbox-composer">
+        <strong>Janela de 24 horas fechada.</strong> Fora dela o WhatsApp só permite enviar um <em>template aprovado</em> (disponível na próxima fase). Assim que o cliente escrever de novo, a janela reabre.
+      </div>
+    );
+  }
+
+  function escolher(f: File | undefined) {
+    setErro(null);
+    if (!f) return;
+    if (f.size > MAX_ARQUIVO) return setErro(`Arquivo maior que ${MAX_ARQUIVO / 1048576} MB.`);
+    setArquivo(f);
+  }
+
+  async function enviar() {
+    if (enviando) return;
+    if (!arquivo && !texto.trim()) return;
+    setEnviando(true);
+    setErro(null);
+    try {
+      if (arquivo) {
+        await api(`/inbox/conversations/${conversaId}/messages`, {
+          method: "POST",
+          body: { tipo: "arquivo", nome: arquivo.name, mime: arquivo.type || "application/octet-stream", base64: await lerBase64(arquivo), legenda: texto.trim() || undefined },
+        });
+      } else {
+        await api(`/inbox/conversations/${conversaId}/messages`, { method: "POST", body: { tipo: "text", texto: texto.trim() } });
+      }
+      setTexto("");
+      setArquivo(null);
+      onEnviada();
+    } catch (e) {
+      setErro(textoDoErro(e));
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  function tecla(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void enviar();
+    }
+  }
+
+  return (
+    <div className="inbox-composer">
+      {arquivo && (
+        <div className="media" style={{ marginBottom: 8 }}>
+          📎 {arquivo.name} ({(arquivo.size / 1024).toFixed(0)} KB)
+          <button type="button" className="btn secondary" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => setArquivo(null)}>Remover</button>
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+        <input ref={input} type="file" accept={ACEITOS} hidden onChange={(e) => { escolher(e.target.files?.[0]); e.target.value = ""; }} />
+        <button type="button" className="btn secondary" title="Anexar imagem, PDF, áudio ou vídeo (até 3 MB)" onClick={() => input.current?.click()} disabled={enviando}>📎</button>
+        <textarea
+          rows={2}
+          style={{ flex: 1, resize: "vertical", minHeight: 44 }}
+          placeholder={arquivo ? "Legenda (opcional)" : "Escreva uma resposta. Enter envia, Shift+Enter quebra a linha."}
+          value={texto}
+          maxLength={4096}
+          onChange={(e) => setTexto(e.target.value)}
+          onKeyDown={tecla}
+          disabled={enviando}
+        />
+        <button type="button" className="btn" onClick={enviar} disabled={enviando || (!arquivo && !texto.trim())}>{enviando ? "Enviando…" : "Enviar"}</button>
+      </div>
+      {erro && <div className="error-text" style={{ marginTop: 6 }}>{erro}</div>}
     </div>
   );
 }
@@ -354,12 +473,21 @@ export default function Inbox() {
                     {m.midia && <Midia m={m} onAbrirImagem={setImagemAberta} />}
                     {m.texto && <div>{m.texto}</div>}
                     {!m.texto && !m.midia && <em style={{ color: "var(--text-muted)" }}>[{m.tipo}]</em>}
-                    <time>{new Date(m.em).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</time>
+                    <time>
+                      {new Date(m.em).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                      {m.direcao === "SAIDA" && <Entrega status={m.status} />}
+                    </time>
+                    {m.direcao === "SAIDA" && m.status === "failed" && <div className="error-text" style={{ fontSize: 11.5 }}>Não entregue: {m.erro ?? "falha no envio"}</div>}
                   </div>
                 ))}
                 <div ref={fim} />
               </div>
-              <div className="inbox-composer">Somente leitura por enquanto. O envio de respostas e de templates chega nas próximas fases.</div>
+              <Composer
+                conversaId={thread.conversa.id}
+                janelaAberta={thread.conversa.janelaAberta}
+                podeEnviar={user?.role === "ADMIN" || user?.role === "OPERATOR"}
+                onEnviada={() => { void carregarThread(); void carregarLista(); }}
+              />
             </>
           )}
         </div>

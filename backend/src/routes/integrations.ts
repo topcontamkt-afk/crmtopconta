@@ -9,6 +9,7 @@ import { exportTenantSummaryToSheet } from "../services/biExport";
 import { env } from "../config/env";
 import { withCrossTenantAccess, runWithTenantContextAsync } from "../config/tenantGuard";
 import { parseWebhookPayload } from "../services/whatsappPayload";
+import { applyOutboundStatus } from "../services/whatsappReply";
 import { getOrCacheMessageMedia } from "../services/whatsappMedia";
 import { storeInboundMessage } from "../services/whatsappInbox";
 import { verifyTwilioSignature, verifyWhatsAppSignature } from "../services/webhookAuth";
@@ -178,7 +179,7 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
 
     // Mensagens RECEBIDAS dos clientes (inbox). Só são gravadas com a assinatura verificada: sem
     // WHATSAPP_APP_SECRET qualquer um poderia injetar conversas falsas e disparar opt-outs.
-    const { messages } = parseWebhookPayload(req.body);
+    const { messages, statuses } = parseWebhookPayload(req.body);
     if (messages.length > 0) {
       if (!appSecret) {
         console.warn(`[webhooks/whatsapp] ${messages.length} mensagem(ns) recebida(s) IGNORADA(S): configure WHATSAPP_APP_SECRET para a inbox funcionar.`);
@@ -207,6 +208,21 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
           } catch (e) {
             console.error("[webhooks/whatsapp] falha ao gravar mensagem recebida:", e);
           }
+        }
+      }
+    }
+
+    // Status de entrega das respostas enviadas pela inbox (enviado/entregue/lido/falhou).
+    if (appSecret && statuses.length > 0) {
+      for (const st of statuses) {
+        try {
+          const account = await withCrossTenantAccess(() =>
+            prisma.whatsAppAccount.findFirst({ where: { phoneNumberId: st.phoneNumberId, active: true } })
+          );
+          if (!account) continue;
+          await runWithTenantContextAsync(account.tenantId, () => applyOutboundStatus(prisma, account.tenantId, st));
+        } catch (e) {
+          console.error("[webhooks/whatsapp] falha ao atualizar status de resposta:", e);
         }
       }
     }

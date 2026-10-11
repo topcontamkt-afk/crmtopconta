@@ -7,6 +7,8 @@ import { logAudit } from "../middleware/audit";
 import { maskPhone } from "../services/masking";
 import { classificarPerfil } from "../services/rendaPerfil";
 import { getOrCacheMessageMedia, isInlineSafeMime, MediaError, MEDIA_MAX_BYTES } from "../services/whatsappMedia";
+import { sendReply } from "../services/whatsappReply";
+import { SendError, OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
 import { janelaAte } from "../services/whatsappPayload";
 
 /**
@@ -179,6 +181,58 @@ router.get("/conversations/:id/messages", async (req, res) => {
     })),
     temMais: mensagens.length === q.data.limite,
   });
+});
+
+const replySchema = z.discriminatedUnion("tipo", [
+  z.object({ tipo: z.literal("text"), texto: z.string().min(1).max(4096) }),
+  z.object({
+    tipo: z.literal("arquivo"),
+    nome: z.string().min(1).max(200),
+    mime: z.string().min(3).max(100),
+    base64: z.string().min(4).max(Math.ceil((OUTBOUND_MAX_BYTES * 4) / 3) + 64),
+    legenda: z.string().max(1024).optional(),
+  }),
+]);
+
+const presentMessage = (m: any) => ({
+  id: m.id,
+  direcao: m.direction,
+  tipo: m.type,
+  texto: m.body,
+  midia: m.mediaId ? { mime: m.mediaMime, nomeArquivo: m.mediaFilename } : null,
+  status: m.status,
+  erro: m.errorText,
+  em: m.timestamp.toISOString(),
+});
+
+/**
+ * POST /api/inbox/conversations/:id/messages — responde ao cliente (texto ou arquivo). Só dentro da
+ * janela de 24 horas; fora dela a resposta é um template (Fase 4). O arquivo vai em base64 no JSON
+ * (limite de 3 MB por causa do teto de ~4,5 MB por requisição da Vercel).
+ */
+router.post("/conversations/:id/messages", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const parsed = replySchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Mensagem inválida", codigo: "TIPO_INVALIDO" });
+  const { tenantId, id: userId } = req.user!;
+  const b = parsed.data;
+  try {
+    const message = await sendReply(
+      prisma,
+      tenantId,
+      userId,
+      req.params.id,
+      b.tipo === "text"
+        ? { tipo: "text", texto: b.texto }
+        : { tipo: "arquivo", nome: b.nome, mime: b.mime, data: Buffer.from(b.base64, "base64"), legenda: b.legenda }
+    );
+    res.status(201).json(presentMessage(message));
+  } catch (e) {
+    if (e instanceof SendError) {
+      const status = { NAO_ENCONTRADA: 404, JANELA_FECHADA: 409, SEM_TOKEN: 503, TIPO_INVALIDO: 400, MUITO_GRANDE: 413, META: 502 }[e.code];
+      return res.status(status).json({ error: e.message, codigo: e.code, metaCodigo: e.metaCode });
+    }
+    throw e;
+  }
 });
 
 /** POST /api/inbox/conversations/:id/read */
