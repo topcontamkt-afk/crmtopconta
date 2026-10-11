@@ -12,6 +12,9 @@ import {
   createMetaTemplate,
   deleteMetaTemplate,
   mapMetaStatus,
+  CtaButton,
+  LANGUAGES,
+  normalizeButtonPhone,
   SAMPLE_VALUES,
   TEMPLATE_CATEGORIES,
   templateParams,
@@ -78,13 +81,31 @@ router.get("/", async (req, res) => {
   res.json(templates.map(present));
 });
 
+const ctaSchema = z.object({
+  type: z.enum(["URL", "PHONE_NUMBER"]),
+  text: z.string().max(60),
+  url: z.string().max(2100).optional(),
+  phone: z.string().max(40).optional(),
+});
+
+/** Botões de chamada para ação já limpos: telefone no formato +DDI..., espaços cortados. */
+function cleanCtas(list: z.infer<typeof ctaSchema>[] | undefined): CtaButton[] {
+  return (list ?? []).map((b) =>
+    b.type === "URL"
+      ? { type: "URL", text: b.text.trim(), url: (b.url ?? "").trim() }
+      : { type: "PHONE_NUMBER", text: b.text.trim(), phone: normalizeButtonPhone(b.phone ?? "") ?? (b.phone ?? "").trim() }
+  );
+}
+
 const createSchema = z.object({
   channel: z.enum(["WHATSAPP", "SMS"]),
   name: z.string().min(1).max(120),
   body: z.string().min(1),
   category: z.enum(TEMPLATE_CATEGORIES).optional(),
   footer: z.string().max(200).optional(),
-  quickReplies: z.array(z.string().max(60)).max(5).optional(),
+  quickReplies: z.array(z.string().max(60)).max(12).optional(),
+  buttons: z.array(ctaSchema).max(6).optional(),
+  language: z.enum(LANGUAGES).optional(),
 });
 
 router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
@@ -94,7 +115,7 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const d = parsed.data;
 
   if (d.channel === "WHATSAPP") {
-    const erros = validateTemplate({ body: d.body, footer: d.footer, quickReplies: d.quickReplies, category: d.category });
+    const erros = validateTemplate({ body: d.body, footer: d.footer, quickReplies: d.quickReplies, buttons: cleanCtas(d.buttons), category: d.category });
     if (erros.length) return res.status(400).json({ error: erros.join(" "), erros });
   }
 
@@ -108,7 +129,13 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
       body: d.body,
       status: d.channel === "WHATSAPP" ? "RASCUNHO" : "APROVADO",
       ...(d.channel === "WHATSAPP"
-        ? { category: d.category, footer: d.footer?.trim() || null, quickReplies: d.quickReplies?.map((b) => b.trim()).filter(Boolean) ?? [] }
+        ? {
+            category: d.category,
+            footer: d.footer?.trim() || null,
+            quickReplies: d.quickReplies?.map((b) => b.trim()).filter(Boolean) ?? [],
+            buttons: cleanCtas(d.buttons) as any,
+            ...(d.language ? { language: d.language } : {}),
+          }
         : {}),
     },
   });
@@ -121,7 +148,9 @@ const updateSchema = z.object({
   body: z.string().min(1).optional(),
   category: z.enum(TEMPLATE_CATEGORIES).optional(),
   footer: z.string().max(200).nullable().optional(),
-  quickReplies: z.array(z.string().max(60)).max(5).optional(),
+  quickReplies: z.array(z.string().max(60)).max(12).optional(),
+  buttons: z.array(ctaSchema).max(6).optional(),
+  language: z.enum(LANGUAGES).optional(),
   // Aprovação manual: só existe para ambiente sem Meta (desenvolvimento). Com a Meta conectada o status vem dela.
   status: z.enum(["RASCUNHO", "PENDENTE_APROVACAO", "APROVADO", "REJEITADO"]).optional(),
   rejectionReason: z.string().optional(),
@@ -139,6 +168,7 @@ router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
 
   const data: any = { ...parsed.data };
   delete data.variableMap;
+  delete data.buttons;
   if (parsed.data.variableMap !== undefined) {
     if (!template.metaBody) return res.status(400).json({ error: "Só templates importados da Meta têm mapa de variáveis." });
     const invalido = validateVariableMap(parsed.data.variableMap, positionsIn(template.metaBody).length);
@@ -146,7 +176,7 @@ router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
     data.variableMap = parsed.data.variableMap;
     data.body = applyVariableMap(template.metaBody, parsed.data.variableMap);
   }
-  if (template.origin === "META" && (parsed.data.body !== undefined || parsed.data.footer !== undefined || parsed.data.quickReplies !== undefined || parsed.data.category !== undefined)) {
+  if (template.origin === "META" && (parsed.data.body !== undefined || parsed.data.footer !== undefined || parsed.data.quickReplies !== undefined || parsed.data.buttons !== undefined || parsed.data.category !== undefined)) {
     return res.status(409).json({ error: "Este template veio da Meta: o texto só muda lá. Aqui você pode ajustar o nome e o significado das variáveis, ou criar um template novo." });
   }
   if (template.channel === "WHATSAPP" && template.origin !== "META") {
@@ -158,17 +188,21 @@ router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
       body: parsed.data.body ?? template.body,
       footer: parsed.data.footer === undefined ? template.footer : parsed.data.footer,
       quickReplies: parsed.data.quickReplies ?? ((template.quickReplies as string[] | null) ?? []),
+      buttons: parsed.data.buttons ? cleanCtas(parsed.data.buttons) : ((template.buttons as CtaButton[] | null) ?? []),
       category: parsed.data.category ?? template.category,
     };
     const erros = validateTemplate(merged);
     if (erros.length) return res.status(400).json({ error: erros.join(" "), erros });
     if (parsed.data.quickReplies) data.quickReplies = parsed.data.quickReplies.map((b) => b.trim()).filter(Boolean);
+    if (parsed.data.buttons) data.buttons = merged.buttons as any;
 
     // Mudou o conteúdo de um template que já foi para a Meta: é uma NOVA versão, que precisa de nova aprovação.
     const mudouConteudo =
       merged.body !== template.body ||
       (merged.footer ?? null) !== (template.footer ?? null) ||
       JSON.stringify(merged.quickReplies) !== JSON.stringify(template.quickReplies ?? []) ||
+      JSON.stringify(merged.buttons) !== JSON.stringify(template.buttons ?? []) ||
+      (parsed.data.language !== undefined && parsed.data.language !== template.language) ||
       merged.category !== template.category;
     if (mudouConteudo && template.metaName) {
       Object.assign(data, { version: template.version + 1, metaName: null, providerTemplateId: null, metaStatus: null, submittedAt: null, status: "RASCUNHO", rejectionReason: null });
@@ -188,7 +222,7 @@ router.post("/:id/submit", requireRole("ADMIN", "OPERATOR"), async (req, res) =>
   if (template.channel !== "WHATSAPP") return res.status(400).json({ error: "Só templates de WhatsApp passam pela Meta." });
   if (template.metaName) return res.status(409).json({ error: "Este template já foi enviado à Meta. Para mudar o texto, edite-o (isso gera uma nova versão)." });
 
-  const erros = validateTemplate({ body: template.body, footer: template.footer, quickReplies: (template.quickReplies as string[] | null) ?? [], category: template.category });
+  const erros = validateTemplate({ body: template.body, footer: template.footer, quickReplies: (template.quickReplies as string[] | null) ?? [], buttons: (template.buttons as CtaButton[] | null) ?? [], category: template.category });
   if (erros.length) return res.status(400).json({ error: erros.join(" "), erros });
 
   const ctx = await metaContext(tenantId);
@@ -204,7 +238,7 @@ router.post("/:id/submit", requireRole("ADMIN", "OPERATOR"), async (req, res) =>
       headerHandle = await uploadTemplateExample(ctx.account.appId, ctx.token, Buffer.from(media.data), media.mime, media.filename);
       await prisma.messageTemplate.update({ where: { id: template.id }, data: { headerHandle } });
     }
-    const payload = buildCreatePayload({ ...template, quickReplies: (template.quickReplies as string[] | null) ?? [], category: template.category, headerHandle });
+    const payload = buildCreatePayload({ ...template, quickReplies: (template.quickReplies as string[] | null) ?? [], buttons: (template.buttons as CtaButton[] | null) ?? [], category: template.category, headerHandle });
     const created = await createMetaTemplate(ctx.wabaId!, ctx.token, payload);
     const updated = await prisma.messageTemplate.update({
       where: { id: template.id },

@@ -16,7 +16,29 @@ export type TemplateCategory = (typeof TEMPLATE_CATEGORIES)[number];
 
 export const BODY_MAX = 1024;
 export const FOOTER_MAX = 60;
-export const QUICK_REPLY_MAX = 3;
+export const QUICK_REPLY_MAX = 10;
+export const BUTTONS_MAX = 10;
+export const URL_BUTTON_MAX = 2;
+export const PHONE_BUTTON_MAX = 1;
+export const URL_MAX = 2000;
+export const LANGUAGES = ["pt_BR", "en_US", "es"] as const;
+
+/** Botão de chamada para ação (link ou telefone). Resposta rápida fica em `quickReplies`. */
+export interface CtaButton {
+  type: "URL" | "PHONE_NUMBER";
+  text: string;
+  url?: string;
+  phone?: string;
+}
+
+/** Telefone do botão "Ligar": +DDI+número, só dígitos (8 a 15). Devolve null se não parecer um telefone. */
+export function normalizeButtonPhone(raw: string): string | null {
+  const digits = String(raw ?? "").replace(/\D/g, "");
+  if (digits.length < 8 || digits.length > 15) return null;
+  // sem DDI informado (10-11 dígitos de DDD+número do Brasil): assume 55
+  const full = digits.length <= 11 ? `55${digits}` : digits;
+  return `+${full}`;
+}
 export const QUICK_REPLY_TEXT_MAX = 25;
 
 /** Valores de exemplo exigidos pela Meta para cada variável no momento de criar o template. */
@@ -33,6 +55,7 @@ export interface TemplateDraft {
   body: string;
   footer?: string | null;
   quickReplies?: string[] | null;
+  buttons?: CtaButton[] | null;
   category?: string | null;
 }
 
@@ -70,7 +93,34 @@ export function validateTemplate(t: TemplateDraft): string[] {
   const botoes = (t.quickReplies ?? []).map((b) => b.trim()).filter(Boolean);
   if (botoes.length > QUICK_REPLY_MAX) erros.push(`No máximo ${QUICK_REPLY_MAX} botões de resposta rápida.`);
   for (const b of botoes) if (b.length > QUICK_REPLY_TEXT_MAX) erros.push(`O botão "${b}" passa de ${QUICK_REPLY_TEXT_MAX} caracteres.`);
-  if (new Set(botoes.map((b) => b.toLowerCase())).size !== botoes.length) erros.push("Há botões com o mesmo texto.");
+
+  // Botões de link e de ligar (chamada para ação)
+  const ctas = t.buttons ?? [];
+  if (botoes.length + ctas.length > BUTTONS_MAX) erros.push(`No máximo ${BUTTONS_MAX} botões no total.`);
+  if (ctas.filter((b) => b.type === "URL").length > URL_BUTTON_MAX) erros.push(`No máximo ${URL_BUTTON_MAX} botões de link.`);
+  if (ctas.filter((b) => b.type === "PHONE_NUMBER").length > PHONE_BUTTON_MAX) erros.push(`No máximo ${PHONE_BUTTON_MAX} botão de ligar.`);
+  for (const b of ctas) {
+    const rotulo = b.text?.trim() || (b.type === "URL" ? "de link" : "de ligar");
+    if (!b.text?.trim()) erros.push(`Informe o texto do botão ${rotulo}.`);
+    else if (b.text.trim().length > QUICK_REPLY_TEXT_MAX) erros.push(`O botão "${b.text.trim()}" passa de ${QUICK_REPLY_TEXT_MAX} caracteres.`);
+    if (b.type === "URL") {
+      const url = (b.url ?? "").trim();
+      let ok = false;
+      try {
+        ok = new URL(url).protocol === "https:";
+      } catch {
+        ok = false;
+      }
+      if (!url) erros.push(`Informe o link do botão "${rotulo}".`);
+      else if (/\{\{/.test(url)) erros.push(`O link do botão "${rotulo}" não pode ter variável.`);
+      else if (!ok) erros.push(`O link do botão "${rotulo}" precisa começar com https:// e ser um endereço válido.`);
+      else if (url.length > URL_MAX) erros.push(`O link do botão "${rotulo}" passa de ${URL_MAX} caracteres.`);
+    } else if (!normalizeButtonPhone(b.phone ?? "")) {
+      erros.push(`Informe um telefone válido (com DDD) no botão "${rotulo}".`);
+    }
+  }
+  const textos = [...botoes, ...ctas.map((b) => (b.text ?? "").trim()).filter(Boolean)].map((x) => x.toLowerCase());
+  if (new Set(textos).size !== textos.length) erros.push("Há botões com o mesmo texto.");
 
   if (!t.category || !(TEMPLATE_CATEGORIES as readonly string[]).includes(t.category)) erros.push("Escolha a categoria: Marketing ou Utilidade.");
   return erros;
@@ -100,7 +150,13 @@ export function buildCreatePayload(t: TemplateDraft & { name: string; language: 
   ];
   if (t.footer?.trim()) components.push({ type: "FOOTER", text: t.footer.trim() });
   const botoes = (t.quickReplies ?? []).map((b) => b.trim()).filter(Boolean);
-  if (botoes.length) components.push({ type: "BUTTONS", buttons: botoes.map((text) => ({ type: "QUICK_REPLY", text })) });
+  const ctaButtons = (t.buttons ?? []).map((b) =>
+    b.type === "URL"
+      ? { type: "URL", text: b.text.trim(), url: (b.url ?? "").trim() }
+      : { type: "PHONE_NUMBER", text: b.text.trim(), phone_number: normalizeButtonPhone(b.phone ?? "") ?? "" }
+  );
+  const allButtons = [...botoes.map((text) => ({ type: "QUICK_REPLY", text })), ...ctaButtons];
+  if (allButtons.length) components.push({ type: "BUTTONS", buttons: allButtons });
   return { name: metaTemplateName(t.name, t.version), language: t.language, category: t.category, components };
 }
 

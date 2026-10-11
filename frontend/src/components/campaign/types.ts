@@ -18,6 +18,11 @@ export interface WaTemplate {
   sendIssue?: string | null;
   qualityScore: string | null;
   updatedAt?: string;
+  channel?: "WHATSAPP" | "SMS";
+  rejectionReason?: string | null;
+  version?: number;
+  metaName?: string | null;
+  language?: string;
 }
 
 export interface Check {

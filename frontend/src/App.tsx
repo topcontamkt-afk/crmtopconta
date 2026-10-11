@@ -33,6 +33,7 @@ import Integrations from "./pages/Integrations";
 import Automations from "./pages/Automations";
 import AuditLog from "./pages/AuditLog";
 import Templates from "./pages/Templates";
+import TemplateEditor from "./pages/TemplateEditor";
 import Imports from "./pages/Imports";
 import Settings from "./pages/Settings";
 import Account from "./pages/Account";
@@ -242,6 +243,8 @@ export default function App() {
                 <Route path="/campaigns/manual" element={<Navigate to="/campaigns/new?publico=planilha" replace />} />
                 <Route path="/campaigns/:id/report" element={<CampaignReport />} />
                 <Route path="/templates" element={<Templates />} />
+                <Route path="/templates/new" element={<TemplateEditor />} />
+                <Route path="/templates/:id/edit" element={<TemplateEditor />} />
                 <Route path="/automations" element={<Automations />} />
                 <Route path="/imports" element={<Imports />} />
                 <Route path="/integrations" element={<Integrations />} />

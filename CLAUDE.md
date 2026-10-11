@@ -190,6 +190,15 @@ tenta baixar o exemplo do cabeçalho na importação, senão envie uma em Templa
 0,0822 × 4,99; utilidade sem padrão), configurável em `GET/PUT /api/campaigns/custos` (ADMIN) e gravado em `Campaign.costPerMessage`. SQL: `backend/prisma/sql/2026-10-assistente-campanha.sql`
 (rodar antes do deploy, depois de `2026-10-campanha-manual.sql`).
 
+### Templates: lista, editor em 3 passos e botões (fase 1)
+
+`/templates` (lista com filtros de categoria/status, busca, pré-visualizar, usar em campanha) e `/templates/new|:id/edit` (`pages/TemplateEditor.tsx`: Configuração → Conteúdo →
+Botões, com preview em WhatsApp; template SMS fica num formulário simples na lista). Botões (`whatsappTemplates.ts`): resposta rápida (`quickReplies`, até 10), **Visitar site**
+(`buttons` tipo URL, até 2, `https://`, link fixo sem variável) e **Ligar** (`PHONE_NUMBER`, até 1, vira +DDI), até 10 no total, textos únicos de até 25 caracteres; no payload da
+Meta as respostas rápidas vêm antes dos botões de ação. `validateTemplate` valida tudo no servidor; criar/editar/enviar usam `buttons`/`language` em `routes/templates.ts` (mudar
+botões de um template já enviado gera nova versão). Link rastreado por cliente (redirecionador próprio com clique no relatório) é a fase 2; copiar código e cabeçalho de
+vídeo/documento, a fase 3. Importados da Meta continuam só leitura (texto muda na Meta).
+
 ### Fila de oportunidades e campanhas por categoria
 
 `services/opportunities.ts` calcula a fila do dashboard (`GET /api/dashboard/oportunidades`): faixas
