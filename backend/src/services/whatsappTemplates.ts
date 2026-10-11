@@ -26,6 +26,7 @@ export const SAMPLE_VALUES: Record<string, string> = {
   percentual: "45",
   saldo: "R$ 850,00",
   limite: "R$ 1.500,00",
+  limite_disponivel: "R$ 850,00",
 };
 
 export interface TemplateDraft {
@@ -87,9 +88,10 @@ export function metaTemplateName(localName: string, version: number): string {
   return `${slug || "template"}_v${version}`;
 }
 
-export function buildCreatePayload(t: TemplateDraft & { name: string; language: string; version: number }) {
+export function buildCreatePayload(t: TemplateDraft & { name: string; language: string; version: number; headerHandle?: string | null }) {
   const order = variableOrder(t.body);
   const components: any[] = [
+    ...(t.headerHandle ? [{ type: "HEADER", format: "IMAGE", example: { header_handle: [t.headerHandle] } }] : []),
     {
       type: "BODY",
       text: toMetaBody(t.body),
@@ -106,12 +108,28 @@ export function buildCreatePayload(t: TemplateDraft & { name: string; language: 
  * Parâmetros do corpo na ordem de {{1}}, {{2}}... A Meta recusa parâmetro vazio, com quebra de linha,
  * tabulação ou 4+ espaços seguidos — por isso o valor é higienizado.
  */
+export function sanitizeParam(raw: unknown): string {
+  const text = String(raw ?? "").replace(/[\r\n\t]+/g, " ").replace(/ {4,}/g, "   ").trim();
+  return text || "-";
+}
+
 export function buildBodyParams(body: string, context: Record<string, unknown>): string[] {
-  return variableOrder(body).map((v) => {
-    const raw = context[v];
-    const text = String(raw ?? "").replace(/[\r\n\t]+/g, " ").replace(/ {4,}/g, "   ").trim();
-    return text || "-";
-  });
+  return variableOrder(body).map((v) => sanitizeParam(context[v]));
+}
+
+/**
+ * Parâmetros do corpo de qualquer template: os importados da Meta seguem o `variableMap` (posição ->
+ * variável nossa); os criados aqui seguem a ordem das variáveis do texto.
+ */
+export function templateParams(t: { body: string; variableMap?: unknown }, context: Record<string, unknown>): string[] {
+  if (Array.isArray(t.variableMap)) return (t.variableMap as (string | null)[]).map((v) => sanitizeParam(v ? context[v] : ""));
+  return buildBodyParams(t.body, context);
+}
+
+/** Texto final de qualquer template com os parâmetros no lugar (importado: posições; local: nomes). */
+export function templatePreview(t: { body: string; metaBody?: string | null; variableMap?: unknown }, params: string[]): string {
+  if (t.metaBody && Array.isArray(t.variableMap)) return t.metaBody.replace(/\{\{\s*(\d+)\s*\}\}/g, (_, n) => params[Number(n) - 1] ?? "");
+  return renderMetaPreview(t.body, params);
 }
 
 /** Texto final que o cliente vê (para guardar na conversa e na pré-visualização). */
@@ -192,6 +210,8 @@ export interface MetaTemplate {
   language?: string;
   rejected_reason?: string;
   quality_score?: { score?: string };
+  parameter_format?: string;
+  components?: any[];
 }
 
 export async function createMetaTemplate(wabaId: string, token: string | undefined, payload: unknown, fetchImpl: FetchLike = fetch as any): Promise<{ id: string; status: string; category?: string }> {
@@ -203,7 +223,7 @@ export async function createMetaTemplate(wabaId: string, token: string | undefin
 /** Lista todos os templates da conta (segue a paginação, com teto de segurança). */
 export async function listMetaTemplates(wabaId: string, token: string | undefined, fetchImpl: FetchLike = fetch as any): Promise<MetaTemplate[]> {
   const out: MetaTemplate[] = [];
-  let url: string | null = `${root(wabaId)}/message_templates?fields=id,name,status,category,language,rejected_reason,quality_score&limit=100`;
+  let url: string | null = `${root(wabaId)}/message_templates?fields=id,name,status,category,language,rejected_reason,quality_score,parameter_format,components&limit=100`;
   for (let page = 0; url && page < 10; page++) {
     const j: any = await call(url, token, { method: "GET" }, fetchImpl);
     out.push(...(j?.data ?? []));
@@ -224,10 +244,14 @@ export async function sendTemplateMessage(
   name: string,
   language: string,
   bodyParams: string[],
-  fetchImpl: FetchLike = fetch as any
+  fetchImpl: FetchLike = fetch as any,
+  headerImageId?: string
 ): Promise<string> {
   const template: any = { name, language: { code: language } };
-  if (bodyParams.length) template.components = [{ type: "body", parameters: bodyParams.map((text) => ({ type: "text", text })) }];
+  const components: any[] = [];
+  if (headerImageId) components.push({ type: "header", parameters: [{ type: "image", image: { id: headerImageId } }] });
+  if (bodyParams.length) components.push({ type: "body", parameters: bodyParams.map((text) => ({ type: "text", text })) });
+  if (components.length) template.components = components;
   const j = await call(
     `${root(phoneNumberId)}/messages`,
     token,
@@ -237,4 +261,40 @@ export async function sendTemplateMessage(
   const wamid = j?.messages?.[0]?.id;
   if (!wamid) throw new SendError("META", "A Meta aceitou, mas não devolveu o id da mensagem.");
   return String(wamid);
+}
+
+
+/**
+ * Upload resumível da Meta: devolve o "handle" da imagem de exemplo exigido ao criar um template com
+ * cabeçalho de imagem. Precisa do ID do app (Integrações). Dois passos: abre a sessão e envia os bytes.
+ */
+export async function uploadTemplateExample(
+  appId: string,
+  token: string | undefined,
+  data: Buffer,
+  mime: string,
+  filename: string,
+  fetchImpl: FetchLike = fetch as any
+): Promise<string> {
+  if (!token) throw new SendError("SEM_TOKEN", "Token de acesso da Meta não configurado (Integrações > WhatsApp).");
+  const open = await fetchImpl(
+    `${root(appId)}/uploads?file_length=${data.length}&file_type=${encodeURIComponent(mime)}&file_name=${encodeURIComponent(filename)}`,
+    { method: "POST", headers: { Authorization: `Bearer ${token}` }, signal: timeout() }
+  ).catch((e: Error) => {
+    throw new SendError("META", `Não foi possível falar com a Meta: ${e.message}`);
+  });
+  const oj = await open.json().catch(() => ({}));
+  if (!open.ok || !oj?.id) throw metaError(oj, open.status);
+
+  const up = await fetchImpl(`https://graph.facebook.com/${WHATSAPP_API_VERSION}/${oj.id}`, {
+    method: "POST",
+    headers: { Authorization: `OAuth ${token}`, file_offset: "0", "Content-Type": "application/octet-stream" },
+    body: new Uint8Array(data),
+    signal: AbortSignal.timeout(30_000),
+  }).catch((e: Error) => {
+    throw new SendError("META", `Não foi possível enviar a imagem à Meta: ${e.message}`);
+  });
+  const uj = await up.json().catch(() => ({}));
+  if (!up.ok || !uj?.h) throw metaError(uj, up.status);
+  return String(uj.h);
 }

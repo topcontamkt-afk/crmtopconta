@@ -5,6 +5,7 @@ export interface WhatsAppConfig {
   account: {
     phoneNumberId: string;
     wabaId: string | null;
+    appId?: string | null;
     displayName: string | null;
     displayPhone: string | null;
     active: boolean;
@@ -52,6 +53,7 @@ export default function WhatsAppConfigModal({ onClose, onChanged }: { onClose: (
   const [cfg, setCfg] = useState<WhatsAppConfig | null>(null);
   const [phoneNumberId, setPhoneNumberId] = useState("");
   const [wabaId, setWabaId] = useState("");
+  const [appId, setAppId] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [appSecret, setAppSecret] = useState("");
   const [msg, setMsg] = useState<{ tipo: "ok" | "erro"; texto: string } | null>(null);
@@ -62,6 +64,7 @@ export default function WhatsAppConfigModal({ onClose, onChanged }: { onClose: (
     setCfg(c);
     setPhoneNumberId(c.account?.phoneNumberId ?? "");
     setWabaId(c.account?.wabaId ?? "");
+    setAppId(c.account?.appId ?? "");
     setAccessToken("");
     setAppSecret("");
   }
@@ -84,7 +87,7 @@ export default function WhatsAppConfigModal({ onClose, onChanged }: { onClose: (
   const salvar = (e: FormEvent) => {
     e.preventDefault();
     return run(async () => {
-      const c = await api<WhatsAppConfig>("/integrations/whatsapp", { method: "PUT", body: { phoneNumberId, wabaId, accessToken: accessToken || undefined, appSecret: appSecret || undefined } });
+      const c = await api<WhatsAppConfig>("/integrations/whatsapp", { method: "PUT", body: { phoneNumberId, wabaId, appId, accessToken: accessToken || undefined, appSecret: appSecret || undefined } });
       aplicar(c);
       setTestes(null);
       setMsg({ tipo: "ok", texto: "Configuração salva. Agora clique em “Testar conexão” e depois cole a URL e o token de verificação no painel da Meta." });
@@ -147,6 +150,10 @@ export default function WhatsAppConfigModal({ onClose, onChanged }: { onClose: (
           <div className="form-row">
             <label>WhatsApp Business Account ID (WABA)</label>
             <input required value={wabaId} onChange={(e) => setWabaId(e.target.value)} placeholder="Ex: 1008442742213587" inputMode="numeric" />
+          </div>
+          <div className="form-row">
+            <label>ID do app da Meta (opcional)</label>
+            <input value={appId} onChange={(e) => setAppId(e.target.value)} placeholder="Só para criar templates com imagem" inputMode="numeric" />
           </div>
           <div className="form-row">
             <label>Access Token (permanente)</label>

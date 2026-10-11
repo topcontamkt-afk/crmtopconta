@@ -15,8 +15,9 @@ import {
   sendTestMessages,
 } from "../services/campaignQueue";
 import { computeABSignificance } from "../services/statistics";
-import { linkRecipients, matchManualAudience, parseManualRows } from "../services/manualCampaign";
-import { usesLimiteDisponivel } from "../services/messageContext";
+import { linkRecipients, prepareManual } from "../services/manualCampaign";
+import { validateWizard } from "../services/campaignWizard";
+import { costConfigFrom, DEFAULT_COSTS } from "../services/messageCost";
 import { maskPhone } from "../services/masking";
 import {
   buildCampaignResults,
@@ -47,39 +48,13 @@ const manualRowsSchema = z
   .min(1)
   .max(MAX_MANUAL_ROWS);
 
-/** Valida a lista contra o template e a base: o que será enviado, o que fica de fora e por quê. */
-async function prepareManual(tenantId: string, rows: z.infer<typeof manualRowsSchema>, templateId: string) {
-  const template = await prisma.messageTemplate.findFirst({ where: { id: templateId, tenantId } });
-  if (!template || template.channel !== "WHATSAPP") return { error: "Template do WhatsApp não encontrado" as const };
-  if (template.status !== "APROVADO") return { error: "Escolha um template aprovado" as const };
-  const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { cpfSalt: true } });
-
-  const { valid, rejected } = parseManualRows(rows, tenant.cpfSalt);
-  const needsLimite = usesLimiteDisponivel(template.body);
-  const matched = await matchManualAudience(prisma, tenantId, valid);
-
-  const enviar = matched.filter((m) => {
-    if (m.excluidoMotivo) {
-      rejected.push({ linha: m.linha, motivo: m.excluidoMotivo });
-      return false;
-    }
-    if (needsLimite && m.limiteDisponivel === null) {
-      rejected.push({ linha: m.linha, motivo: "Sem limite disponível (o template usa essa variável)" });
-      return false;
-    }
-    return true;
-  });
-  rejected.sort((a, b) => a.linha - b.linha);
-  return { template, enviar, rejected, daBase: enviar.filter((m) => m.clientId).length };
-}
-
 const manualPreviewSchema = z.object({ templateId: z.string(), rows: manualRowsSchema });
 
 /** POST /api/campaigns/manual/preview — confere a lista sem gravar nada. */
 router.post("/manual/preview", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const parsed = manualPreviewSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const r = await prepareManual(req.user!.tenantId, parsed.data.rows, parsed.data.templateId);
+  const r = await prepareManual(prisma, req.user!.tenantId, parsed.data.rows, parsed.data.templateId);
   if ("error" in r) return res.status(400).json({ error: r.error });
   res.json({
     total: parsed.data.rows.length,
@@ -100,6 +75,9 @@ const manualCreateSchema = z.object({
   costPerMessage: z.number().nonnegative().default(0),
   // Aceite obrigatório: quem sobe a lista responde por ter autorização para contatar os números.
   consentimento: z.literal(true),
+  // Rascunho: guarda a lista e a campanha sem enfileirar nada (o envio sai ao agendar/lançar).
+  rascunho: z.boolean().default(false),
+  scheduledAt: z.string().datetime().optional(),
 });
 
 /**
@@ -113,7 +91,7 @@ router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const { tenantId, id: userId } = req.user!;
   const d = parsed.data;
 
-  const r = await prepareManual(tenantId, d.rows, d.templateId);
+  const r = await prepareManual(prisma, tenantId, d.rows, d.templateId);
   if ("error" in r) return res.status(400).json({ error: r.error });
   if (r.enviar.length === 0) return res.status(400).json({ error: "Nenhum contato da lista pode receber a mensagem", motivos: r.rejected.slice(0, 200) });
 
@@ -131,7 +109,8 @@ router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
       attributionDays: 30,
       costPerMessage: d.costPerMessage,
       audienceCount: r.enviar.length,
-      status: "AGENDADA",
+      scheduledAt: d.scheduledAt ? new Date(d.scheduledAt) : undefined,
+      status: d.rascunho ? "RASCUNHO" : "AGENDADA",
     },
   });
 
@@ -150,7 +129,7 @@ router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
       })),
     });
   }
-  const saved = await prisma.campaignRecipient.findMany({ where: { tenantId, campaignId: campaign.id }, select: { id: true, clientId: true } });
+  const saved = d.rascunho ? [] : await prisma.campaignRecipient.findMany({ where: { tenantId, campaignId: campaign.id }, select: { id: true, clientId: true } });
   for (let i = 0; i < saved.length; i += 500) {
     await prisma.messageEvent.createMany({
       data: saved.slice(i, i + 500).map((rec) => ({ campaignId: campaign.id, clientId: rec.clientId, recipientId: rec.id, channel: "WHATSAPP" as const, status: "FILA" as const })),
@@ -218,6 +197,54 @@ router.get("/:id/destinatarios", async (req, res) => {
     usaram: medidos.filter((r) => r.usou).length,
     destinatarios: rows,
   });
+});
+
+
+/* ───────────────────────── assistente: validação e custos ───────────────────────── */
+
+const wizardSchema = z.object({
+  templateId: z.string(),
+  scheduledAt: z.string().datetime().nullish(),
+  audience: z.discriminatedUnion("tipo", [
+    z.object({ tipo: z.literal("todos") }),
+    z.object({ tipo: z.literal("segmento"), segmentId: z.string() }),
+    z.object({ tipo: z.literal("filtros"), filters: z.record(z.any()) }),
+    z.object({ tipo: z.literal("lista"), clientIds: z.array(z.string()).min(1).max(100_000) }),
+    z.object({ tipo: z.literal("planilha"), rows: manualRowsSchema }),
+  ]),
+});
+
+/** POST /api/campaigns/wizard/validar — confere tudo antes de lançar (só lê, não grava nada). */
+router.post("/wizard/validar", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const parsed = wizardSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  res.json(await validateWizard(prisma, req.user!.tenantId, parsed.data as any));
+});
+
+/** GET /api/campaigns/custos — custo por mensagem usado na estimativa (padrão ou o configurado). */
+router.get("/custos", async (req, res) => {
+  const t = await prisma.tenant.findUniqueOrThrow({ where: { id: req.user!.tenantId }, select: { custoMarketingUsd: true, custoUtilidadeUsd: true, cambioUsdBrl: true } });
+  res.json({ ...costConfigFrom(t), padrao: DEFAULT_COSTS });
+});
+
+const custosSchema = z.object({
+  marketingUsd: z.number().min(0).max(10).nullable(),
+  utilidadeUsd: z.number().min(0).max(10).nullable(),
+  cambioUsdBrl: z.number().gt(0).max(100),
+});
+
+/** PUT /api/campaigns/custos — ajusta a tabela de preços e o câmbio da estimativa (só ADMIN). */
+router.put("/custos", requireRole("ADMIN"), async (req, res) => {
+  const parsed = custosSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { tenantId, id: userId } = req.user!;
+  const t = await prisma.tenant.update({
+    where: { id: tenantId },
+    data: { custoMarketingUsd: parsed.data.marketingUsd, custoUtilidadeUsd: parsed.data.utilidadeUsd, cambioUsdBrl: parsed.data.cambioUsdBrl },
+    select: { custoMarketingUsd: true, custoUtilidadeUsd: true, cambioUsdBrl: true },
+  });
+  await logAudit({ tenantId, userId, action: "UPDATE_MESSAGE_COSTS", target: "Tenant", targetId: tenantId, details: parsed.data });
+  res.json({ ...costConfigFrom(t), padrao: DEFAULT_COSTS });
 });
 
 router.get("/:id", async (req, res) => {

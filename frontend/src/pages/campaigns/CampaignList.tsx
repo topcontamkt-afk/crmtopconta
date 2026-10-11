@@ -38,7 +38,7 @@ export default function CampaignList() {
       <div className="topbar">
         <h2>Campanhas</h2>
         <div style={{ display: "flex", gap: 8 }}>
-          <Link className="btn secondary" to="/campaigns/manual">Campanha por planilha</Link>
+          <Link className="btn secondary" to="/campaigns/new?publico=planilha">Campanha por planilha</Link>
           <Link className="btn" to="/campaigns/new">+ Nova campanha</Link>
         </div>
       </div>

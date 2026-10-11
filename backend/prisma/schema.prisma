@@ -93,12 +93,17 @@ enum NotificationSeverity {
 }
 
 model Tenant {
-  id               String   @id @default(uuid())
-  name             String
-  cpfSalt          String   @default(uuid()) // salt por tenant para hash de CPF
-  retentionDays    Int      @default(1095) // 3 anos default (LGPD)
-  maxMsgsPerMinute Int      @default(600) // rate limit global do tenant, aplicado no dispatch de campanhas
-  createdAt        DateTime @default(now())
+  id                String   @id @default(uuid())
+  name              String
+  cpfSalt           String   @default(uuid()) // salt por tenant para hash de CPF
+  retentionDays     Int      @default(1095) // 3 anos default (LGPD)
+  maxMsgsPerMinute  Int      @default(600) // rate limit global do tenant, aplicado no dispatch de campanhas
+  // Custo estimado por mensagem do WhatsApp (tabela da Meta, em dólar, por categoria) e o câmbio usado
+  // para mostrar em reais no assistente de campanhas. Nulo = usa o padrão de services/messageCost.ts.
+  custoMarketingUsd Decimal? @db.Decimal(10, 6)
+  custoUtilidadeUsd Decimal? @db.Decimal(10, 6)
+  cambioUsdBrl      Decimal? @db.Decimal(10, 4)
+  createdAt         DateTime @default(now())
 
   users              User[]
   clients            Client[]
@@ -120,6 +125,7 @@ model Tenant {
   conversations      Conversation[]
   waMessages         WaMessage[]
   waMediaBlobs       WaMediaBlob[]
+  templateMedias     TemplateMedia[]
 }
 
 model User {
@@ -389,20 +395,20 @@ model MessageEvent {
 /// analisar a campanha. CPF só como hash (mesmo HMAC por tenant da base); `clientId` é preenchido
 /// quando o contato existe (ou passa a existir) na base.
 model CampaignRecipient {
-  id               String   @id @default(uuid())
+  id               String    @id @default(uuid())
   tenantId         String
-  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+  tenant           Tenant    @relation(fields: [tenantId], references: [id])
   campaignId       String
-  campaign         Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaign         Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   nome             String
   telefone         String // E.164
   cpfHash          String?
   cpfMasked        String?
-  limiteDisponivel Decimal? @db.Decimal(14, 2) // valor da planilha; só aparece na mensagem, não altera o cliente
+  limiteDisponivel Decimal?  @db.Decimal(14, 2) // valor da planilha; só aparece na mensagem, não altera o cliente
   clientId         String?
-  client           Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  client           Client?   @relation(fields: [clientId], references: [id], onDelete: SetNull)
   optOutAt         DateTime? // pediu para parar (contato fora da base); vale para as próximas listas
-  createdAt        DateTime @default(now())
+  createdAt        DateTime  @default(now())
 
   messageEvents MessageEvent[]
 
@@ -504,12 +510,39 @@ model MessageTemplate {
   metaStatus         String? // APPROVED | PENDING | REJECTED | PAUSED | DISABLED ...
   qualityScore       String? // GREEN | YELLOW | RED | UNKNOWN
   submittedAt        DateTime?
+  // Cabeçalho com imagem (único formato de cabeçalho que sabemos enviar). A imagem fica em TemplateMedia.
+  headerFormat       String? // IMAGE
+  headerHandle       String? // handle da Meta (upload resumível) usado como exemplo ao criar o template
+  // Templates criados direto na Meta (ou em outro sistema) são IMPORTADOS na sincronização: origin=META.
+  // O texto original da Meta tem {{1}},{{2}}...; `variableMap` diz qual variável nossa preenche cada posição
+  // (null = ainda não mapeada) e `body` é o texto com os nomes das variáveis, para exibição.
+  origin             String         @default("LOCAL") // LOCAL | META
+  metaBody           String?
+  variableMap        Json? // (string|null)[]
+  buttons            Json? // botões que não são resposta rápida (link/telefone), só para exibir
+  sendIssue          String? // motivo de não conseguirmos enviar (cabeçalho de vídeo, botão com variável...)
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
 
   campaigns Campaign[]
+  media     TemplateMedia?
 
   @@unique([tenantId, channel, name])
+}
+
+/// Imagem do cabeçalho de um template do WhatsApp (até 3 MB: a Vercel limita o corpo da requisição).
+model TemplateMedia {
+  id         String          @id @default(uuid())
+  tenantId   String
+  tenant     Tenant          @relation(fields: [tenantId], references: [id])
+  templateId String          @unique
+  template   MessageTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  mime       String
+  filename   String
+  size       Int
+  data       Bytes
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
 }
 
 model Notification {
@@ -625,6 +658,7 @@ model WhatsAppAccount {
   tenant           Tenant    @relation(fields: [tenantId], references: [id])
   phoneNumberId    String    @unique
   wabaId           String?
+  appId            String? // ID do app da Meta: necessário para enviar a imagem de exemplo de templates com cabeçalho
   displayName      String?
   displayPhone     String?
   active           Boolean   @default(true)

@@ -1,5 +1,7 @@
-import { FormEvent, useEffect, useState } from "react";
+import React, { FormEvent, useEffect, useState } from "react";
 import { api } from "../api/client";
+import VariableMapEditor from "../components/campaign/VariableMapEditor";
+import { WaTemplate } from "../components/campaign/types";
 
 interface Template {
   id: string;
@@ -16,6 +18,24 @@ interface Template {
   qualityScore: string | null;
   version: number;
   variaveis: string[];
+  variaveisSemMapa?: number[];
+  origin?: string;
+  sendIssue?: string | null;
+  headerFormat?: string | null;
+  imagem?: { mime: string; size: number; filename: string } | null;
+  metaBody?: string | null;
+  variableMap?: (string | null)[] | null;
+}
+
+const IMAGEM_MAX = 3 * 1024 * 1024;
+
+function lerBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+    r.onerror = () => reject(new Error("Não consegui ler a imagem"));
+    r.readAsDataURL(file);
+  });
 }
 
 interface MetaStatus {
@@ -56,6 +76,9 @@ export default function Templates() {
   const [msg, setMsg] = useState<{ tipo: "ok" | "erro"; texto: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
+  const [imagem, setImagem] = useState<File | null>(null);
+  const [imagemUrl, setImagemUrl] = useState<string | null>(null);
+  const [mapaAberto, setMapaAberto] = useState<string | null>(null);
 
   function load() {
     api<Template[]>("/templates").then(setTemplates);
@@ -69,6 +92,13 @@ export default function Templates() {
   function limpar() {
     setEditId(null);
     setName("");
+    escolherImagem(null);
+  }
+
+  function escolherImagem(file: File | null) {
+    if (imagemUrl) URL.revokeObjectURL(imagemUrl);
+    setImagem(file);
+    setImagemUrl(file ? URL.createObjectURL(file) : null);
   }
 
   function editar(t: Template) {
@@ -89,12 +119,18 @@ export default function Templates() {
     setMsg(null);
     const extras = wa ? { category, footer: footer.trim() || undefined, quickReplies: botoes.map((b) => b.trim()).filter(Boolean) } : {};
     try {
+      if (imagem && imagem.size > IMAGEM_MAX) throw new Error("A imagem passa de 3 MB.");
+      let id = editId;
       if (editId) {
         await api(`/templates/${editId}`, { method: "PATCH", body: { name, body, ...extras, footer: wa ? footer.trim() || null : undefined } });
         setMsg({ tipo: "ok", texto: "Template atualizado. Se ele já tinha sido enviado à Meta, virou uma nova versão e precisa ser enviado de novo." });
       } else {
-        await api("/templates", { method: "POST", body: { channel, name, body, ...extras } });
+        const criado = await api<Template>("/templates", { method: "POST", body: { channel, name, body, ...extras } });
+        id = criado.id;
         setMsg({ tipo: "ok", texto: wa ? "Rascunho criado. Revise e clique em “Enviar para aprovação” na lista." : "Template criado." });
+      }
+      if (wa && imagem && id) {
+        await api(`/templates/${id}/header`, { method: "PUT", body: { data: await lerBase64(imagem), mime: imagem.type, filename: imagem.name } });
       }
       limpar();
       load();
@@ -120,11 +156,22 @@ export default function Templates() {
   }
 
   const enviar = (t: Template) => acao(() => api(`/templates/${t.id}/submit`, { method: "POST" }), `“${t.name}” enviado à Meta. A análise costuma levar de minutos a algumas horas; o status atualiza sozinho.`);
-  const excluir = (t: Template) => window.confirm(`Excluir “${t.name}”? Se já estiver na Meta, ele também será removido de lá.`) && acao(() => api(`/templates/${t.id}`, { method: "DELETE" }), "Template excluído.");
+  const excluir = (t: Template) =>
+    window.confirm(
+      t.origin === "META"
+        ? `Tirar “${t.name}” do sistema? Ele continua na Meta (pode estar em uso em outro lugar) e volta na próxima sincronização.`
+        : `Excluir “${t.name}”? Se já estiver na Meta, ele também será removido de lá.`
+    ) && acao(() => api(`/templates/${t.id}`, { method: "DELETE" }), "Template excluído.");
+  const removerImagem = (t: Template) => acao(() => api(`/templates/${t.id}/header`, { method: "DELETE" }), "Imagem removida.");
+  const trocarImagem = async (t: Template, file: File | undefined) => {
+    if (!file) return;
+    if (file.size > IMAGEM_MAX) return setMsg({ tipo: "erro", texto: "A imagem passa de 3 MB." });
+    await acao(async () => api(`/templates/${t.id}/header`, { method: "PUT", body: { data: await lerBase64(file), mime: file.type, filename: file.name } }), "Imagem do cabeçalho atualizada.");
+  };
   const sincronizar = () =>
     acao(async () => {
-      const r = await api<{ atualizados: number; total: number; somenteNaMeta: { name: string }[] }>("/templates/sync", { method: "POST" });
-      setMsg({ tipo: "ok", texto: `Sincronizado: ${r.total} template(s) na Meta, ${r.atualizados} atualizado(s) aqui.${r.somenteNaMeta.length ? ` ${r.somenteNaMeta.length} existem só na Meta (criados direto no painel).` : ""}` });
+      const r = await api<{ atualizados: number; importados: number; total: number; somenteNaMeta: { name: string }[] }>("/templates/sync", { method: "POST" });
+      setMsg({ tipo: "ok", texto: `Sincronizado: ${r.total} template(s) na Meta, ${r.atualizados} atualizado(s) e ${r.importados} importado(s) para cá.${r.somenteNaMeta.length ? ` ${r.somenteNaMeta.length} ficaram de fora (autenticação, reprovados ou desativados).` : ""}` });
     }, "");
   const setStatus = (id: string, status: Template["status"]) => acao(() => api(`/templates/${id}`, { method: "PATCH", body: { status } }), "Status alterado manualmente (ambiente sem Meta).");
   const doPreview = async (id: string) => setPreview((await api<{ rendered: string }>(`/templates/${id}/preview`, { method: "POST", body: {} })).rendered);
@@ -214,8 +261,20 @@ export default function Templates() {
           </>
         )}
 
+        {wa && (
+          <div className="form-row">
+            <label>Imagem no topo da mensagem (opcional, JPG ou PNG até 3 MB)</label>
+            <input type="file" accept="image/jpeg,image/png" onChange={(e) => escolherImagem(e.target.files?.[0] ?? null)} />
+            <span className="seg-hint">
+              {editId && templates.find((x) => x.id === editId)?.imagem && !imagem ? "Este template já tem uma imagem; escolha outra para trocar. " : ""}
+              Para enviar à Meta um template com imagem, informe o ID do app em Integrações → WhatsApp.
+            </span>
+          </div>
+        )}
+
         <div className="card" style={{ background: "var(--surface-alt)", maxWidth: 420 }}>
           <strong style={{ fontSize: 12 }}>Como o cliente vai ver:</strong>
+          {wa && imagemUrl && <img src={imagemUrl} alt="Imagem do cabeçalho" style={{ width: "100%", borderRadius: 8, marginTop: 6 }} />}
           <p style={{ whiteSpace: "pre-wrap", margin: "6px 0" }}>{ao(body)}</p>
           {wa && footer && <div className="pd-hint">{footer}</div>}
           {wa && botoes.filter(Boolean).map((b) => <div key={b} style={{ marginTop: 4, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: 8, textAlign: "center", fontSize: 12 }}>{b}</div>)}
@@ -240,10 +299,13 @@ export default function Templates() {
           <thead><tr><th>Nome</th><th>Canal</th><th>Status</th><th>Ações</th></tr></thead>
           <tbody>
             {templates.map((t) => (
-              <tr key={t.id}>
+              <React.Fragment key={t.id}>
+              <tr>
                 <td>
                   {t.name}
-                  {t.channel === "WHATSAPP" && <div className="pd-hint">{t.category === "UTILITY" ? "Utilidade" : "Marketing"}{t.metaName ? ` · ${t.metaName}` : ""}{t.version > 1 ? ` · versão ${t.version}` : ""}</div>}
+                  {t.channel === "WHATSAPP" && <div className="pd-hint">{t.category === "UTILITY" ? "Utilidade" : "Marketing"}{t.metaName ? ` · ${t.metaName}` : ""}{t.version > 1 ? ` · versão ${t.version}` : ""}{t.origin === "META" ? " · veio da Meta" : ""}{t.imagem ? " · com imagem" : t.headerFormat === "IMAGE" ? " · falta a imagem" : ""}</div>}
+                  {t.sendIssue && <div className="pd-hint" style={{ color: "var(--warning)" }}>Não envia por aqui: {t.sendIssue}</div>}
+                  {!!t.variaveisSemMapa?.length && <div className="pd-hint" style={{ color: "var(--warning)" }}>Defina o que cada variável significa para poder enviar.</div>}
                 </td>
                 <td>{t.channel}</td>
                 <td>
@@ -254,7 +316,17 @@ export default function Templates() {
                 </td>
                 <td style={{ whiteSpace: "nowrap" }}>
                   <button className="btn secondary" onClick={() => doPreview(t.id)}>Pré-visualizar</button>{" "}
-                  <button className="btn secondary" onClick={() => editar(t)}>Editar</button>{" "}
+                  {t.origin !== "META" && <><button className="btn secondary" onClick={() => editar(t)}>Editar</button>{" "}</>}
+                  {t.channel === "WHATSAPP" && !!t.metaBody && !!t.variaveis.length && (
+                    <><button className="btn secondary" onClick={() => setMapaAberto(mapaAberto === t.id ? null : t.id)}>Variáveis</button>{" "}</>
+                  )}
+                  {t.channel === "WHATSAPP" && (t.headerFormat === "IMAGE" || t.origin !== "META") && (
+                    <label className="btn secondary" style={{ cursor: "pointer" }}>
+                      {t.imagem ? "Trocar imagem" : "Imagem"}
+                      <input type="file" accept="image/jpeg,image/png" style={{ display: "none" }} onChange={(e) => trocarImagem(t, e.target.files?.[0])} />
+                    </label>
+                  )}{" "}
+                  {t.imagem && !t.metaName && <><button className="btn secondary" onClick={() => removerImagem(t)}>Tirar imagem</button>{" "}</>}
                   {t.channel === "WHATSAPP" && !t.metaName && meta?.configurado && (
                     <><button className="btn" disabled={busy} onClick={() => enviar(t)}>Enviar para aprovação</button>{" "}</>
                   )}
@@ -264,6 +336,14 @@ export default function Templates() {
                   <button className="btn secondary" disabled={busy} onClick={() => excluir(t)}>Excluir</button>
                 </td>
               </tr>
+              {mapaAberto === t.id && (
+                <tr>
+                  <td colSpan={4}>
+                    <VariableMapEditor template={t as unknown as WaTemplate} onSaved={() => { setMapaAberto(null); load(); setMsg({ tipo: "ok", texto: "Variáveis salvas." }); }} />
+                  </td>
+                </tr>
+              )}
+              </React.Fragment>
             ))}
             {templates.length === 0 && (
               <tr><td colSpan={4} style={{ color: "var(--text-muted)" }}>Nenhum template criado ainda</td></tr>

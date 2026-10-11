@@ -1,0 +1,471 @@
+import FrescorExtrato from "../../components/FrescorExtrato";
+import { useEffect, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { api } from "../../api/client";
+import { FAIXA_OPTIONS } from "../../utils/faixas";
+
+const STEPS = ["Nome/objetivo", "Público", "Canal & mensagem", "Agenda & throttling", "Confirmação"];
+
+interface Template {
+  id: string;
+  channel: "WHATSAPP" | "SMS";
+  name: string;
+  body: string;
+  status: string;
+}
+
+interface Segment {
+  id: string;
+  name: string;
+  lastCount: number | null;
+}
+
+interface PresetAudienceState {
+  presetClientIds?: string[];
+  presetLabel?: string;
+  // Texto e canal sugeridos pela tela de origem (ex.: oportunidade do Dashboard, campanha por
+  // categoria de comércio) — o operador ainda pode editar tudo no assistente.
+  presetMessage?: string;
+  presetChannel?: "WHATSAPP" | "SMS";
+}
+
+export default function CampaignWizardClassic() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [step, setStep] = useState(0);
+
+  // Público pré-montado vindo de outra tela (ex.: card "Aniversariantes do mês" no Dashboard,
+  // que já sabe exatamente quais clientes quer atingir) — chega via router state, não URL, pra
+  // não precisar serializar uma lista de ids na querystring.
+  const preset = (location.state as PresetAudienceState | null) || null;
+  const [usePreset, setUsePreset] = useState(!!preset?.presetClientIds?.length);
+
+  const [name, setName] = useState("");
+  const [objective, setObjective] = useState("");
+  const [segments, setSegments] = useState<Segment[]>([]);
+  const [segmentId, setSegmentId] = useState("");
+  const [cidade, setCidade] = useState("");
+  const [faixaUso, setFaixaUso] = useState("");
+  const [statusConta, setStatusConta] = useState("");
+  const [perfilRenda, setPerfilRenda] = useState("");
+  const [etapaUso, setEtapaUso] = useState("");
+  const [limiteCheio, setLimiteCheio] = useState<number | null>(null);
+  const [semUsoDiasMin, setSemUsoDiasMin] = useState("");
+  const [usadoNosUltimosDias, setUsadoNosUltimosDias] = useState("");
+  const [categoriaCompra, setCategoriaCompra] = useState("");
+  const [compraNosUltimosDias, setCompraNosUltimosDias] = useState("");
+  const [categoriasDisponiveis, setCategoriasDisponiveis] = useState<{ key: string; label: string }[]>([]);
+  const [audiencePreview, setAudiencePreview] = useState<number | null>(
+    usePreset ? preset!.presetClientIds!.length : null
+  );
+  const [channel, setChannel] = useState<"WHATSAPP" | "SMS">(preset?.presetChannel ?? "WHATSAPP");
+
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [templateId, setTemplateId] = useState("");
+  const [messageTemplate, setMessageTemplate] = useState(preset?.presetMessage ?? "Olá {{nome}}, você já utilizou {{percentual}}% do seu limite!");
+
+  const [abEnabled, setAbEnabled] = useState(false);
+  const [messageTemplateB, setMessageTemplateB] = useState("");
+  const [variantSplitPercent, setVariantSplitPercent] = useState(50);
+
+  const [isSandbox, setIsSandbox] = useState(false);
+
+  const [throttlePerMin, setThrottlePerMin] = useState(60);
+  const [dedupeWindowHrs, setDedupeWindowHrs] = useState(72);
+  const [attributionDays, setAttributionDays] = useState(7);
+  const [controlEnabled, setControlEnabled] = useState(false);
+  const [controlGroupPercent, setControlGroupPercent] = useState(10);
+  const [scheduledAt, setScheduledAt] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    api<Template[]>(`/templates?channel=${channel}&status=APROVADO`).then(setTemplates);
+    setTemplateId("");
+  }, [channel]);
+
+  useEffect(() => {
+    api<Segment[]>("/segments").then(setSegments);
+    api<{ todasCategorias: { key: string; label: string }[] }>("/purchases/categories").then((r) => setCategoriasDisponiveis(r.todasCategorias)).catch(() => {});
+  }, []);
+
+  function adHocFilters() {
+    if (usePreset && preset?.presetClientIds) {
+      return { clientIds: preset.presetClientIds };
+    }
+    return {
+      cidade: cidade ? [cidade] : undefined,
+      faixaUso: faixaUso ? [faixaUso] : undefined,
+      statusConta: statusConta ? [statusConta] : undefined,
+      perfilRenda: perfilRenda ? [perfilRenda] : undefined,
+      etapaUso: etapaUso ? [etapaUso] : undefined,
+      semUsoDiasMin: semUsoDiasMin ? Number(semUsoDiasMin) : undefined,
+      usadoNosUltimosDias: usadoNosUltimosDias ? Number(usadoNosUltimosDias) : undefined,
+      categoriasCompra: categoriaCompra ? [categoriaCompra] : undefined,
+      compraNosUltimosDias: compraNosUltimosDias ? Number(compraNosUltimosDias) : undefined,
+    };
+  }
+
+  async function previewAudience() {
+    // A lista pré-selecionada já vem com a contagem conhecida (é a própria lista de ids) — não
+    // precisa recontar no servidor.
+    if (usePreset) {
+      setAudiencePreview(preset?.presetClientIds?.length ?? 0);
+      return;
+    }
+    const resp = await api<{ count: number }>("/segments/preview", { method: "POST", body: adHocFilters() });
+    setAudiencePreview(resp.count);
+    // Quem já usou 100% do limite não tem crédito para oferecer: avisa quantos estão no público.
+    if (!faixaUso || faixaUso === "USO_100") {
+      const cheio = await api<{ count: number }>("/segments/preview", {
+        method: "POST",
+        body: { ...adHocFilters(), faixaUso: ["USO_100"] },
+      });
+      setLimiteCheio(cheio.count);
+    } else {
+      setLimiteCheio(0);
+    }
+  }
+
+  function selectSegment(id: string) {
+    setSegmentId(id);
+    const seg = segments.find((s) => s.id === id);
+    setAudiencePreview(seg?.lastCount ?? null);
+  }
+
+  function voltarParaPublicoManual() {
+    setUsePreset(false);
+    setAudiencePreview(null);
+  }
+
+  const effectiveMessage = templateId ? templates.find((t) => t.id === templateId)?.body || "" : messageTemplate;
+
+  async function handleConfirm() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const campaign = await api<{ id: string }>("/campaigns", {
+        method: "POST",
+        body: {
+          name,
+          objective,
+          channel,
+          segmentId: !usePreset && segmentId ? segmentId : undefined,
+          adHocFilters: !usePreset && segmentId ? undefined : adHocFilters(),
+          templateId: templateId || undefined,
+          messageTemplate: templateId ? undefined : messageTemplate,
+          messageTemplateB: abEnabled ? messageTemplateB : undefined,
+          variantSplitPercent: abEnabled ? variantSplitPercent : undefined,
+          isSandbox,
+          throttlePerMin,
+          dedupeWindowHrs,
+          attributionDays,
+          controlGroupPercent: controlEnabled ? controlGroupPercent : undefined,
+          scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : undefined,
+        },
+      });
+      navigate(`/campaigns/${campaign.id}/report`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Erro ao criar campanha");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div>
+      <h2>Nova campanha</h2>
+      <div className="wizard-steps">
+        {STEPS.map((s, i) => (
+          <div key={s} className={`wizard-step ${i === step ? "active" : ""}`}>
+            {i + 1}. {s}
+          </div>
+        ))}
+      </div>
+
+      <div className="card">
+        {step === 0 && (
+          <div>
+            <div className="form-row">
+              <label>Nome da campanha</label>
+              <input value={name} onChange={(e) => setName(e.target.value)} />
+            </div>
+            <div className="form-row">
+              <label>Objetivo</label>
+              <input value={objective} onChange={(e) => setObjective(e.target.value)} />
+            </div>
+          </div>
+        )}
+
+        {step === 1 && (
+          <div>
+            {preset?.presetClientIds?.length ? (
+              <div className="card" style={{ background: "var(--surface-alt)", marginBottom: 14 }}>
+                {usePreset ? (
+                  <>
+                    <span className="badge ok">Lista pré-selecionada</span>
+                    <p style={{ marginBottom: 8 }}>
+                      <strong>{preset.presetLabel || "Público pré-selecionado"}</strong> —{" "}
+                      <strong>{preset.presetClientIds.length}</strong> clientes específicos, já escolhidos
+                      na tela de origem.
+                    </p>
+                    <button type="button" className="btn secondary" onClick={voltarParaPublicoManual}>
+                      Usar outro público em vez desse
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" className="btn secondary" onClick={() => { setUsePreset(true); setSegmentId(""); setAudiencePreview(preset.presetClientIds!.length); }}>
+                    Voltar a usar a lista pré-selecionada ({preset.presetLabel}, {preset.presetClientIds.length} clientes)
+                  </button>
+                )}
+              </div>
+            ) : null}
+
+            {!usePreset && (
+              <div className="form-row">
+                <label>Segmento salvo (opcional)</label>
+                <select value={segmentId} onChange={(e) => selectSegment(e.target.value)}>
+                  <option value="">— Montar público na hora (abaixo) —</option>
+                  {segments.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} {s.lastCount !== null ? `(${s.lastCount} clientes)` : ""}
+                    </option>
+                  ))}
+                </select>
+                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                  Segmentos combináveis (recorrentes, sem uso, inativos, tags como "comércio" etc.) são
+                  criados na tela "Segmentos" e reaproveitados aqui.
+                </span>
+              </div>
+            )}
+
+            {!usePreset && !segmentId && (
+              <>
+                {etapaUso && <FrescorExtrato />}
+                <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                  <input placeholder="Cidade" value={cidade} onChange={(e) => setCidade(e.target.value)} />
+                  <select value={faixaUso} onChange={(e) => setFaixaUso(e.target.value)}>
+                    <option value="">Qualquer faixa</option>
+                    {FAIXA_OPTIONS.map((f) => (
+                      <option key={f.value} value={f.value}>{f.label}</option>
+                    ))}
+                  </select>
+                  <select value={perfilRenda} onChange={(e) => setPerfilRenda(e.target.value)}>
+                    <option value="">Qualquer perfil de renda</option>
+                    <option value="PF1">PF1 (até R$ 4.000)</option>
+                    <option value="PF2">PF2 (4.001 a 8.000)</option>
+                    <option value="PF3">PF3 (8.001 a 12.000)</option>
+                    <option value="PF4">PF4 (12.001 a 100.000)</option>
+                  </select>
+                  <select value={etapaUso} onChange={(e) => setEtapaUso(e.target.value)}>
+                    <option value="">Qualquer etapa de uso</option>
+                    <option value="NUNCA_USOU">Nunca usou</option>
+                    <option value="RECORRENTE">Recorrente</option>
+                    <option value="OCASIONAL">Ocasional</option>
+                    <option value="EM_RISCO">Em risco (31–90 dias)</option>
+                    <option value="INATIVO">Inativo (+90 dias)</option>
+                  </select>
+                  <select value={statusConta} onChange={(e) => setStatusConta(e.target.value)}>
+                    <option value="">Qualquer status</option>
+                    <option value="ATIVO">Ativo</option>
+                    <option value="INATIVO">Inativo</option>
+                  </select>
+                  <input
+                    type="number"
+                    min={0}
+                    placeholder="Sem usar há (dias)"
+                    style={{ width: 150 }}
+                    value={semUsoDiasMin}
+                    onChange={(e) => setSemUsoDiasMin(e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    min={0}
+                    placeholder="Usou nos últimos (dias)"
+                    style={{ width: 160 }}
+                    value={usadoNosUltimosDias}
+                    onChange={(e) => setUsadoNosUltimosDias(e.target.value)}
+                  />
+                  <select value={categoriaCompra} onChange={(e) => setCategoriaCompra(e.target.value)} aria-label="Comprou em (categoria de comércio)">
+                    <option value="">Qualquer comércio</option>
+                    {categoriasDisponiveis.map((c) => (
+                      <option key={c.key} value={c.key}>
+                        Comprou em: {c.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    min={0}
+                    placeholder="Comprou nos últimos (dias)"
+                    style={{ width: 170 }}
+                    value={compraNosUltimosDias}
+                    onChange={(e) => setCompraNosUltimosDias(e.target.value)}
+                  />
+                  <button type="button" className="btn secondary" onClick={previewAudience}>
+                    Contar público
+                  </button>
+                </div>
+                <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                  Para combinações mais avançadas (grupos AND/OR) ou filtro por tag, salve um segmento em
+                  "Segmentos" e selecione-o acima.
+                </p>
+              </>
+            )}
+
+            {audiencePreview !== null && (
+              <p>
+                <strong>{audiencePreview}</strong> clientes elegíveis (opt-outs e clientes sem limite já excluídos automaticamente)
+              </p>
+            )}
+            {!!limiteCheio && (
+              <p style={{ color: "#b45309", fontSize: 13 }}>
+                Atenção: {limiteCheio} desses clientes já usaram 100% do limite — não há crédito novo para
+                oferecer a eles. Prefira uma mensagem de relacionamento ou exclua a faixa "100% usado".
+              </p>
+            )}
+          </div>
+        )}
+
+        {step === 2 && (
+          <div>
+            <div className="form-row">
+              <label>Canal</label>
+              <select value={channel} onChange={(e) => setChannel(e.target.value as "WHATSAPP" | "SMS")}>
+                <option value="WHATSAPP">WhatsApp</option>
+                <option value="SMS">SMS</option>
+              </select>
+            </div>
+
+            <div className="form-row">
+              <label>{channel === "WHATSAPP" ? "Template aprovado pela Meta" : "Template aprovado (opcional)"}</label>
+              <select value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
+                <option value="">{channel === "WHATSAPP" ? "— Sem template (só para testes) —" : "— Texto livre —"}</option>
+                {templates.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            </div>
+
+            {channel === "WHATSAPP" && !templateId && (
+              <div className="card" style={{ borderLeft: "4px solid var(--warning)", fontSize: 13, marginBottom: 10 }}>
+                Com o número real da Meta, o WhatsApp só entrega a primeira mensagem de uma campanha por <strong>template aprovado</strong> (fora das 24 horas depois da última mensagem do cliente).
+                Sem template, o disparo é bloqueado. Crie e aprove um em <strong>Templates</strong>.
+              </div>
+            )}
+            {!templateId && (
+              <div className="form-row">
+                <label>Mensagem — variante A (placeholders: {"{{nome}}"}, {"{{cidade}}"}, {"{{percentual}}"}, {"{{saldo}}"} ou {"{{limite_disponivel}}"}, {"{{limite}}"})</label>
+                <textarea rows={4} value={messageTemplate} onChange={(e) => setMessageTemplate(e.target.value)} />
+              </div>
+            )}
+
+            <div className="card" style={{ background: "var(--surface-alt)" }}>
+              <strong>Pré-visualização (variante A):</strong>
+              <p>{effectiveMessage.replace("{{nome}}", "Maria").replace("{{cidade}}", cidade || "São Paulo").replace("{{percentual}}", "45").replace("{{limite_disponivel}}", "R$ 850,00").replace("{{saldo}}", "R$ 850,00")}</p>
+            </div>
+
+            <div className="form-row" style={{ marginTop: 10 }}>
+              <label>
+                <input type="checkbox" checked={abEnabled} disabled={channel === "WHATSAPP" && !!templateId} onChange={(e) => setAbEnabled(e.target.checked)} /> Testar variante B (A/B testing){channel === "WHATSAPP" && !!templateId ? " — indisponível com template da Meta (a Meta aprova um texto só)" : ""}
+              </label>
+            </div>
+            {abEnabled && (
+              <>
+                <div className="form-row">
+                  <label>Mensagem — variante B</label>
+                  <textarea rows={3} value={messageTemplateB} onChange={(e) => setMessageTemplateB(e.target.value)} />
+                </div>
+                <div className="form-row">
+                  <label>% do público que recebe a variante B</label>
+                  <input type="number" min={0} max={100} value={variantSplitPercent} onChange={(e) => setVariantSplitPercent(Number(e.target.value))} />
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {step === 3 && (
+          <div>
+            <div className="form-row">
+              <label>Data/hora de agendamento</label>
+              <input type="datetime-local" value={scheduledAt} onChange={(e) => setScheduledAt(e.target.value)} />
+            </div>
+            <div className="form-row">
+              <label>Taxa máxima (mensagens/minuto)</label>
+              <input type="number" value={throttlePerMin} onChange={(e) => setThrottlePerMin(Number(e.target.value))} />
+            </div>
+            <div className="form-row">
+              <label>Janela mínima entre envios repetidos (horas)</label>
+              <input type="number" value={dedupeWindowHrs} onChange={(e) => setDedupeWindowHrs(Number(e.target.value))} />
+            </div>
+            <div className="form-row">
+              <label>Janela de atribuição de conversão (dias)</label>
+              <input type="number" value={attributionDays} onChange={(e) => setAttributionDays(Number(e.target.value))} />
+            </div>
+            <div className="form-row">
+              <label>
+                <input type="checkbox" checked={controlEnabled} onChange={(e) => setControlEnabled(e.target.checked)} /> Reservar um grupo de controle (não recebe a mensagem)
+              </label>
+              {controlEnabled && (
+                <>
+                  <input type="number" min={1} max={50} value={controlGroupPercent} onChange={(e) => setControlGroupPercent(Math.min(50, Math.max(1, Number(e.target.value) || 1)))} />
+                  <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                    {controlGroupPercent}% do público fica de fora do envio. É a única forma de saber quanto do uso
+                    foi causado pelo disparo e quanto aconteceria de qualquer jeito (o relatório compara os dois grupos).
+                  </p>
+                </>
+              )}
+            </div>
+            <div className="form-row">
+              <label>
+                <input type="checkbox" checked={isSandbox} onChange={(e) => setIsSandbox(e.target.checked)} /> Campanha de teste/sandbox (não conta para relatórios agregados)
+              </label>
+            </div>
+          </div>
+        )}
+
+        {step === 4 && (
+          <div>
+            <p><strong>Nome:</strong> {name}</p>
+            <p><strong>Canal:</strong> {channel}</p>
+            <p>
+              <strong>Público:</strong>{" "}
+              {usePreset
+                ? preset?.presetLabel || "lista pré-selecionada"
+                : segmentId
+                ? segments.find((s) => s.id === segmentId)?.name ?? "segmento salvo"
+                : "filtros montados na hora"}
+              {" — "}
+              <strong>{audiencePreview ?? "não calculado"}</strong> clientes estimados
+            </p>
+            <p><strong>Mensagem (A):</strong> {effectiveMessage}</p>
+            {abEnabled && <p><strong>Mensagem (B):</strong> {messageTemplateB} — {variantSplitPercent}% do público</p>}
+            <p><strong>Throttle:</strong> {throttlePerMin} msgs/min · Dedupe: {dedupeWindowHrs}h · Atribuição: {attributionDays} dias</p>
+            {controlEnabled && <p><strong>Grupo de controle:</strong> {controlGroupPercent}% do público não recebe a mensagem</p>}
+            {isSandbox && <p><span className="badge warn">Sandbox</span> esta campanha é de teste</p>}
+            <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+              Após criar, você pode enviar uma amostra de teste (QA) antes de agendar para a base completa, na tela de relatório da campanha.
+            </p>
+            {error && <div className="error-text">{error}</div>}
+          </div>
+        )}
+
+        <div style={{ marginTop: 16, display: "flex", justifyContent: "space-between" }}>
+          <button className="btn secondary" disabled={step === 0} onClick={() => setStep((s) => s - 1)}>
+            Voltar
+          </button>
+          {step < STEPS.length - 1 ? (
+            <button className="btn" onClick={() => setStep((s) => s + 1)} disabled={!name && step === 0}>
+              Próximo
+            </button>
+          ) : (
+            <button className="btn" onClick={handleConfirm} disabled={submitting}>
+              {submitting ? "Criando..." : "Confirmar e criar campanha"}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

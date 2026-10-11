@@ -2,6 +2,7 @@ import { AppPrismaClient } from "../config/db";
 import { hashDocument, isValidDocument, maskDocument, normalizePhone } from "./masking";
 import { normalizeDocumentDigits, parseMoney } from "./purchaseParsing";
 import { phoneCandidates } from "./whatsappPayload";
+import { usesLimiteDisponivel } from "./messageContext";
 
 /**
  * Campanha manual: o operador sobe uma lista (nome, telefone, CPF, limite disponível) e dispara
@@ -160,3 +161,30 @@ export async function linkRecipients(prisma: AppPrismaClient, tenantId: string, 
   }
   return linked;
 }
+
+/** Valida a lista contra o template e a base: o que será enviado, o que fica de fora e por quê. */
+export async function prepareManual(prisma: AppPrismaClient, tenantId: string, rows: ManualRowInput[], templateId: string) {
+  const template = await prisma.messageTemplate.findFirst({ where: { id: templateId, tenantId } });
+  if (!template || template.channel !== "WHATSAPP") return { error: "Template do WhatsApp não encontrado" as const };
+  if (template.status !== "APROVADO") return { error: "Escolha um template aprovado" as const };
+  const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { cpfSalt: true } });
+
+  const { valid, rejected } = parseManualRows(rows, tenant.cpfSalt);
+  const needsLimite = usesLimiteDisponivel(template.body);
+  const matched = await matchManualAudience(prisma, tenantId, valid);
+
+  const enviar = matched.filter((m) => {
+    if (m.excluidoMotivo) {
+      rejected.push({ linha: m.linha, motivo: m.excluidoMotivo });
+      return false;
+    }
+    if (needsLimite && m.limiteDisponivel === null) {
+      rejected.push({ linha: m.linha, motivo: "Sem limite disponível (o template usa essa variável)" });
+      return false;
+    }
+    return true;
+  });
+  rejected.sort((a, b) => a.linha - b.linha);
+  return { template, enviar, rejected, daBase: enviar.filter((m) => m.clientId).length };
+}
+

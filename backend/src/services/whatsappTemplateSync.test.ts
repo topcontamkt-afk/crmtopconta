@@ -4,13 +4,24 @@ import { sendTemplateReply, isSendableTemplate } from "./whatsappReply";
 
 function fakeTemplates(local: any[]) {
   const updates: any[] = [];
+  const created: any[] = [];
+  const media: any[] = [];
   const prisma: any = {
     messageTemplate: {
-      findFirst: jest.fn(async ({ where }: any) => local.find((t) => where.OR.some((o: any) => (o.providerTemplateId && o.providerTemplateId === t.providerTemplateId) || (o.metaName && o.metaName === t.metaName)) ) ?? null),
+      findFirst: jest.fn(async ({ where }: any) =>
+        where.OR
+          ? local.find((t) => where.OR.some((o: any) => (o.providerTemplateId && o.providerTemplateId === t.providerTemplateId) || (o.metaName && o.metaName === t.metaName))) ?? null
+          : local.find((t) => t.name === where.name) ?? null
+      ),
       update: jest.fn(async (a: any) => void updates.push(a)),
+      create: jest.fn(async ({ data }: any) => {
+        created.push(data);
+        return { id: `novo${created.length}`, ...data };
+      }),
     },
+    templateMedia: { create: jest.fn(async ({ data }: any) => void media.push(data)) },
   };
-  return { prisma, updates };
+  return { prisma, updates, created, media };
 }
 const tpl = { id: "t1", providerTemplateId: "555", metaName: "oferta_v1", language: "pt_BR", category: "MARKETING" };
 
@@ -59,15 +70,40 @@ describe("applyTemplateEvent / sync", () => {
     await applyTemplateEvent(prisma, "t1", { wabaId: "W", kind: "category", metaTemplateId: "555", name: null, language: null, category: "MARKETING" });
     expect(updates[0].data.category).toBe("MARKETING");
   });
-  it("sync atualiza os conhecidos e lista os que só existem na Meta", async () => {
-    const { prisma, updates } = fakeTemplates([tpl]);
+  it("sync atualiza os conhecidos e IMPORTA os que só existem na Meta", async () => {
+    const { prisma, updates, created } = fakeTemplates([tpl]);
     const r = await syncTemplatesFromMeta(prisma, "t1", "W", "T", undefined, [
       { id: "555", name: "oferta_v1", status: "APPROVED", language: "pt_BR", category: "MARKETING", quality_score: { score: "GREEN" } },
-      { id: "777", name: "so_na_meta", status: "APPROVED", category: "UTILITY", language: "pt_BR" },
+      { id: "777", name: "so_na_meta", status: "APPROVED", category: "UTILITY", language: "pt_BR", components: [{ type: "BODY", text: "Olá {{1}}, tudo bem?", example: { body_text: [["Ana"]] } }] },
+      { id: "888", name: "auth_code", status: "APPROVED", category: "AUTHENTICATION", language: "pt_BR" },
+      { id: "999", name: "reprovado", status: "REJECTED", category: "MARKETING", language: "pt_BR" },
     ]);
-    expect(r).toMatchObject({ atualizados: 1, total: 2 });
-    expect(r.somenteNaMeta).toEqual([{ name: "so_na_meta", status: "APPROVED", category: "UTILITY" }]);
+    expect(r).toMatchObject({ atualizados: 1, importados: 1, total: 4 });
+    expect(r.somenteNaMeta.map((x) => x.name)).toEqual(["auth_code", "reprovado"]);
     expect(updates[0].data).toMatchObject({ status: "APROVADO", qualityScore: "GREEN" });
+    expect(created[0]).toMatchObject({
+      name: "so_na_meta",
+      origin: "META",
+      metaName: "so_na_meta",
+      metaStatus: "APPROVED",
+      status: "APROVADO",
+      category: "UTILITY",
+      metaBody: "Olá {{1}}, tudo bem?",
+      body: "Olá {{nome}}, tudo bem?",
+      variableMap: ["nome"],
+      providerTemplateId: "777",
+    });
+  });
+
+  it("template importado com imagem de exemplo guarda a imagem; nome repetido ganha sufixo", async () => {
+    const { prisma, created, media } = fakeTemplates([{ id: "x", name: "com_imagem", providerTemplateId: "1", metaName: "outro" }]);
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+    const fetchImpl = jest.fn(async () => ({ ok: true, headers: { get: () => "image/png" }, arrayBuffer: async () => png.buffer.slice(png.byteOffset, png.byteOffset + png.length) }));
+    await syncTemplatesFromMeta(prisma, "t1", "W", "T", fetchImpl, [
+      { id: "42", name: "com_imagem", status: "APPROVED", category: "MARKETING", language: "pt_BR", components: [{ type: "HEADER", format: "IMAGE", example: { header_handle: ["https://cdn.example/a.png"] } }, { type: "BODY", text: "Oi" }] },
+    ]);
+    expect(created[0]).toMatchObject({ name: "com_imagem (Meta)", headerFormat: "IMAGE" });
+    expect(media[0]).toMatchObject({ mime: "image/png", size: 7 });
   });
 });
 

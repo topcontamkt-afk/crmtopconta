@@ -1,18 +1,17 @@
-import FrescorExtrato from "../../components/FrescorExtrato";
-import { useEffect, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../../api/client";
-import { FAIXA_OPTIONS } from "../../utils/faixas";
+import { useAuth } from "../../context/AuthContext";
+import CostsModal from "../../components/campaign/CostsModal";
+import FiltrosRapidos, { FILTROS_VAZIOS, Filtros, filtrosParaApi } from "../../components/campaign/FiltrosRapidos";
+import PlanilhaAudience from "../../components/campaign/PlanilhaAudience";
+import TemplatePreview from "../../components/campaign/TemplatePreview";
+import VariableMapEditor from "../../components/campaign/VariableMapEditor";
+import { brl, PlanilhaRow, SAMPLE_CTX, Validation, WaTemplate } from "../../components/campaign/types";
 
-const STEPS = ["Nome/objetivo", "Público", "Canal & mensagem", "Agenda & throttling", "Confirmação"];
+const STEPS = ["Configuração", "Público", "Validação", "Agendamento"];
 
-interface Template {
-  id: string;
-  channel: "WHATSAPP" | "SMS";
-  name: string;
-  body: string;
-  status: string;
-}
+type Publico = "todos" | "segmentos" | "planilha" | "teste" | "lista";
 
 interface Segment {
   id: string;
@@ -20,452 +19,646 @@ interface Segment {
   lastCount: number | null;
 }
 
-interface PresetAudienceState {
+interface CampaignLite {
+  id: string;
+  templateId: string | null;
+  createdAt: string;
+}
+
+interface PresetState {
   presetClientIds?: string[];
   presetLabel?: string;
-  // Texto e canal sugeridos pela tela de origem (ex.: oportunidade do Dashboard, campanha por
-  // categoria de comércio) — o operador ainda pode editar tudo no assistente.
-  presetMessage?: string;
-  presetChannel?: "WHATSAPP" | "SMS";
+}
+
+const PUBLICO_LABEL: Record<Publico, string> = {
+  todos: "Todos os elegíveis",
+  segmentos: "Segmento / filtros",
+  planilha: "Planilha",
+  teste: "Teste",
+  lista: "Lista pré-selecionada",
+};
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function textoErro(e: unknown): string {
+  const m = e instanceof Error ? e.message : "Erro inesperado";
+  try {
+    const v = JSON.parse(m);
+    if (typeof v === "string") return v;
+    if (v?.formErrors?.length) return v.formErrors.join(" ");
+    return m;
+  } catch {
+    return m;
+  }
 }
 
 export default function CampaignWizard() {
   const navigate = useNavigate();
   const location = useLocation();
+  const [search] = useSearchParams();
+  const { user } = useAuth();
+  const isAdmin = user?.role === "ADMIN";
+  const preset = (location.state as PresetState | null) || null;
+
   const [step, setStep] = useState(0);
+  const [nome, setNome] = useState(`Campanha ${new Date().toLocaleDateString("pt-BR", { day: "numeric", month: "short" }).replace(".", "")}`);
+  const [catFiltro, setCatFiltro] = useState<"" | "MARKETING" | "UTILITY">("");
 
-  // Público pré-montado vindo de outra tela (ex.: card "Aniversariantes do mês" no Dashboard,
-  // que já sabe exatamente quais clientes quer atingir) — chega via router state, não URL, pra
-  // não precisar serializar uma lista de ids na querystring.
-  const preset = (location.state as PresetAudienceState | null) || null;
-  const [usePreset, setUsePreset] = useState(!!preset?.presetClientIds?.length);
+  // templates
+  const [templates, setTemplates] = useState<WaTemplate[]>([]);
+  const [metaConectada, setMetaConectada] = useState(true);
+  const [sincronizando, setSincronizando] = useState(true);
+  const [recentes, setRecentes] = useState<string[]>([]);
+  const [templateId, setTemplateId] = useState("");
+  const [busca, setBusca] = useState("");
+  const [verTodos, setVerTodos] = useState(false);
 
-  const [name, setName] = useState("");
-  const [objective, setObjective] = useState("");
+  // público
+  const inicial: Publico = preset?.presetClientIds?.length ? "lista" : search.get("publico") === "planilha" ? "planilha" : "todos";
+  const [publico, setPublico] = useState<Publico>(inicial);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [segmentId, setSegmentId] = useState("");
-  const [cidade, setCidade] = useState("");
-  const [faixaUso, setFaixaUso] = useState("");
-  const [statusConta, setStatusConta] = useState("");
-  const [perfilRenda, setPerfilRenda] = useState("");
-  const [etapaUso, setEtapaUso] = useState("");
-  const [limiteCheio, setLimiteCheio] = useState<number | null>(null);
-  const [semUsoDiasMin, setSemUsoDiasMin] = useState("");
-  const [usadoNosUltimosDias, setUsadoNosUltimosDias] = useState("");
-  const [categoriaCompra, setCategoriaCompra] = useState("");
-  const [compraNosUltimosDias, setCompraNosUltimosDias] = useState("");
-  const [categoriasDisponiveis, setCategoriasDisponiveis] = useState<{ key: string; label: string }[]>([]);
-  const [audiencePreview, setAudiencePreview] = useState<number | null>(
-    usePreset ? preset!.presetClientIds!.length : null
-  );
-  const [channel, setChannel] = useState<"WHATSAPP" | "SMS">(preset?.presetChannel ?? "WHATSAPP");
+  const [filtros, setFiltros] = useState<Filtros>(FILTROS_VAZIOS);
+  const [rows, setRows] = useState<PlanilhaRow[]>([]);
+  const [consent, setConsent] = useState(false);
+  const [telefonesTeste, setTelefonesTeste] = useState("");
+  const [testeMsg, setTesteMsg] = useState<string | null>(null);
+  const testeCampaign = useRef<string | null>(null);
 
-  const [templates, setTemplates] = useState<Template[]>([]);
-  const [templateId, setTemplateId] = useState("");
-  const [messageTemplate, setMessageTemplate] = useState(preset?.presetMessage ?? "Olá {{nome}}, você já utilizou {{percentual}}% do seu limite!");
+  // validação / custo
+  const [validation, setValidation] = useState<Validation | null>(null);
+  const [validando, setValidando] = useState(false);
+  const [erroValidacao, setErroValidacao] = useState("");
+  const [custosAberto, setCustosAberto] = useState(false);
+  const [custoTick, setCustoTick] = useState(0);
 
-  const [abEnabled, setAbEnabled] = useState(false);
-  const [messageTemplateB, setMessageTemplateB] = useState("");
-  const [variantSplitPercent, setVariantSplitPercent] = useState(50);
+  // avançado
+  const [controle, setControle] = useState(0);
+  const [throttle, setThrottle] = useState(60);
 
-  const [isSandbox, setIsSandbox] = useState(false);
+  // agendamento
+  const [quando, setQuando] = useState<"agora" | "agendar">("agora");
+  const [dataAg, setDataAg] = useState("");
+  const [horaAg, setHoraAg] = useState("09:00");
 
-  const [throttlePerMin, setThrottlePerMin] = useState(60);
-  const [dedupeWindowHrs, setDedupeWindowHrs] = useState(72);
-  const [attributionDays, setAttributionDays] = useState(7);
-  const [controlEnabled, setControlEnabled] = useState(false);
-  const [controlGroupPercent, setControlGroupPercent] = useState(10);
-  const [scheduledAt, setScheduledAt] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  // envio
+  const [erro, setErro] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [progresso, setProgresso] = useState<{ fase: string; enviados: number; total: number; aviso?: string } | null>(null);
+  const cancelar = useRef(false);
 
+  /* ───────── templates (sincroniza com a Meta e traz os aprovados) ───────── */
+  function carregarTemplates() {
+    return api<WaTemplate[]>("/templates?channel=WHATSAPP&status=APROVADO").then(setTemplates);
+  }
   useEffect(() => {
-    api<Template[]>(`/templates?channel=${channel}&status=APROVADO`).then(setTemplates);
-    setTemplateId("");
-  }, [channel]);
-
-  useEffect(() => {
-    api<Segment[]>("/segments").then(setSegments);
-    api<{ todasCategorias: { key: string; label: string }[] }>("/purchases/categories").then((r) => setCategoriasDisponiveis(r.todasCategorias)).catch(() => {});
+    api<{ configurado: boolean }>("/templates/meta-status").then((m) => setMetaConectada(m.configurado)).catch(() => {});
+    api("/templates/sync", { method: "POST" })
+      .catch(() => undefined)
+      .finally(() => {
+        carregarTemplates().finally(() => setSincronizando(false));
+      });
+    api<CampaignLite[]>("/campaigns")
+      .then((cs) => {
+        const seen: string[] = [];
+        for (const c of [...cs].sort((a, b) => b.createdAt.localeCompare(a.createdAt))) if (c.templateId && !seen.includes(c.templateId)) seen.push(c.templateId);
+        setRecentes(seen);
+      })
+      .catch(() => {});
+    api<Segment[]>("/segments").then(setSegments).catch(() => {});
   }, []);
 
-  function adHocFilters() {
-    if (usePreset && preset?.presetClientIds) {
-      return { clientIds: preset.presetClientIds };
-    }
-    return {
-      cidade: cidade ? [cidade] : undefined,
-      faixaUso: faixaUso ? [faixaUso] : undefined,
-      statusConta: statusConta ? [statusConta] : undefined,
-      perfilRenda: perfilRenda ? [perfilRenda] : undefined,
-      etapaUso: etapaUso ? [etapaUso] : undefined,
-      semUsoDiasMin: semUsoDiasMin ? Number(semUsoDiasMin) : undefined,
-      usadoNosUltimosDias: usadoNosUltimosDias ? Number(usadoNosUltimosDias) : undefined,
-      categoriasCompra: categoriaCompra ? [categoriaCompra] : undefined,
-      compraNosUltimosDias: compraNosUltimosDias ? Number(compraNosUltimosDias) : undefined,
-    };
-  }
+  const usavel = (t: WaTemplate) => !t.sendIssue && (!metaConectada || t.metaStatus === "APPROVED");
+  const doTipo = (t: WaTemplate) => !catFiltro || t.category === catFiltro;
+  const template = templates.find((t) => t.id === templateId) ?? null;
 
-  async function previewAudience() {
-    // A lista pré-selecionada já vem com a contagem conhecida (é a própria lista de ids) — não
-    // precisa recontar no servidor.
-    if (usePreset) {
-      setAudiencePreview(preset?.presetClientIds?.length ?? 0);
+  const lista = useMemo(() => {
+    const q = busca.trim().toLowerCase();
+    return templates.filter((t) => doTipo(t) && (!q || t.name.toLowerCase().includes(q)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templates, busca, catFiltro]);
+  const recentesLista = recentes.map((id) => lista.find((t) => t.id === id)).filter((t): t is WaTemplate => !!t && usavel(t)).slice(0, 3);
+  const recomendados = lista
+    .filter((t) => usavel(t) && !recentesLista.some((r) => r.id === t.id))
+    .sort((a, b) => (b.qualityScore === "GREEN" ? 1 : 0) - (a.qualityScore === "GREEN" ? 1 : 0) || a.name.localeCompare(b.name))
+    .slice(0, 3);
+  const buscando = busca.trim() !== "";
+
+  /* ───────── público → corpo da validação ───────── */
+  const filtrosApi = useMemo(() => filtrosParaApi(filtros), [filtros]);
+  const temFiltro = Object.values(filtrosApi).some((v) => v !== undefined);
+  const audiencia = useMemo(() => {
+    if (publico === "todos") return { tipo: "todos" as const };
+    if (publico === "lista") return { tipo: "lista" as const, clientIds: preset?.presetClientIds ?? [] };
+    if (publico === "planilha") return rows.length ? { tipo: "planilha" as const, rows } : null;
+    if (publico === "segmentos") {
+      if (segmentId) return { tipo: "segmento" as const, segmentId };
+      return temFiltro ? { tipo: "filtros" as const, filters: filtrosApi } : null;
+    }
+    return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [publico, rows, segmentId, filtrosApi, temFiltro]);
+
+  const agendadoPara = quando === "agendar" && dataAg ? new Date(`${dataAg}T${horaAg || "09:00"}:00`) : null;
+
+  const validar = step >= 1;
+  useEffect(() => {
+    if (!templateId || !audiencia || !validar) {
+      setValidation(null);
       return;
     }
-    const resp = await api<{ count: number }>("/segments/preview", { method: "POST", body: adHocFilters() });
-    setAudiencePreview(resp.count);
-    // Quem já usou 100% do limite não tem crédito para oferecer: avisa quantos estão no público.
-    if (!faixaUso || faixaUso === "USO_100") {
-      const cheio = await api<{ count: number }>("/segments/preview", {
+    let vivo = true;
+    setValidando(true);
+    setErroValidacao("");
+    const t = setTimeout(() => {
+      api<Validation>("/campaigns/wizard/validar", {
         method: "POST",
-        body: { ...adHocFilters(), faixaUso: ["USO_100"] },
-      });
-      setLimiteCheio(cheio.count);
-    } else {
-      setLimiteCheio(0);
+        body: { templateId, audience: audiencia, scheduledAt: agendadoPara ? agendadoPara.toISOString() : undefined },
+      })
+        .then((v) => vivo && setValidation(v))
+        .catch((e) => vivo && (setValidation(null), setErroValidacao(textoErro(e))))
+        .finally(() => vivo && setValidando(false));
+    }, 500);
+    return () => {
+      vivo = false;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templateId, audiencia, validar, custoTick, dataAg, horaAg, quando, template?.variableMap]);
+
+  /* ───────── contexto do preview ───────── */
+  const ctxPreview = useMemo(() => {
+    if (publico === "planilha" && rows.length) {
+      const l = rows[0].limiteDisponivel.trim();
+      const val = l ? (/^R\$/i.test(l) ? l : `R$ ${l}`) : SAMPLE_CTX.limite_disponivel;
+      return { ...SAMPLE_CTX, nome: rows[0].nome.split(" ")[0] || SAMPLE_CTX.nome, limite_disponivel: val, saldo: val };
     }
-  }
+    return SAMPLE_CTX;
+  }, [publico, rows]);
 
-  function selectSegment(id: string) {
-    setSegmentId(id);
-    const seg = segments.find((s) => s.id === id);
-    setAudiencePreview(seg?.lastCount ?? null);
-  }
+  /* ───────── navegação entre passos ───────── */
+  const faltamVariaveis = (template?.variaveisSemMapa?.length ?? 0) > 0;
+  const passo0Ok = nome.trim() !== "" && !!template && usavel(template) && !faltamVariaveis;
+  const passo1Ok = publico !== "teste" && !!audiencia && !!validation && validation.contatos > 0;
+  const passo2Ok = !!validation?.podeLancar && (publico !== "planilha" || consent);
+  const passo3Ok = quando === "agora" || (!!agendadoPara && agendadoPara.getTime() > Date.now());
+  const podeContinuar = [passo0Ok, passo1Ok, passo2Ok, passo3Ok][step];
 
-  function voltarParaPublicoManual() {
-    setUsePreset(false);
-    setAudiencePreview(null);
-  }
-
-  const effectiveMessage = templateId ? templates.find((t) => t.id === templateId)?.body || "" : messageTemplate;
-
-  async function handleConfirm() {
-    setSubmitting(true);
-    setError(null);
+  /* ───────── teste ───────── */
+  async function enviarTeste() {
+    if (!template) return;
+    setBusy(true);
+    setTesteMsg(null);
+    setErro("");
     try {
-      const campaign = await api<{ id: string }>("/campaigns", {
-        method: "POST",
-        body: {
-          name,
-          objective,
-          channel,
-          segmentId: !usePreset && segmentId ? segmentId : undefined,
-          adHocFilters: !usePreset && segmentId ? undefined : adHocFilters(),
-          templateId: templateId || undefined,
-          messageTemplate: templateId ? undefined : messageTemplate,
-          messageTemplateB: abEnabled ? messageTemplateB : undefined,
-          variantSplitPercent: abEnabled ? variantSplitPercent : undefined,
-          isSandbox,
-          throttlePerMin,
-          dedupeWindowHrs,
-          attributionDays,
-          controlGroupPercent: controlEnabled ? controlGroupPercent : undefined,
-          scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : undefined,
-        },
-      });
-      navigate(`/campaigns/${campaign.id}/report`);
+      const phones = telefonesTeste
+        .split(/[,;\n]/)
+        .map((p) => p.replace(/\D/g, ""))
+        .filter(Boolean)
+        .map((p) => (p.length <= 11 ? `55${p}` : p));
+      if (!phones.length) throw new Error("Informe ao menos um telefone (com DDD).");
+      if (!testeCampaign.current) {
+        const c = await api<{ id: string }>("/campaigns", {
+          method: "POST",
+          body: { name: `Teste ${nome}`.slice(0, 120), channel: "WHATSAPP", templateId: template.id, isSandbox: true, adHocFilters: {} },
+        });
+        testeCampaign.current = c.id;
+      }
+      const r = await api<{ results: { phone: string; status: string; error?: string }[] }>(`/campaigns/${testeCampaign.current}/test-send`, { method: "POST", body: { phones } });
+      setTesteMsg(r.results.map((x) => `${x.phone}: ${x.status === "SENT" ? "enviado" : `falhou${x.error ? ` (${x.error})` : ""}`}`).join(" · "));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Erro ao criar campanha");
+      setErro(textoErro(e));
     } finally {
-      setSubmitting(false);
+      setBusy(false);
     }
   }
+
+  /* ───────── criar / lançar ───────── */
+  async function criarCampanha(rascunho: boolean): Promise<{ id: string; total: number }> {
+    const custo = validation?.custo.brl ?? 0;
+    const scheduledAt = quando === "agendar" && agendadoPara ? agendadoPara.toISOString() : undefined;
+    if (publico === "planilha") {
+      const r = await api<{ campaign: { id: string }; enviar: number }>("/campaigns/manual", {
+        method: "POST",
+        body: { name: nome.trim(), templateId, rows, consentimento: true, rascunho, scheduledAt, costPerMessage: custo, throttlePerMin: throttle },
+      });
+      return { id: r.campaign.id, total: r.enviar };
+    }
+    const c = await api<{ id: string; audienceCount: number | null }>("/campaigns", {
+      method: "POST",
+      body: {
+        name: nome.trim(),
+        channel: "WHATSAPP",
+        templateId,
+        segmentId: publico === "segmentos" && segmentId ? segmentId : undefined,
+        adHocFilters: publico === "lista" ? { clientIds: preset?.presetClientIds } : publico === "todos" ? {} : segmentId ? undefined : filtrosApi,
+        scheduledAt,
+        costPerMessage: custo,
+        throttlePerMin: throttle,
+        controlGroupPercent: controle > 0 ? controle : undefined,
+      },
+    });
+    return { id: c.id, total: c.audienceCount ?? validation?.contatos ?? 0 };
+  }
+
+  async function salvarRascunho() {
+    setBusy(true);
+    setErro("");
+    try {
+      await criarCampanha(true);
+      navigate("/campaigns");
+    } catch (e) {
+      setErro(textoErro(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function lancar() {
+    setBusy(true);
+    setErro("");
+    cancelar.current = false;
+    try {
+      setProgresso({ fase: "Criando a campanha…", enviados: 0, total: validation?.contatos ?? 0 });
+      const { id } = await criarCampanha(false);
+      const fila = await api<{ queued: number; control: number }>(`/campaigns/${id}/schedule`, { method: "POST" });
+      const total = fila.queued;
+
+      if (quando === "agendar") {
+        navigate(`/campaigns/${id}/report`);
+        return;
+      }
+      // Imediato: manda em lotes pequenos, respeitando o limite por minuto, com a tela aberta.
+      let enviados = 0;
+      for (let guarda = 0; guarda < 2000 && !cancelar.current; guarda++) {
+        setProgresso({ fase: "Enviando as mensagens…", enviados, total });
+        const r = await api<{ processed: number; remaining: number; throttled?: boolean; bloqueado?: string }>(`/campaigns/${id}/dispatch`, { method: "POST", body: { limit: 25 } });
+        if (r.bloqueado) {
+          setProgresso({ fase: "Envio bloqueado", enviados, total, aviso: r.bloqueado });
+          setBusy(false);
+          return;
+        }
+        enviados = total - r.remaining;
+        if (r.remaining === 0) break;
+        if (r.throttled) {
+          setProgresso({ fase: "Aguardando o limite de envios por minuto…", enviados, total });
+          await sleep(8000);
+        } else if (r.processed === 0) {
+          await sleep(3000);
+        }
+      }
+      navigate(`/campaigns/${id}/report`);
+    } catch (e) {
+      setProgresso(null);
+      setErro(textoErro(e));
+      setBusy(false);
+    }
+  }
+
+  const custo = validation?.custo;
+  const contatos = validation?.contatos;
 
   return (
-    <div>
-      <h2>Nova campanha</h2>
-      <div className="wizard-steps">
+    <div className="cw">
+      <div className="pd-sub" style={{ marginBottom: 6 }}>
+        <Link to="/campaigns">Campanhas</Link> / Novo
+      </div>
+      <h2 style={{ margin: 0 }}>Criar campanha</h2>
+      <p className="pd-sub">Uma decisão por vez, com o resumo sempre visível.</p>
+
+      <div className="cw-steps">
         {STEPS.map((s, i) => (
-          <div key={s} className={`wizard-step ${i === step ? "active" : ""}`}>
-            {i + 1}. {s}
-          </div>
+          <button
+            key={s}
+            type="button"
+            disabled={i > step}
+            className={`cw-step ${i === step ? "active" : i < step ? "done" : ""}`}
+            onClick={() => i < step && !busy && setStep(i)}
+          >
+            <span className="cw-step-n">{i < step ? "✓" : i + 1}</span>
+            {s}
+          </button>
         ))}
       </div>
 
-      <div className="card">
-        {step === 0 && (
-          <div>
-            <div className="form-row">
-              <label>Nome da campanha</label>
-              <input value={name} onChange={(e) => setName(e.target.value)} />
-            </div>
-            <div className="form-row">
-              <label>Objetivo</label>
-              <input value={objective} onChange={(e) => setObjective(e.target.value)} />
-            </div>
-          </div>
-        )}
+      <div className="cw-grid">
+        <div className="cw-main">
+          {step === 0 && (
+            <>
+              <div className="card">
+                <div className="cw-row">
+                  <input className="cw-grow" value={nome} onChange={(e) => setNome(e.target.value)} placeholder="Nome da campanha" aria-label="Nome da campanha" />
+                  <select value={catFiltro} onChange={(e) => setCatFiltro(e.target.value as any)} aria-label="Categoria">
+                    <option value="">Todos</option>
+                    <option value="MARKETING">Marketing</option>
+                    <option value="UTILITY">Utilidade</option>
+                  </select>
+                </div>
+              </div>
 
-        {step === 1 && (
-          <div>
-            {preset?.presetClientIds?.length ? (
-              <div className="card" style={{ background: "var(--surface-alt)", marginBottom: 14 }}>
-                {usePreset ? (
-                  <>
-                    <span className="badge ok">Lista pré-selecionada</span>
-                    <p style={{ marginBottom: 8 }}>
-                      <strong>{preset.presetLabel || "Público pré-selecionado"}</strong> —{" "}
-                      <strong>{preset.presetClientIds.length}</strong> clientes específicos, já escolhidos
-                      na tela de origem.
-                    </p>
-                    <button type="button" className="btn secondary" onClick={voltarParaPublicoManual}>
-                      Usar outro público em vez desse
-                    </button>
-                  </>
-                ) : (
-                  <button type="button" className="btn secondary" onClick={() => { setUsePreset(true); setSegmentId(""); setAudiencePreview(preset.presetClientIds!.length); }}>
-                    Voltar a usar a lista pré-selecionada ({preset.presetLabel}, {preset.presetClientIds.length} clientes)
+              <div className="card">
+                <h3>Template</h3>
+                <p className="pd-sub" style={{ marginBottom: 10 }}>
+                  Busque e escolha o template da campanha. Só aparecem os aprovados pela Meta{sincronizando ? " (sincronizando com a Meta…)" : ""}.
+                </p>
+                <input value={busca} onChange={(e) => setBusca(e.target.value)} placeholder="Digite o nome do template..." aria-label="Buscar template" />
+
+                {template && !buscando && (
+                  <div className="cw-selected">
+                    <span>✓ <strong>{template.name}</strong> <span className="badge">{template.category === "UTILITY" ? "UTILIDADE" : "MARKETING"}</span></span>
+                    <button type="button" className="btn secondary" onClick={() => setTemplateId("")}>Trocar</button>
+                  </div>
+                )}
+
+                {(!template || buscando) && !verTodos && !buscando && (
+                  <div className="cw-cols">
+                    <div className="cw-box">
+                      <div className="cw-box-title">Recentes</div>
+                      {recentesLista.length === 0 && <span className="pd-hint">Nenhuma campanha anterior.</span>}
+                      {recentesLista.map((t) => <TemplateItem key={t.id} t={t} onPick={() => setTemplateId(t.id)} />)}
+                    </div>
+                    <div className="cw-box">
+                      <div className="cw-box-title">Recomendados</div>
+                      {recomendados.length === 0 && <span className="pd-hint">{sincronizando ? "Carregando…" : "Nenhum template aprovado ainda."}</span>}
+                      {recomendados.map((t) => <TemplateItem key={t.id} t={t} onPick={() => setTemplateId(t.id)} />)}
+                    </div>
+                  </div>
+                )}
+
+                {(!template || buscando) && (verTodos || buscando) && (
+                  <div className="cw-box" style={{ marginTop: 10 }}>
+                    {lista.length === 0 && <span className="pd-hint">Nenhum template encontrado.</span>}
+                    {lista.map((t) => <TemplateItem key={t.id} t={t} bloqueado={!usavel(t)} onPick={() => { setTemplateId(t.id); setBusca(""); }} />)}
+                  </div>
+                )}
+
+                {!template && !buscando && (
+                  <button type="button" className="btn secondary" style={{ marginTop: 10 }} onClick={() => setVerTodos(!verTodos)}>
+                    {verTodos ? "Ver menos" : "Ver todos os templates"}
                   </button>
                 )}
-              </div>
-            ) : null}
 
-            {!usePreset && (
-              <div className="form-row">
-                <label>Segmento salvo (opcional)</label>
-                <select value={segmentId} onChange={(e) => selectSegment(e.target.value)}>
-                  <option value="">— Montar público na hora (abaixo) —</option>
-                  {segments.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name} {s.lastCount !== null ? `(${s.lastCount} clientes)` : ""}
-                    </option>
-                  ))}
-                </select>
-                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                  Segmentos combináveis (recorrentes, sem uso, inativos, tags como "comércio" etc.) são
-                  criados na tela "Segmentos" e reaproveitados aqui.
-                </span>
+                {template && !usavel(template) && <p className="error-text">Este template não pode ser enviado: {template.sendIssue || "ainda não foi aprovado pela Meta."}</p>}
+                {template && <VariableMapEditor key={template.id + (template.variableMap ?? []).join()} template={template} onSaved={(t) => setTemplates((arr) => arr.map((x) => (x.id === t.id ? { ...x, ...t } : x)))} />}
               </div>
-            )}
+              <p className="pd-hint">
+                Precisa de SMS, texto livre ou teste A/B? Use o <Link to="/campaigns/classic">assistente clássico</Link>.
+              </p>
+            </>
+          )}
 
-            {!usePreset && !segmentId && (
-              <>
-                {etapaUso && <FrescorExtrato />}
-                <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-                  <input placeholder="Cidade" value={cidade} onChange={(e) => setCidade(e.target.value)} />
-                  <select value={faixaUso} onChange={(e) => setFaixaUso(e.target.value)}>
-                    <option value="">Qualquer faixa</option>
-                    {FAIXA_OPTIONS.map((f) => (
-                      <option key={f.value} value={f.value}>{f.label}</option>
-                    ))}
-                  </select>
-                  <select value={perfilRenda} onChange={(e) => setPerfilRenda(e.target.value)}>
-                    <option value="">Qualquer perfil de renda</option>
-                    <option value="PF1">PF1 (até R$ 4.000)</option>
-                    <option value="PF2">PF2 (4.001 a 8.000)</option>
-                    <option value="PF3">PF3 (8.001 a 12.000)</option>
-                    <option value="PF4">PF4 (12.001 a 100.000)</option>
-                  </select>
-                  <select value={etapaUso} onChange={(e) => setEtapaUso(e.target.value)}>
-                    <option value="">Qualquer etapa de uso</option>
-                    <option value="NUNCA_USOU">Nunca usou</option>
-                    <option value="RECORRENTE">Recorrente</option>
-                    <option value="OCASIONAL">Ocasional</option>
-                    <option value="EM_RISCO">Em risco (31–90 dias)</option>
-                    <option value="INATIVO">Inativo (+90 dias)</option>
-                  </select>
-                  <select value={statusConta} onChange={(e) => setStatusConta(e.target.value)}>
-                    <option value="">Qualquer status</option>
-                    <option value="ATIVO">Ativo</option>
-                    <option value="INATIVO">Inativo</option>
-                  </select>
-                  <input
-                    type="number"
-                    min={0}
-                    placeholder="Sem usar há (dias)"
-                    style={{ width: 150 }}
-                    value={semUsoDiasMin}
-                    onChange={(e) => setSemUsoDiasMin(e.target.value)}
-                  />
-                  <input
-                    type="number"
-                    min={0}
-                    placeholder="Usou nos últimos (dias)"
-                    style={{ width: 160 }}
-                    value={usadoNosUltimosDias}
-                    onChange={(e) => setUsadoNosUltimosDias(e.target.value)}
-                  />
-                  <select value={categoriaCompra} onChange={(e) => setCategoriaCompra(e.target.value)} aria-label="Comprou em (categoria de comércio)">
-                    <option value="">Qualquer comércio</option>
-                    {categoriasDisponiveis.map((c) => (
-                      <option key={c.key} value={c.key}>
-                        Comprou em: {c.label}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="number"
-                    min={0}
-                    placeholder="Comprou nos últimos (dias)"
-                    style={{ width: 170 }}
-                    value={compraNosUltimosDias}
-                    onChange={(e) => setCompraNosUltimosDias(e.target.value)}
-                  />
-                  <button type="button" className="btn secondary" onClick={previewAudience}>
-                    Contar público
-                  </button>
+          {step === 1 && (
+            <>
+              <div className="card">
+                <h3>Escolha o público</h3>
+                <p className="pd-sub" style={{ marginBottom: 10 }}>Quem recebe: a base do sistema ou uma planilha que você sobe agora.</p>
+                <div className="cw-cards">
+                  {preset?.presetClientIds?.length ? (
+                    <PublicoCard ativo={publico === "lista"} titulo="Lista pré-selecionada" sub={`${preset.presetLabel ?? "Público escolhido"} · ${preset.presetClientIds.length} clientes`} onClick={() => setPublico("lista")} />
+                  ) : null}
+                  <PublicoCard ativo={publico === "todos"} titulo="Todos" sub="Clientes elegíveis da base" onClick={() => setPublico("todos")} />
+                  <PublicoCard ativo={publico === "segmentos"} titulo="Segmentos" sub="Segmento salvo ou filtros rápidos" onClick={() => setPublico("segmentos")} />
+                  <PublicoCard ativo={publico === "planilha"} titulo="Planilha" sub="Subir .xlsx/.csv com nome e telefone" onClick={() => setPublico("planilha")} />
+                  <PublicoCard ativo={publico === "teste"} titulo="Teste" sub="Enviar para o seu número" onClick={() => setPublico("teste")} />
                 </div>
-                <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                  Para combinações mais avançadas (grupos AND/OR) ou filtro por tag, salve um segmento em
-                  "Segmentos" e selecione-o acima.
+              </div>
+
+              {publico === "segmentos" && (
+                <div className="card">
+                  <h3>Segmentos rápidos</h3>
+                  <div className="form-row">
+                    <label>Segmento salvo</label>
+                    <select value={segmentId} onChange={(e) => setSegmentId(e.target.value)}>
+                      <option value="">— Montar com filtros —</option>
+                      {segments.map((s) => (
+                        <option key={s.id} value={s.id}>{s.name}{s.lastCount !== null ? ` (${s.lastCount})` : ""}</option>
+                      ))}
+                    </select>
+                  </div>
+                  {!segmentId && <FiltrosRapidos value={filtros} onChange={setFiltros} />}
+                  {!segmentId && !temFiltro && <p className="pd-hint" style={{ marginTop: 8 }}>Escolha ao menos um filtro, ou use o cartão "Todos".</p>}
+                </div>
+              )}
+
+              {publico === "planilha" && (
+                <div className="card">
+                  <h3>Planilha</h3>
+                  <PlanilhaAudience onRows={(r) => setRows(r)} />
+                </div>
+              )}
+
+              {publico === "teste" && (
+                <div className="card">
+                  <h3>Enviar um teste</h3>
+                  <p className="pd-hint" style={{ marginBottom: 8 }}>Manda o template, com dados de exemplo, para os números abaixo. Não cria campanha real nem entra nos relatórios.</p>
+                  <div className="cw-row">
+                    <input className="cw-grow" value={telefonesTeste} onChange={(e) => setTelefonesTeste(e.target.value)} placeholder="Telefones com DDD, separados por vírgula" />
+                    <button type="button" className="btn" disabled={busy || !template} onClick={enviarTeste}>Enviar teste</button>
+                  </div>
+                  {testeMsg && <p style={{ fontSize: 13, marginTop: 8 }}>{testeMsg}</p>}
+                </div>
+              )}
+
+              {publico !== "teste" && audiencia && (
+                <p style={{ fontSize: 14 }}>
+                  {validando ? "Contando…" : validation ? <><strong>{validation.contatos}</strong> contatos elegíveis{validation.total > validation.contatos ? ` (de ${validation.total}; opt-out, bloqueados e sem limite ficam de fora)` : ""}</> : erroValidacao ? <span className="error-text">{erroValidacao}</span> : null}
                 </p>
-              </>
-            )}
+              )}
+            </>
+          )}
 
-            {audiencePreview !== null && (
-              <p>
-                <strong>{audiencePreview}</strong> clientes elegíveis (opt-outs e clientes sem limite já excluídos automaticamente)
-              </p>
-            )}
-            {!!limiteCheio && (
-              <p style={{ color: "#b45309", fontSize: 13 }}>
-                Atenção: {limiteCheio} desses clientes já usaram 100% do limite — não há crédito novo para
-                oferecer a eles. Prefira uma mensagem de relacionamento ou exclua a faixa "100% usado".
-              </p>
-            )}
-          </div>
-        )}
-
-        {step === 2 && (
-          <div>
-            <div className="form-row">
-              <label>Canal</label>
-              <select value={channel} onChange={(e) => setChannel(e.target.value as "WHATSAPP" | "SMS")}>
-                <option value="WHATSAPP">WhatsApp</option>
-                <option value="SMS">SMS</option>
-              </select>
-            </div>
-
-            <div className="form-row">
-              <label>{channel === "WHATSAPP" ? "Template aprovado pela Meta" : "Template aprovado (opcional)"}</label>
-              <select value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
-                <option value="">{channel === "WHATSAPP" ? "— Sem template (só para testes) —" : "— Texto livre —"}</option>
-                {templates.map((t) => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
+          {step === 2 && (
+            <div className="card">
+              <h3>Validação</h3>
+              <p className="pd-sub" style={{ marginBottom: 10 }}>Confira antes de lançar. Itens em vermelho impedem o envio.</p>
+              {validando && <p className="pd-hint">Conferindo…</p>}
+              {erroValidacao && <p className="error-text">{erroValidacao}</p>}
+              <ul className="cw-checks">
+                {validation?.checks.map((c) => (
+                  <li key={c.id} className={`cw-check ${c.nivel}`}>
+                    <span className="cw-check-ic">{c.nivel === "ok" ? "✓" : c.nivel === "aviso" ? "!" : "✕"}</span>
+                    <div>
+                      <strong>{c.titulo}</strong>
+                      {c.detalhe && <div className="pd-hint">{c.detalhe}</div>}
+                    </div>
+                  </li>
                 ))}
-              </select>
-            </div>
+              </ul>
 
-            {channel === "WHATSAPP" && !templateId && (
-              <div className="card" style={{ borderLeft: "4px solid var(--warning)", fontSize: 13, marginBottom: 10 }}>
-                Com o número real da Meta, o WhatsApp só entrega a primeira mensagem de uma campanha por <strong>template aprovado</strong> (fora das 24 horas depois da última mensagem do cliente).
-                Sem template, o disparo é bloqueado. Crie e aprove um em <strong>Templates</strong>.
+              {validation && validation.motivos.length > 0 && (
+                <details style={{ marginTop: 8 }}>
+                  <summary>Ver linhas recusadas</summary>
+                  <ul style={{ fontSize: 13 }}>
+                    {validation.motivos.map((m, i) => <li key={i}>Linha {m.linha + 1}: {m.motivo}</li>)}
+                  </ul>
+                </details>
+              )}
+
+              {publico === "planilha" && (
+                <label className="cw-consent">
+                  <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
+                  <span>Confirmo que tenho autorização para contatar estes números pelo WhatsApp. Quem já pediu para não receber mensagens foi retirado da lista automaticamente.</span>
+                </label>
+              )}
+
+              {publico !== "planilha" && publico !== "teste" && (
+                <details style={{ marginTop: 12 }}>
+                  <summary>Avançado</summary>
+                  <div className="seg-row" style={{ marginTop: 8 }}>
+                    <div className="form-row">
+                      <label>Grupo de controle (% do público que NÃO recebe, para medir o ganho real)</label>
+                      <input type="number" min={0} max={50} value={controle} onChange={(e) => setControle(Math.max(0, Math.min(50, Number(e.target.value) || 0)))} />
+                    </div>
+                    <div className="form-row">
+                      <label>Envios por minuto (no máximo)</label>
+                      <input type="number" min={1} value={throttle} onChange={(e) => setThrottle(Math.max(1, Number(e.target.value) || 60))} />
+                    </div>
+                  </div>
+                </details>
+              )}
+            </div>
+          )}
+
+          {step === 3 && (
+            <div className="card">
+              <h3>Agendamento</h3>
+              <p className="pd-sub" style={{ marginBottom: 10 }}>Defina se o envio será agora ou programado.</p>
+              <div className="cw-cards" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                <PublicoCard ativo={quando === "agora"} titulo="Imediato" sub="Envia agora, com esta tela aberta" onClick={() => setQuando("agora")} />
+                <PublicoCard ativo={quando === "agendar"} titulo="Agendar" sub="Escolher data e horário" onClick={() => setQuando("agendar")} />
               </div>
-            )}
-            {!templateId && (
-              <div className="form-row">
-                <label>Mensagem — variante A (placeholders: {"{{nome}}"}, {"{{cidade}}"}, {"{{percentual}}"}, {"{{saldo}}"} ou {"{{limite_disponivel}}"}, {"{{limite}}"})</label>
-                <textarea rows={4} value={messageTemplate} onChange={(e) => setMessageTemplate(e.target.value)} />
-              </div>
-            )}
-
-            <div className="card" style={{ background: "var(--surface-alt)" }}>
-              <strong>Pré-visualização (variante A):</strong>
-              <p>{effectiveMessage.replace("{{nome}}", "Maria").replace("{{cidade}}", cidade || "São Paulo").replace("{{percentual}}", "45").replace("{{limite_disponivel}}", "R$ 850,00").replace("{{saldo}}", "R$ 850,00")}</p>
-            </div>
-
-            <div className="form-row" style={{ marginTop: 10 }}>
-              <label>
-                <input type="checkbox" checked={abEnabled} disabled={channel === "WHATSAPP" && !!templateId} onChange={(e) => setAbEnabled(e.target.checked)} /> Testar variante B (A/B testing){channel === "WHATSAPP" && !!templateId ? " — indisponível com template da Meta (a Meta aprova um texto só)" : ""}
-              </label>
-            </div>
-            {abEnabled && (
-              <>
-                <div className="form-row">
-                  <label>Mensagem — variante B</label>
-                  <textarea rows={3} value={messageTemplateB} onChange={(e) => setMessageTemplateB(e.target.value)} />
-                </div>
-                <div className="form-row">
-                  <label>% do público que recebe a variante B</label>
-                  <input type="number" min={0} max={100} value={variantSplitPercent} onChange={(e) => setVariantSplitPercent(Number(e.target.value))} />
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {step === 3 && (
-          <div>
-            <div className="form-row">
-              <label>Data/hora de agendamento</label>
-              <input type="datetime-local" value={scheduledAt} onChange={(e) => setScheduledAt(e.target.value)} />
-            </div>
-            <div className="form-row">
-              <label>Taxa máxima (mensagens/minuto)</label>
-              <input type="number" value={throttlePerMin} onChange={(e) => setThrottlePerMin(Number(e.target.value))} />
-            </div>
-            <div className="form-row">
-              <label>Janela mínima entre envios repetidos (horas)</label>
-              <input type="number" value={dedupeWindowHrs} onChange={(e) => setDedupeWindowHrs(Number(e.target.value))} />
-            </div>
-            <div className="form-row">
-              <label>Janela de atribuição de conversão (dias)</label>
-              <input type="number" value={attributionDays} onChange={(e) => setAttributionDays(Number(e.target.value))} />
-            </div>
-            <div className="form-row">
-              <label>
-                <input type="checkbox" checked={controlEnabled} onChange={(e) => setControlEnabled(e.target.checked)} /> Reservar um grupo de controle (não recebe a mensagem)
-              </label>
-              {controlEnabled && (
+              {quando === "agendar" && (
                 <>
-                  <input type="number" min={1} max={50} value={controlGroupPercent} onChange={(e) => setControlGroupPercent(Math.min(50, Math.max(1, Number(e.target.value) || 1)))} />
-                  <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                    {controlGroupPercent}% do público fica de fora do envio. É a única forma de saber quanto do uso
-                    foi causado pelo disparo e quanto aconteceria de qualquer jeito (o relatório compara os dois grupos).
+                  <div className="seg-row" style={{ marginTop: 12 }}>
+                    <div className="form-row">
+                      <label>Data</label>
+                      <input type="date" value={dataAg} min={new Date().toISOString().slice(0, 10)} onChange={(e) => setDataAg(e.target.value)} />
+                    </div>
+                    <div className="form-row">
+                      <label>Horário</label>
+                      <input type="time" value={horaAg} onChange={(e) => setHoraAg(e.target.value)} />
+                    </div>
+                  </div>
+                  <p className="pd-hint">
+                    Fuso do navegador: {Intl.DateTimeFormat().resolvedOptions().timeZone}. No plano atual o envio automático roda uma vez por dia (por volta das 06h de Brasília): a campanha sai nesse ciclo,
+                    depois do horário marcado. Para enviar na hora, use "Imediato".
                   </p>
                 </>
               )}
             </div>
-            <div className="form-row">
-              <label>
-                <input type="checkbox" checked={isSandbox} onChange={(e) => setIsSandbox(e.target.checked)} /> Campanha de teste/sandbox (não conta para relatórios agregados)
-              </label>
+          )}
+
+          {erro && <p className="error-text">{erro}</p>}
+
+          <div className="card cw-footer">
+            <button type="button" className="btn secondary" disabled={busy || step === 0} onClick={() => setStep(step - 1)}>Voltar</button>
+            <span className="cw-footer-mid">
+              {step === 0 ? (template ? template.name : "Selecione um template para continuar") : contatos !== undefined ? `${contatos} contatos${custo?.total != null ? ` • ${brl(custo.total)}` : ""}` : publico === "teste" ? "Teste" : ""}
+            </span>
+            <div style={{ display: "flex", gap: 8 }}>
+              {step === 3 && (
+                <button type="button" className="btn secondary" disabled={busy} onClick={salvarRascunho}>Salvar rascunho</button>
+              )}
+              {step < 3 ? (
+                <button type="button" className="btn" disabled={!podeContinuar || busy || (step === 1 && publico === "teste")} onClick={() => setStep(step + 1)}>Continuar</button>
+              ) : (
+                <button type="button" className="btn" disabled={!podeContinuar || busy} onClick={lancar}>{quando === "agendar" ? "Agendar campanha" : "Lançar campanha"}</button>
+              )}
             </div>
           </div>
-        )}
-
-        {step === 4 && (
-          <div>
-            <p><strong>Nome:</strong> {name}</p>
-            <p><strong>Canal:</strong> {channel}</p>
-            <p>
-              <strong>Público:</strong>{" "}
-              {usePreset
-                ? preset?.presetLabel || "lista pré-selecionada"
-                : segmentId
-                ? segments.find((s) => s.id === segmentId)?.name ?? "segmento salvo"
-                : "filtros montados na hora"}
-              {" — "}
-              <strong>{audiencePreview ?? "não calculado"}</strong> clientes estimados
-            </p>
-            <p><strong>Mensagem (A):</strong> {effectiveMessage}</p>
-            {abEnabled && <p><strong>Mensagem (B):</strong> {messageTemplateB} — {variantSplitPercent}% do público</p>}
-            <p><strong>Throttle:</strong> {throttlePerMin} msgs/min · Dedupe: {dedupeWindowHrs}h · Atribuição: {attributionDays} dias</p>
-            {controlEnabled && <p><strong>Grupo de controle:</strong> {controlGroupPercent}% do público não recebe a mensagem</p>}
-            {isSandbox && <p><span className="badge warn">Sandbox</span> esta campanha é de teste</p>}
-            <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
-              Após criar, você pode enviar uma amostra de teste (QA) antes de agendar para a base completa, na tela de relatório da campanha.
-            </p>
-            {error && <div className="error-text">{error}</div>}
-          </div>
-        )}
-
-        <div style={{ marginTop: 16, display: "flex", justifyContent: "space-between" }}>
-          <button className="btn secondary" disabled={step === 0} onClick={() => setStep((s) => s - 1)}>
-            Voltar
-          </button>
-          {step < STEPS.length - 1 ? (
-            <button className="btn" onClick={() => setStep((s) => s + 1)} disabled={!name && step === 0}>
-              Próximo
-            </button>
-          ) : (
-            <button className="btn" onClick={handleConfirm} disabled={submitting}>
-              {submitting ? "Criando..." : "Confirmar e criar campanha"}
-            </button>
-          )}
         </div>
+
+        <aside className="cw-side">
+          <div className="card">
+            <div className="cw-side-head">
+              <span className="cw-label">RESUMO</span>
+              {template && <span className="badge ok">{template.category === "UTILITY" ? "Utilidade" : "Marketing"}</span>}
+            </div>
+            {contatos !== undefined && <ResumoLinha k="Contatos" v={String(contatos)} />}
+            {custo?.total != null && <ResumoLinha k="Custo" v={brl(custo.total)} destaque />}
+            <ResumoLinha
+              k="Custo base"
+              v={custo?.brl != null ? `${brl(custo.brl, 2)}/msg` : "R$ --/msg"}
+              sub={custo?.categoria ? `${custo.categoria} · USD/BRL ${custo.cambio.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}` : undefined}
+              destaque
+            />
+            <ResumoLinha k="Agendamento" v={quando === "agendar" && agendadoPara ? agendadoPara.toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" }) : step >= 3 ? "Imediato" : "A definir"} />
+            <ResumoLinha k="Nome" v={nome || "—"} />
+            <ResumoLinha k="Template" v={template?.name ?? "—"} />
+            {step >= 1 && <ResumoLinha k="Público" v={contatos !== undefined ? `${contatos} contatos` : PUBLICO_LABEL[publico]} />}
+            {isAdmin && (
+              <button type="button" className="cw-link" onClick={() => setCustosAberto(true)}>Configurar custos</button>
+            )}
+          </div>
+          <div className="card">
+            <div className="cw-side-head">
+              <span className="cw-label">PREVIEW</span>
+            </div>
+            <TemplatePreview template={template} ctx={ctxPreview} />
+          </div>
+        </aside>
       </div>
+
+      {custosAberto && <CostsModal onClose={() => setCustosAberto(false)} onSaved={() => setCustoTick((n) => n + 1)} />}
+
+      {progresso && (
+        <div className="dsb-palette-overlay">
+          <div className="card" style={{ maxWidth: 420, width: "92%", margin: "20vh auto" }}>
+            <h3>{progresso.fase}</h3>
+            {progresso.total > 0 && (
+              <>
+                <div className="progress-track"><div className="progress-fill" style={{ width: `${Math.min(100, (progresso.enviados / progresso.total) * 100)}%` }} /></div>
+                <p style={{ fontSize: 13 }}>{progresso.enviados} de {progresso.total}</p>
+              </>
+            )}
+            {progresso.aviso ? (
+              <>
+                <p className="error-text">{progresso.aviso}</p>
+                <button className="btn secondary" onClick={() => setProgresso(null)}>Fechar</button>
+              </>
+            ) : (
+              <>
+                <p className="pd-hint">Mantenha esta tela aberta até terminar. O que não sair agora segue no ciclo diário.</p>
+                <button className="btn secondary" onClick={() => { cancelar.current = true; }}>Parar e ver o relatório</button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TemplateItem({ t, onPick, bloqueado }: { t: WaTemplate; onPick: () => void; bloqueado?: boolean }) {
+  return (
+    <button type="button" className="cw-item" disabled={bloqueado} onClick={onPick} title={bloqueado ? t.sendIssue || "Ainda não aprovado pela Meta" : undefined}>
+      <strong>{t.name}</strong>
+      <span className="pd-hint">
+        {t.category === "UTILITY" ? "UTILIDADE" : "MARKETING"}
+        {t.origin === "META" ? " · da Meta" : ""}
+        {bloqueado ? ` · ${t.sendIssue ? "formato não suportado" : "não aprovado"}` : ""}
+      </span>
+    </button>
+  );
+}
+
+function PublicoCard({ ativo, titulo, sub, onClick }: { ativo: boolean; titulo: string; sub: string; onClick: () => void }) {
+  return (
+    <button type="button" className={`cw-card ${ativo ? "active" : ""}`} onClick={onClick}>
+      <strong>{titulo}</strong>
+      <span className="pd-hint">{sub}</span>
+    </button>
+  );
+}
+
+function ResumoLinha({ k, v, sub, destaque }: { k: string; v: string; sub?: string; destaque?: boolean }) {
+  return (
+    <div className="cw-kv">
+      <span>{k}</span>
+      <span style={{ textAlign: "right" }}>
+        <span style={destaque ? { color: "var(--success)" } : undefined}>{v}</span>
+        {sub && <span className="pd-hint" style={{ textAlign: "right" }}>{sub}</span>}
+      </span>
     </div>
   );
 }

@@ -103,7 +103,8 @@ export async function runCampaignDispatchJob() {
   // messages. processQueueBatch() re-derives and re-scopes by the campaign's own tenantId.
   const pendingCampaigns = await withCrossTenantAccess(() =>
     prisma.campaign.findMany({
-      where: { status: { in: ["AGENDADA", "EM_EXECUCAO"] } },
+      // Agendada para depois só entra quando chega a hora; sem horário (ou já vencido), entra já.
+      where: { status: { in: ["AGENDADA", "EM_EXECUCAO"] }, OR: [{ scheduledAt: null }, { scheduledAt: { lte: new Date() } }] },
       select: { id: true, tenantId: true },
     })
   );

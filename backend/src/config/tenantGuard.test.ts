@@ -177,6 +177,7 @@ describe("TENANT_SCOPED_MODELS", () => {
         "Conversation",
         "WaMessage",
         "WaMediaBlob",
+        "TemplateMedia",
       ].sort()
     );
   });

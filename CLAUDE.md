@@ -172,6 +172,24 @@ linha sem valor é recusada/bloqueada se o texto a usa). Resultado: o relatório
 traz, por contato, se usou e em quantos dias (`diasAteUso`). Contatos fora da base passam a ser medidos quando entrarem na base. Retenção anonimiza destinatários.
 SQL: `backend/prisma/sql/2026-10-campanha-manual.sql` (rodar antes do deploy).
 
+### Assistente de campanhas (4 passos), templates da Meta e custo
+
+`/campaigns/new` (`pages/campaigns/CampaignWizard.tsx`, o antigo virou `/campaigns/classic`, para SMS/texto livre/A-B): Configuração (nome, template com Recentes/Recomendados/busca,
+preview do WhatsApp com imagem) → Público (Todos / Segmentos / **Planilha** / Teste, e "Lista pré-selecionada" vinda do Dashboard/Comércio) → Validação → Agendamento
+(Imediato ou data/hora, rascunho). `POST /api/campaigns/wizard/validar` (`services/campaignWizard.ts`, só lê) devolve conferências ok/aviso/erro (template aprovado e mapeado,
+imagem, Meta conectada, público, dedupe, extrato velho, custo, agendamento). Lançar = criar (`POST /campaigns` ou `/campaigns/manual`) → `/schedule` (enfileira; para lista
+manual `enqueueManualCampaign`) → no "Imediato" o navegador chama `/dispatch` em lotes de 25 com barra de progresso (a tela precisa ficar aberta; o resto sai no ciclo diário).
+"Agendar": grava `scheduledAt` e `runCampaignDispatchJob` só pega campanha vencida; no plano Hobby o cron roda 1x/dia (~06h Brasília), então não sai na hora marcada.
+**Templates importados da Meta:** `POST /api/templates/sync` agora IMPORTA os que só existem na Meta (`origin=META`, `services/templateImport.ts`, puro): `metaBody` com
+{{1}},{{2}}, `variableMap` (qual variável nossa preenche cada posição; palpite pelo exemplo, a pessoa confirma no passo 1/Templates via `PATCH variableMap`), `buttons`, `sendIssue`
+(cabeçalho de vídeo/documento, botão com link variável, variável nomeada, autenticação: não enviamos). Não envia com variável sem mapa. Excluir um importado NÃO apaga na Meta;
+o texto dele só muda na Meta. **Cabeçalho com imagem:** `TemplateMedia` (JPG/PNG até 3 MB), `PUT/DELETE/GET /api/templates/:id/header`; no envio a imagem sobe para a Meta uma vez
+por lote (`prepareHeaderImage` → `uploadHeaderImage`, id usado como `header` do template); para criar template nosso com imagem a Meta exige exemplo por upload resumível
+(`uploadTemplateExample`, precisa de `WhatsAppAccount.appId`, campo opcional em Integrações) — fluxo escrito pela documentação, ainda não testado contra a Meta. Imagem de importado:
+tenta baixar o exemplo do cabeçalho na importação, senão envie uma em Templates. **Custo:** `services/messageCost.ts` (US$ por categoria × câmbio; padrão marketing R$ 0,41 =
+0,0822 × 4,99; utilidade sem padrão), configurável em `GET/PUT /api/campaigns/custos` (ADMIN) e gravado em `Campaign.costPerMessage`. SQL: `backend/prisma/sql/2026-10-assistente-campanha.sql`
+(rodar antes do deploy, depois de `2026-10-campanha-manual.sql`).
+
 ### Fila de oportunidades e campanhas por categoria
 
 `services/opportunities.ts` calcula a fila do dashboard (`GET /api/dashboard/oportunidades`): faixas
@@ -182,7 +200,7 @@ mensagem sugerida; o assistente de campanha recebe tudo via router state (`prese
 `presetMessage`, `presetChannel`). Em /commerce, `GET /api/purchases/audiencia` aceita `minCompras`
 (frequência mínima) e devolve o público por frequência e a mensagem da categoria. Mensagens sugeridas só
 podem usar as variáveis de `services/templateVariables.ts` (`nome`, `cidade`, `percentual`, `saldo`,
-`limite`), que o envio de fato preenche; `opportunities.test.ts` garante isso.
+`limite`, `limite_disponivel`), que o envio de fato preenche; `opportunities.test.ts` garante isso.
 
 ### Perfil de renda PF1–PF4
 
