@@ -12,6 +12,7 @@ function makeFake(opts: { client?: any; duplicate?: boolean; evento?: any; lastI
       updateMany: jest.fn(async (a: any) => void calls.clientUpdate.push(a)),
     },
     conversation: {
+      findFirst: jest.fn(async () => null),
       upsert: jest.fn(async ({ create }: any) => ({ ...create, id: "conv1", clientId: opts.client?.id ?? null, ...(opts.lastInboundAt ? { lastInboundAt: opts.lastInboundAt } : {}) })),
       update: jest.fn(async (a: any) => void calls.convUpdate.push(a)),
     },
@@ -72,6 +73,13 @@ describe("storeInboundMessage", () => {
     expect(r.optedOut).toBe(true);
     expect(calls.clientUpdate[0]).toMatchObject({ where: { id: "c1", tenantId: "t1" }, data: { autorizacaoComunicacao: false } });
     expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "OPT_OUT_WHATSAPP", targetId: "c1" }));
+  });
+
+  it("tocar no botão SAIR de um template também descadastra", async () => {
+    const { prisma, calls } = makeFake({ client: { id: "c1" } });
+    const r = await storeInboundMessage(prisma, "t1", "acc1", msg({ type: "button", body: "SAIR" }));
+    expect(r.optedOut).toBe(true);
+    expect(calls.clientUpdate).toHaveLength(1);
   });
 
   it("PARAR de número desconhecido não mexe em nenhum cliente", async () => {

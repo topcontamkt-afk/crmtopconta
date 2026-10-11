@@ -457,6 +457,17 @@ model MessageTemplate {
   status            TemplateStatus @default(RASCUNHO)
   providerTemplateId String?       // id do template aprovado no provedor (ex.: WhatsApp Business Template Name)
   rejectionReason   String?
+  // WhatsApp (Meta): o template precisa ser criado e aprovado na Meta antes de qualquer envio fora
+  // da janela de 24h (services/whatsappTemplates.ts). `body` usa {{nome}}...; na Meta vira {{1}}...
+  language          String         @default("pt_BR")
+  category          String?        // MARKETING | UTILITY
+  footer            String?
+  quickReplies      Json?          // string[] (até 3 botões de resposta rápida)
+  version           Int            @default(1) // sobe a cada edição do texto depois de enviado à Meta
+  metaName          String?        // nome registrado na Meta (slug + _v{version})
+  metaStatus        String?        // APPROVED | PENDING | REJECTED | PAUSED | DISABLED ...
+  qualityScore      String?        // GREEN | YELLOW | RED | UNKNOWN
+  submittedAt       DateTime?
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
 

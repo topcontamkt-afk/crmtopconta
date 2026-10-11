@@ -11,6 +11,8 @@ import {
   uploadMedia,
 } from "./whatsappSend";
 import { previewOf } from "./whatsappPayload";
+import { templateContext } from "./campaignQueue";
+import { buildBodyParams, renderMetaPreview, sendTemplateMessage } from "./whatsappTemplates";
 
 /**
  * Responde a um cliente dentro de uma conversa: confere a janela de 24 horas, envia pela Meta e só
@@ -108,4 +110,56 @@ export async function applyOutboundStatus(
   if (!next) return false;
   await prisma.waMessage.update({ where: { id: msg.id }, data: { status: next, errorText: next === "failed" ? st.errorText ?? "Falha na entrega" : null } });
   return true;
+}
+
+/** Template da Meta que pode ser enviado agora (aprovado de verdade, não só marcado como aprovado). */
+export function isSendableTemplate(t: { channel: string; status: string; metaName: string | null; metaStatus: string | null }): boolean {
+  return t.channel === "WHATSAPP" && t.status === "APROVADO" && !!t.metaName && t.metaStatus === "APPROVED";
+}
+
+/** Variáveis do template para esta conversa: dados do cliente, ou só o nome do perfil se ele não está na base. */
+export function conversationContext(conversation: { contactName: string | null; client: any | null }): Record<string, unknown> {
+  if (conversation.client) return templateContext(conversation.client);
+  return { nome: conversation.contactName ?? "" };
+}
+
+export function previewTemplateFor(template: { body: string }, conversation: { contactName: string | null; client: any | null }) {
+  const params = buildBodyParams(template.body, conversationContext(conversation));
+  return { params, texto: renderMetaPreview(template.body, params) };
+}
+
+/**
+ * Envia um template aprovado numa conversa — o jeito de falar com o cliente FORA da janela de 24h.
+ * Quem pediu para parar (opt-out) não recebe template, mesmo que a janela esteja fechada.
+ */
+export async function sendTemplateReply(
+  prisma: AppPrismaClient,
+  tenantId: string,
+  userId: string,
+  conversationId: string,
+  templateId: string,
+  deps: ReplyDeps = {}
+) {
+  const token = deps.token ?? process.env.WHATSAPP_ACCESS_TOKEN;
+  const now = deps.now ?? new Date();
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: conversationId, tenantId },
+    include: { account: { select: { phoneNumberId: true, active: true } }, client: true },
+  });
+  if (!conversation) throw new SendError("NAO_ENCONTRADA", "Conversa não encontrada.");
+  if (!conversation.account.active) throw new SendError("META", "O número do WhatsApp desta conversa está desativado.");
+  if (conversation.client && (!conversation.client.autorizacaoComunicacao || conversation.client.optOutAt)) {
+    throw new SendError("OPT_OUT", "Este cliente pediu para não receber mensagens: o envio de template está bloqueado.");
+  }
+
+  const template = await prisma.messageTemplate.findFirst({ where: { id: templateId, tenantId } });
+  if (!template || !isSendableTemplate(template)) throw new SendError("TEMPLATE_INDISPONIVEL", "Este template não está aprovado pela Meta.");
+
+  const { params, texto } = previewTemplateFor(template, conversation);
+  const wamid = await sendTemplateMessage(conversation.account.phoneNumberId, token, conversation.waId, template.metaName!, template.language, params, deps.fetchImpl);
+  const message = await prisma.waMessage.create({
+    data: { tenantId, conversationId: conversation.id, direction: "SAIDA", wamid, type: "template", body: texto, status: "sent", sentByUserId: userId, timestamp: now },
+  });
+  await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: now, lastPreview: `Você: ${texto}`.slice(0, 140) } });
+  return message;
 }

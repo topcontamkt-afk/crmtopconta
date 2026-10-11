@@ -17,6 +17,40 @@ export interface StoreResult {
   optedOut: boolean;
 }
 
+/**
+ * O Brasil tem o "nono dígito": a mesma pessoa pode aparecer como 5584999998888 ou 558499998888.
+ * Se já existe conversa com qualquer uma das formas, usa a dela em vez de abrir uma segunda.
+ */
+async function resolveWaId(prisma: AppPrismaClient, tenantId: string, accountId: string, waId: string): Promise<string> {
+  const variants = phoneCandidates(waId).map((p) => p.replace("+", ""));
+  const existing = await prisma.conversation.findFirst({ where: { tenantId, accountId, waId: { in: variants } }, select: { waId: true } });
+  return existing?.waId ?? waId;
+}
+
+/** Guarda na conversa a mensagem de campanha (template) enviada ao cliente. Melhor esforço. */
+export async function recordOutboundTemplateMessage(
+  prisma: AppPrismaClient,
+  tenantId: string,
+  client: { id: string; telefone: string },
+  wamid: string,
+  renderedBody: string
+): Promise<void> {
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+  if (!account) return;
+  const digits = client.telefone.replace(/\D/g, "");
+  if (!digits) return;
+  const waId = await resolveWaId(prisma, tenantId, account.id, digits);
+  const now = new Date();
+  const conversation = await prisma.conversation.upsert({
+    where: { accountId_waId: { accountId: account.id, waId } },
+    create: { tenantId, accountId: account.id, waId, clientId: client.id, lastMessageAt: now, lastPreview: `Campanha: ${renderedBody}`.slice(0, 140) },
+    update: { clientId: client.id, lastMessageAt: now, lastPreview: `Campanha: ${renderedBody}`.slice(0, 140) },
+  });
+  await prisma.waMessage
+    .create({ data: { tenantId, conversationId: conversation.id, direction: "SAIDA", wamid, type: "template", body: renderedBody, status: "sent", timestamp: now } })
+    .catch(() => undefined);
+}
+
 const OPEN_STATUSES = ["ENVIADO", "ENTREGUE", "LIDO"] as const;
 const RESPONSE_WINDOW_DAYS = 7;
 
@@ -36,13 +70,14 @@ export async function storeInboundMessage(
       })
     : null;
 
-  // 2) conversa (uma por número nosso + número do cliente)
+  // 2) conversa (uma por número nosso + número do cliente; reaproveita a que já existe com o outro formato do telefone)
+  const waId = await resolveWaId(prisma, tenantId, accountId, m.waId);
   const conversation = await prisma.conversation.upsert({
-    where: { accountId_waId: { accountId, waId: m.waId } },
+    where: { accountId_waId: { accountId, waId } },
     create: {
       tenantId,
       accountId,
-      waId: m.waId,
+      waId,
       clientId: client?.id ?? null,
       contactName: m.contactName,
       lastMessageAt: m.timestamp,
@@ -106,7 +141,8 @@ export async function storeInboundMessage(
 
   // 6) pedido de descadastro (LGPD): vale na hora e fica no log de auditoria
   let optedOut = false;
-  if (client && m.type === "text" && isOptOutMessage(m.body)) {
+  // texto digitado ou toque num botão (ex.: o botão "SAIR" do template)
+  if (client && ["text", "button", "interactive"].includes(m.type) && isOptOutMessage(m.body)) {
     await prisma.client.updateMany({
       where: { id: client.id, tenantId },
       data: { autorizacaoComunicacao: false, optOutAt: new Date() },

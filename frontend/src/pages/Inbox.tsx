@@ -143,6 +143,72 @@ function lerBase64(file: File): Promise<string> {
   });
 }
 
+interface TemplateOpcao {
+  id: string;
+  nome: string;
+  categoria: string | null;
+  texto: string;
+  botoes: string[];
+}
+
+/** Janela de 24h fechada: o único caminho é um template aprovado pela Meta. */
+function TemplatePicker({ conversaId, onEnviada }: { conversaId: string; onEnviada: () => void }) {
+  const [opcoes, setOpcoes] = useState<TemplateOpcao[] | null>(null);
+  const [sel, setSel] = useState("");
+  const [erro, setErro] = useState<string | null>(null);
+  const [enviando, setEnviando] = useState(false);
+
+  useEffect(() => {
+    setOpcoes(null);
+    setSel("");
+    setErro(null);
+    api<TemplateOpcao[]>(`/inbox/conversations/${conversaId}/templates`).then(setOpcoes).catch((e) => setErro(textoDoErro(e)));
+  }, [conversaId]);
+
+  const atual = opcoes?.find((o) => o.id === sel);
+
+  async function enviar() {
+    if (!atual || enviando) return;
+    setEnviando(true);
+    setErro(null);
+    try {
+      await api(`/inbox/conversations/${conversaId}/template`, { method: "POST", body: { templateId: atual.id } });
+      setSel("");
+      onEnviada();
+    } catch (e) {
+      setErro(textoDoErro(e));
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  return (
+    <div className="inbox-composer">
+      <strong>Janela de 24 horas fechada.</strong> Para falar com este cliente agora, envie um <em>template aprovado pela Meta</em>. Se ele responder, a janela reabre e você conversa livremente.
+      {opcoes && opcoes.length === 0 && <div style={{ marginTop: 6 }}>Nenhum template aprovado ainda. Crie e envie um para aprovação em <strong>Templates</strong>.</div>}
+      {opcoes && opcoes.length > 0 && (
+        <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <select value={sel} onChange={(e) => setSel(e.target.value)} style={{ minWidth: 220 }}>
+            <option value="">Escolha um template…</option>
+            {opcoes.map((o) => (
+              <option key={o.id} value={o.id}>{o.nome}{o.categoria === "MARKETING" ? " (marketing)" : ""}</option>
+            ))}
+          </select>
+          <button className="btn" disabled={!atual || enviando} onClick={enviar}>{enviando ? "Enviando…" : "Enviar template"}</button>
+        </div>
+      )}
+      {atual && (
+        <div className="card" style={{ marginTop: 8, background: "var(--surface-alt)", maxWidth: 460 }}>
+          <div className="pd-hint" style={{ marginTop: 0 }}>O cliente vai receber:</div>
+          <div style={{ whiteSpace: "pre-wrap", color: "var(--text)" }}>{atual.texto}</div>
+          {atual.botoes.map((b) => <div key={b} className="pd-hint">[ {b} ]</div>)}
+        </div>
+      )}
+      {erro && <div className="error-text" style={{ marginTop: 6 }}>{erro}</div>}
+    </div>
+  );
+}
+
 function Composer({ conversaId, janelaAberta, podeEnviar, onEnviada }: { conversaId: string; janelaAberta: boolean; podeEnviar: boolean; onEnviada: () => void }) {
   const [texto, setTexto] = useState("");
   const [arquivo, setArquivo] = useState<File | null>(null);
@@ -157,13 +223,7 @@ function Composer({ conversaId, janelaAberta, podeEnviar, onEnviada }: { convers
   }, [conversaId]);
 
   if (!podeEnviar) return <div className="inbox-composer">Seu perfil só visualiza conversas. Peça a um operador ou administrador para responder.</div>;
-  if (!janelaAberta) {
-    return (
-      <div className="inbox-composer">
-        <strong>Janela de 24 horas fechada.</strong> Fora dela o WhatsApp só permite enviar um <em>template aprovado</em> (disponível na próxima fase). Assim que o cliente escrever de novo, a janela reabre.
-      </div>
-    );
-  }
+  if (!janelaAberta) return <TemplatePicker conversaId={conversaId} onEnviada={onEnviada} />;
 
   function escolher(f: File | undefined) {
     setErro(null);

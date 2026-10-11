@@ -2,7 +2,7 @@
  * Fila de campanha: grupo de controle e dedupe (Prisma falso em memória — ver retention.test.ts
  * para o mesmo padrão; não há banco real neste repo).
  */
-import { enqueueCampaign } from "./campaignQueue";
+import { enqueueCampaign, resolveWhatsAppTemplate } from "./campaignQueue";
 
 function makeFakePrisma(campaign: Record<string, unknown>, clientCount: number) {
   const created: any[] = [];
@@ -95,5 +95,39 @@ describe("enqueueCampaign — público enviável", () => {
     await enqueueCampaign(prisma, "t1", "camp1");
     const where = prisma.client.findMany.mock.calls[0][0].where;
     expect(where.limiteTotal).toEqual({ gt: 0 });
+  });
+});
+
+describe("resolveWhatsAppTemplate — WhatsApp real só envia template aprovado pela Meta", () => {
+  const real: any = [{ name: "whatsapp_cloud_api", adapter: {} }];
+  const mock: any = [{ name: "mock", adapter: {} }];
+  const camp = { tenantId: "t1", channel: "WHATSAPP", templateId: "tp1" };
+  const prismaWith = (tpl: any): any => ({ messageTemplate: { findFirst: jest.fn(async () => tpl) } });
+  const aprovado = { id: "tp1", channel: "WHATSAPP", name: "Oferta", status: "APROVADO", metaStatus: "APPROVED", metaName: "oferta_v1" };
+
+  it("template aprovado de verdade é usado", async () => {
+    const r = await resolveWhatsAppTemplate(prismaWith(aprovado), camp, real);
+    expect(r.template).toBe(aprovado);
+    expect(r.bloqueado).toBeUndefined();
+  });
+  it("sem template e com provedor real: bloqueia", async () => {
+    const r = await resolveWhatsAppTemplate(prismaWith(null), { ...camp, templateId: null }, real);
+    expect(r.bloqueado).toContain("template aprovado");
+  });
+  it("template ainda em análise na Meta: bloqueia e diz o status", async () => {
+    const r = await resolveWhatsAppTemplate(prismaWith({ ...aprovado, status: "PENDENTE_APROVACAO", metaStatus: "PENDING" }), camp, real);
+    expect(r.bloqueado).toContain("PENDING");
+  });
+  it("marcado como aprovado mas sem registro na Meta também bloqueia", async () => {
+    const r = await resolveWhatsAppTemplate(prismaWith({ ...aprovado, metaName: null, metaStatus: null }), camp, real);
+    expect(r.bloqueado).toBeDefined();
+  });
+  it("sem provedor real (mock/dev) mantém o texto livre", async () => {
+    const r = await resolveWhatsAppTemplate(prismaWith(null), { ...camp, templateId: null }, mock);
+    expect(r).toEqual({ template: null });
+  });
+  it("SMS não passa por template da Meta", async () => {
+    const r = await resolveWhatsAppTemplate(prismaWith(null), { ...camp, channel: "SMS" }, real);
+    expect(r).toEqual({ template: null });
   });
 });

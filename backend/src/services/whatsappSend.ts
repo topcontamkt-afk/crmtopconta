@@ -27,7 +27,7 @@ export function mediaTypeForMime(mime: string): OutboundMediaType | null {
 }
 
 export class SendError extends Error {
-  constructor(public code: "NAO_ENCONTRADA" | "JANELA_FECHADA" | "SEM_TOKEN" | "TIPO_INVALIDO" | "MUITO_GRANDE" | "META", message: string, public metaCode?: number) {
+  constructor(public code: "NAO_ENCONTRADA" | "OPT_OUT" | "TEMPLATE_INDISPONIVEL" | "JANELA_FECHADA" | "SEM_TOKEN" | "TIPO_INVALIDO" | "MUITO_GRANDE" | "META", message: string, public metaCode?: number) {
     super(message);
   }
 }

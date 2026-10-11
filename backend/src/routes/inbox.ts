@@ -7,7 +7,7 @@ import { logAudit } from "../middleware/audit";
 import { maskPhone } from "../services/masking";
 import { classificarPerfil } from "../services/rendaPerfil";
 import { getOrCacheMessageMedia, isInlineSafeMime, MediaError, MEDIA_MAX_BYTES } from "../services/whatsappMedia";
-import { sendReply } from "../services/whatsappReply";
+import { isSendableTemplate, previewTemplateFor, sendReply, sendTemplateReply } from "../services/whatsappReply";
 import { SendError, OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
 import { janelaAte } from "../services/whatsappPayload";
 
@@ -228,7 +228,41 @@ router.post("/conversations/:id/messages", requireRole("ADMIN", "OPERATOR"), asy
     res.status(201).json(presentMessage(message));
   } catch (e) {
     if (e instanceof SendError) {
-      const status = { NAO_ENCONTRADA: 404, JANELA_FECHADA: 409, SEM_TOKEN: 503, TIPO_INVALIDO: 400, MUITO_GRANDE: 413, META: 502 }[e.code];
+      const status = { NAO_ENCONTRADA: 404, OPT_OUT: 403, TEMPLATE_INDISPONIVEL: 409, JANELA_FECHADA: 409, SEM_TOKEN: 503, TIPO_INVALIDO: 400, MUITO_GRANDE: 413, META: 502 }[e.code];
+      return res.status(status).json({ error: e.message, codigo: e.code, metaCodigo: e.metaCode });
+    }
+    throw e;
+  }
+});
+
+/** GET /api/inbox/conversations/:id/templates — templates aprovados, já com o texto que ESTE cliente receberia. */
+router.get("/conversations/:id/templates", async (req, res) => {
+  const { tenantId } = req.user!;
+  const conversa = await prisma.conversation.findFirst({ where: { id: req.params.id, tenantId }, include: { client: true } });
+  if (!conversa) return res.status(404).json({ error: "Conversa não encontrada" });
+  const templates = await prisma.messageTemplate.findMany({ where: { tenantId, channel: "WHATSAPP", status: "APROVADO" }, orderBy: { name: "asc" } });
+  res.json(
+    templates.filter(isSendableTemplate).map((t) => ({
+      id: t.id,
+      nome: t.name,
+      categoria: t.category,
+      texto: previewTemplateFor(t, conversa).texto,
+      botoes: (t.quickReplies as string[] | null) ?? [],
+    }))
+  );
+});
+
+/** POST /api/inbox/conversations/:id/template — envia um template aprovado (único caminho fora da janela de 24h). */
+router.post("/conversations/:id/template", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const parsed = z.object({ templateId: z.string().min(1) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Escolha um template", codigo: "TIPO_INVALIDO" });
+  const { tenantId, id: userId } = req.user!;
+  try {
+    const message = await sendTemplateReply(prisma, tenantId, userId, req.params.id, parsed.data.templateId);
+    res.status(201).json(presentMessage(message));
+  } catch (e) {
+    if (e instanceof SendError) {
+      const status = { NAO_ENCONTRADA: 404, OPT_OUT: 403, TEMPLATE_INDISPONIVEL: 409, JANELA_FECHADA: 409, SEM_TOKEN: 503, TIPO_INVALIDO: 400, MUITO_GRANDE: 413, META: 502 }[e.code];
       return res.status(status).json({ error: e.message, codigo: e.code, metaCodigo: e.metaCode });
     }
     throw e;

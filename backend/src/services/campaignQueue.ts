@@ -3,6 +3,8 @@ import { ChannelAdapter, SendResult } from "./channels/types";
 import { MockSMSAdapter, TwilioSMSAdapter, ZenviaSMSAdapter } from "./channels/sms";
 import { MockWhatsAppAdapter, WhatsAppCloudAdapter } from "./channels/whatsapp";
 import { buildSegmentWhere, ENVIAVEL_WHERE, SegmentFilters, SegmentGroup } from "./segments";
+import { buildBodyParams, renderMetaPreview } from "./whatsappTemplates";
+import { recordOutboundTemplateMessage } from "./whatsappInbox";
 import { decryptSecret, isEncryptedPayload } from "./crypto";
 
 /**
@@ -86,15 +88,38 @@ async function resolveProviders(
 async function sendWithFailover(
   providers: ResolvedProvider[],
   to: string,
-  body: string
+  body: string,
+  template?: { name: string; language: string; params: string[] }
 ): Promise<SendResult & { provider: string }> {
   let last: SendResult = { providerMessageId: "", status: "FAILED", error: "Nenhum provedor configurado" };
   for (const p of providers) {
-    const result = await p.adapter.send(to, body);
+    // Template da Meta: só adaptadores que sabem enviá-lo; os outros caem para o próximo provedor.
+    if (template && !p.adapter.sendTemplate) continue;
+    const result = template ? await p.adapter.sendTemplate!(to, template) : await p.adapter.send(to, body);
     if (result.status === "SENT") return { ...result, provider: p.name };
     last = result;
   }
   return { ...last, provider: providers[providers.length - 1]?.name ?? "none" };
+}
+
+/**
+ * WhatsApp com provedor REAL só envia template APROVADO pela Meta (a primeira mensagem de uma
+ * campanha é fora da janela de 24h; texto livre seria recusado). Sem provedor real (mock/dev) o
+ * comportamento antigo de texto livre continua. Devolve o template a usar, ou o motivo do bloqueio.
+ */
+export async function resolveWhatsAppTemplate(
+  prisma: AppPrismaClient,
+  campaign: { tenantId: string; channel: string; templateId: string | null },
+  providers: ResolvedProvider[]
+): Promise<{ template: any | null; bloqueado?: string }> {
+  if (campaign.channel !== "WHATSAPP") return { template: null };
+  const real = providers.some((p) => p.name !== "mock");
+  const template = campaign.templateId ? await prisma.messageTemplate.findFirst({ where: { id: campaign.templateId, tenantId: campaign.tenantId } }) : null;
+  const usable = !!template && template.channel === "WHATSAPP" && template.status === "APROVADO" && !!template.metaName && template.metaStatus === "APPROVED";
+  if (usable) return { template };
+  if (!real) return { template: null };
+  if (!template) return { template: null, bloqueado: "No WhatsApp a campanha precisa de um template aprovado pela Meta. Escolha um template na campanha." };
+  return { template: null, bloqueado: `O template "${template.name}" ainda não está aprovado pela Meta (status: ${template.metaStatus ?? "não enviado"}).` };
 }
 
 const brl = (n: unknown) => Number(n ?? 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
@@ -234,6 +259,11 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
     return { processed: 0, remaining: await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } }), results: [], throttled: true };
   }
 
+  const { template: metaTemplate, bloqueado } = await resolveWhatsAppTemplate(prisma, campaign, providers);
+  if (bloqueado) {
+    return { processed: 0, remaining: await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } }), results: [], throttled: false, bloqueado };
+  }
+
   const pending = await prisma.messageEvent.findMany({
     where: { campaignId, status: "FILA" },
     take: batchSize,
@@ -261,7 +291,22 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
     const templateBody = evt.variant === "B" && campaign.messageTemplateB ? campaign.messageTemplateB : campaign.messageTemplate;
     const body = renderTemplate(templateBody, templateContext(evt.client));
 
-    const sendResult = await sendWithFailover(providers, evt.client.telefone, body);
+    // Template da Meta: os parâmetros saem do cadastro do cliente (variante B não existe aqui: a Meta aprova um texto só).
+    const ctx = templateContext(evt.client);
+    const tplParams = metaTemplate ? buildBodyParams(metaTemplate.body, ctx) : null;
+    const sendResult = await sendWithFailover(
+      providers,
+      evt.client.telefone,
+      body,
+      metaTemplate ? { name: metaTemplate.metaName, language: metaTemplate.language, params: tplParams! } : undefined
+    );
+
+    // A conversa da inbox passa a mostrar o que foi enviado (quando o cliente responder, quem atende vê a oferta).
+    if (metaTemplate && sendResult.status === "SENT" && sendResult.providerMessageId) {
+      await recordOutboundTemplateMessage(prisma, campaign.tenantId, evt.client, sendResult.providerMessageId, renderMetaPreview(metaTemplate.body, tplParams!)).catch((e) =>
+        console.warn("[campaignQueue] não registrou na inbox:", e.message)
+      );
+    }
 
     await prisma.messageEvent.update({
       where: { id: evt.id },
@@ -304,9 +349,13 @@ export async function sendTestMessages(
   const sample = { nome: "Cliente Teste", cidade: "São Paulo", percentual: 42, saldo: brl(850), limite: brl(1500) };
   const body = renderTemplate(campaign.messageTemplate, sample);
 
+  const { template: metaTemplate, bloqueado } = await resolveWhatsAppTemplate(prisma, campaign, providers);
+  if (bloqueado) throw new Error(bloqueado);
+  const params = metaTemplate ? buildBodyParams(metaTemplate.body, sample) : null;
+
   const results = [];
   for (const phone of phones) {
-    const sendResult = await sendWithFailover(providers, phone, body);
+    const sendResult = await sendWithFailover(providers, phone, body, metaTemplate ? { name: metaTemplate.metaName, language: metaTemplate.language, params: params! } : undefined);
     results.push({ phone, status: sendResult.status, provider: sendResult.provider, error: sendResult.error });
   }
   return { body, results };

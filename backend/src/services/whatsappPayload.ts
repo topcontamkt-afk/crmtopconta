@@ -190,3 +190,40 @@ export const JANELA_HORAS = 24;
 export function janelaAte(lastInboundAt: Date | null | undefined): Date | null {
   return lastInboundAt ? new Date(lastInboundAt.getTime() + JANELA_HORAS * 3600_000) : null;
 }
+
+export interface TemplateEvent {
+  wabaId: string;
+  kind: "status" | "quality" | "category";
+  metaTemplateId: string | null;
+  name: string | null;
+  language: string | null;
+  status?: string; // APPROVED | REJECTED | PAUSED | DISABLED | PENDING ...
+  reason?: string | null;
+  quality?: string; // GREEN | YELLOW | RED | UNKNOWN
+  category?: string;
+}
+
+/** Eventos de template do webhook (campos message_template_status_update, ..._quality_update e template_category_update). */
+export function parseTemplateEvents(body: any): TemplateEvent[] {
+  const out: TemplateEvent[] = [];
+  for (const entry of body?.entry ?? []) {
+    const wabaId = String(entry?.id ?? "");
+    for (const change of entry?.changes ?? []) {
+      const v = change?.value ?? {};
+      const base = {
+        wabaId,
+        metaTemplateId: v.message_template_id != null ? String(v.message_template_id) : null,
+        name: v.message_template_name ?? null,
+        language: v.message_template_language ?? null,
+      };
+      if (change?.field === "message_template_status_update" && v.event) {
+        out.push({ ...base, kind: "status", status: String(v.event).toUpperCase(), reason: v.reason ?? null });
+      } else if (change?.field === "message_template_quality_update" && v.new_quality_score) {
+        out.push({ ...base, kind: "quality", quality: String(v.new_quality_score).toUpperCase() });
+      } else if (change?.field === "template_category_update" && v.new_category) {
+        out.push({ ...base, kind: "category", category: String(v.new_category).toUpperCase() });
+      }
+    }
+  }
+  return out;
+}

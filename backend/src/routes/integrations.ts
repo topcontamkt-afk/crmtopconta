@@ -8,7 +8,8 @@ import { encryptSecret } from "../services/crypto";
 import { exportTenantSummaryToSheet } from "../services/biExport";
 import { env } from "../config/env";
 import { withCrossTenantAccess, runWithTenantContextAsync } from "../config/tenantGuard";
-import { parseWebhookPayload } from "../services/whatsappPayload";
+import { applyTemplateEvent } from "../services/whatsappTemplateSync";
+import { parseTemplateEvents, parseWebhookPayload } from "../services/whatsappPayload";
 import { applyOutboundStatus } from "../services/whatsappReply";
 import { getOrCacheMessageMedia } from "../services/whatsappMedia";
 import { storeInboundMessage } from "../services/whatsappInbox";
@@ -223,6 +224,21 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
           await runWithTenantContextAsync(account.tenantId, () => applyOutboundStatus(prisma, account.tenantId, st));
         } catch (e) {
           console.error("[webhooks/whatsapp] falha ao atualizar status de resposta:", e);
+        }
+      }
+    }
+
+    // Aprovação/reprovação/qualidade dos templates (status em tempo real). Só com assinatura válida.
+    if (appSecret) {
+      for (const ev of parseTemplateEvents(req.body)) {
+        try {
+          const account = await withCrossTenantAccess(() =>
+            prisma.whatsAppAccount.findFirst({ where: { wabaId: ev.wabaId, active: true } })
+          );
+          if (!account) continue;
+          await runWithTenantContextAsync(account.tenantId, () => applyTemplateEvent(prisma, account.tenantId, ev));
+        } catch (e) {
+          console.error("[webhooks/whatsapp] falha ao atualizar template:", e);
         }
       }
     }

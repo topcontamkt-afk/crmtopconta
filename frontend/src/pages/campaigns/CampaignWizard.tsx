@@ -338,15 +338,21 @@ export default function CampaignWizard() {
             </div>
 
             <div className="form-row">
-              <label>Template aprovado (opcional)</label>
+              <label>{channel === "WHATSAPP" ? "Template aprovado pela Meta" : "Template aprovado (opcional)"}</label>
               <select value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
-                <option value="">— Texto livre —</option>
+                <option value="">{channel === "WHATSAPP" ? "— Sem template (só para testes) —" : "— Texto livre —"}</option>
                 {templates.map((t) => (
                   <option key={t.id} value={t.id}>{t.name}</option>
                 ))}
               </select>
             </div>
 
+            {channel === "WHATSAPP" && !templateId && (
+              <div className="card" style={{ borderLeft: "4px solid var(--warning)", fontSize: 13, marginBottom: 10 }}>
+                Com o número real da Meta, o WhatsApp só entrega a primeira mensagem de uma campanha por <strong>template aprovado</strong> (fora das 24 horas depois da última mensagem do cliente).
+                Sem template, o disparo é bloqueado. Crie e aprove um em <strong>Templates</strong>.
+              </div>
+            )}
             {!templateId && (
               <div className="form-row">
                 <label>Mensagem — variante A (placeholders: {"{{nome}}"}, {"{{cidade}}"}, {"{{percentual}}"})</label>
@@ -361,7 +367,7 @@ export default function CampaignWizard() {
 
             <div className="form-row" style={{ marginTop: 10 }}>
               <label>
-                <input type="checkbox" checked={abEnabled} onChange={(e) => setAbEnabled(e.target.checked)} /> Testar variante B (A/B testing)
+                <input type="checkbox" checked={abEnabled} disabled={channel === "WHATSAPP" && !!templateId} onChange={(e) => setAbEnabled(e.target.checked)} /> Testar variante B (A/B testing){channel === "WHATSAPP" && !!templateId ? " — indisponível com template da Meta (a Meta aprova um texto só)" : ""}
               </label>
             </div>
             {abEnabled && (
