@@ -172,6 +172,9 @@ describe("TENANT_SCOPED_MODELS", () => {
         "DashboardSnapshot",
         "Merchant",
         "Purchase",
+        "WhatsAppAccount",
+        "Conversation",
+        "WaMessage",
       ].sort()
     );
   });

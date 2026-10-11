@@ -7,6 +7,9 @@ import { logAudit } from "../middleware/audit";
 import { encryptSecret } from "../services/crypto";
 import { exportTenantSummaryToSheet } from "../services/biExport";
 import { env } from "../config/env";
+import { withCrossTenantAccess, runWithTenantContextAsync } from "../config/tenantGuard";
+import { parseWebhookPayload } from "../services/whatsappPayload";
+import { storeInboundMessage } from "../services/whatsappInbox";
 import { verifyTwilioSignature, verifyWhatsAppSignature } from "../services/webhookAuth";
 import { webhookLimiter } from "../middleware/rateLimit";
 
@@ -168,6 +171,32 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
       for (const change of entry.changes || []) {
         for (const status of change.value?.statuses || []) {
           await applyStatusUpdate(status.id, status.status, status.timestamp);
+        }
+      }
+    }
+
+    // Mensagens RECEBIDAS dos clientes (inbox). Só são gravadas com a assinatura verificada: sem
+    // WHATSAPP_APP_SECRET qualquer um poderia injetar conversas falsas e disparar opt-outs.
+    const { messages } = parseWebhookPayload(req.body);
+    if (messages.length > 0) {
+      if (!appSecret) {
+        console.warn(`[webhooks/whatsapp] ${messages.length} mensagem(ns) recebida(s) IGNORADA(S): configure WHATSAPP_APP_SECRET para a inbox funcionar.`);
+      } else {
+        for (const m of messages) {
+          try {
+            // Cross-tenant de propósito: o webhook é público e só conhece o phone_number_id; é por
+            // ele que se descobre o tenant. Daqui em diante tudo roda no contexto desse tenant.
+            const account = await withCrossTenantAccess(() =>
+              prisma.whatsAppAccount.findFirst({ where: { phoneNumberId: m.phoneNumberId, active: true } })
+            );
+            if (!account) {
+              console.warn(`[webhooks/whatsapp] phone_number_id ${m.phoneNumberId} sem conta cadastrada — mensagem ignorada`);
+              continue;
+            }
+            await runWithTenantContextAsync(account.tenantId, () => storeInboundMessage(prisma, account.tenantId, account.id, m));
+          } catch (e) {
+            console.error("[webhooks/whatsapp] falha ao gravar mensagem recebida:", e);
+          }
         }
       }
     }

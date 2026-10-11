@@ -57,6 +57,9 @@ export const TENANT_SCOPED_MODELS = [
   "DashboardSnapshot",
   "Merchant",
   "Purchase",
+  "WhatsAppAccount",
+  "Conversation",
+  "WaMessage",
 ] as const;
 
 type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number];

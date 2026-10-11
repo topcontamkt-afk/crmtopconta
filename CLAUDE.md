@@ -208,6 +208,20 @@ regularidade 10, só com clientes com limite. Sem extrato ou com extrato parado,
 dashboard avisa (`saude.modelo`/`saude.aviso`). `DashboardSnapshot.healthScore` guarda a nota real diária (SQL em
 `backend/prisma/sql/2026-10-health-score-real.sql`); a tendência e a variação só usam dias com nota real.
 
+### Inbox do WhatsApp (Meta Cloud API) — Fase 1
+
+Mensagens RECEBIDAS chegam em `POST /api/integrations/webhooks/whatsapp` (campo `messages` da Meta). O handler
+só grava mensagens com `WHATSAPP_APP_SECRET` configurado e assinatura `X-Hub-Signature-256` válida. O tenant sai do
+`phone_number_id` (`WhatsAppAccount`, único no banco; consulta cross-tenant de propósito) e o resto roda no contexto
+do tenant. `services/whatsappPayload.ts` (puro: parsing, variações do 9º dígito BR, detecção de opt-out "PARAR/SAIR",
+janela de 24h) e `services/whatsappInbox.ts` (grava `Conversation` + `WaMessage`, idempotente pelo `wamid`, liga ao
+cliente pelo telefone, marca a `MessageEvent` da campanha como RESPONDIDO e registra opt-out + auditoria).
+`routes/inbox.ts`: `/status`, `PUT /account` (ADMIN), `/conversations`, `/conversations/:id/messages`, `/read`;
+telefones sempre mascarados. Tela `/inbox` (leitura, atualização por polling de 5s). A janela de 24h conta de
+`Conversation.lastInboundAt`. O envio de respostas/templates e o download de mídia ainda NÃO existem (Fases 2–4): hoje
+`WhatsAppCloudAdapter` só envia texto livre, que a Meta recusa fora da janela. SQL: `backend/prisma/sql/2026-10-whatsapp-inbox.sql`
+(inclui RLS e GRANT; rodar antes do deploy). Webhook e token da Meta: ver o roteiro da Fase 0.
+
 ### Comércio credenciado (compras por categoria)
 
 A aba "Todas as Compras" da planilha (transações do cartão) entra por `POST /api/purchases/import`

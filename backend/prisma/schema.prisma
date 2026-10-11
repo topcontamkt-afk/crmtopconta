@@ -115,6 +115,9 @@ model Tenant {
   dashboardSnapshots DashboardSnapshot[]
   merchants          Merchant[]
   purchases          Purchase[]
+  whatsAppAccounts   WhatsAppAccount[]
+  conversations      Conversation[]
+  waMessages         WaMessage[]
 }
 
 model User {
@@ -222,6 +225,7 @@ model Client {
   movements              Movement[]
   messageEvents          MessageEvent[]
   accountSnapshots       AccountSnapshot[]
+  conversations          Conversation[]
 
   @@unique([tenantId, cpfHash])
   @@index([tenantId, telefone])
@@ -549,4 +553,87 @@ model Purchase {
   @@index([tenantId, occurredAt])
   @@index([clientId, occurredAt])
   @@index([merchantId, occurredAt])
+}
+
+// ---------------------------------------------------------------------------------------------
+// Inbox do WhatsApp (Cloud API da Meta) — Fase 1: receber e listar conversas.
+// ---------------------------------------------------------------------------------------------
+
+enum WaDirection {
+  ENTRADA // do cliente para nós
+  SAIDA   // de nós para o cliente
+}
+
+enum ConversationStatus {
+  ABERTA
+  ARQUIVADA
+}
+
+/// Número de WhatsApp Business ligado a um tenant. O webhook da Meta identifica o número por
+/// `phoneNumberId`, que por isso é único no banco inteiro. O token de acesso NÃO fica aqui.
+model WhatsAppAccount {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  phoneNumberId String   @unique
+  wabaId        String?
+  displayName   String?
+  displayPhone  String?
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  conversations Conversation[]
+
+  @@index([tenantId])
+}
+
+/// Uma conversa por (número nosso, número do cliente). `clientId` é nulo quando o telefone não
+/// bate com nenhum cliente da base. A janela de 24 horas conta a partir de `lastInboundAt`.
+model Conversation {
+  id            String             @id @default(uuid())
+  tenantId      String
+  tenant        Tenant             @relation(fields: [tenantId], references: [id])
+  accountId     String
+  account       WhatsAppAccount    @relation(fields: [accountId], references: [id])
+  clientId      String?
+  client        Client?            @relation(fields: [clientId], references: [id])
+  waId          String             // telefone do cliente como a Meta informa (só dígitos, com DDI)
+  contactName   String?            // nome do perfil do WhatsApp
+  status        ConversationStatus @default(ABERTA)
+  lastMessageAt DateTime
+  lastInboundAt DateTime?
+  lastPreview   String?
+  unreadCount   Int                @default(0)
+  assignedUserId String?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  messages WaMessage[]
+
+  @@unique([accountId, waId])
+  @@index([tenantId, lastMessageAt])
+  @@index([tenantId, clientId])
+}
+
+model WaMessage {
+  id             String       @id @default(uuid())
+  tenantId       String
+  tenant         Tenant       @relation(fields: [tenantId], references: [id])
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  direction      WaDirection
+  wamid          String?      // id da mensagem na Meta (idempotência do webhook)
+  type           String       // text | image | audio | video | document | sticker | location | ...
+  body           String?      // texto, legenda ou descrição
+  mediaId        String?      // id da mídia na Meta (o download é a Fase 2)
+  mediaMime      String?
+  mediaFilename  String?
+  status         String?      // só saída: sent | delivered | read | failed
+  errorText      String?
+  timestamp      DateTime     // horário da mensagem segundo a Meta
+  createdAt      DateTime     @default(now())
+
+  @@unique([tenantId, wamid])
+  @@index([conversationId, timestamp])
 }

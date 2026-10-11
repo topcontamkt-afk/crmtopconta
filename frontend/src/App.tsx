@@ -1,8 +1,10 @@
+import Inbox from "./pages/Inbox";
 import PerfisRenda from "./pages/PerfisRenda";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
+  MessageCircle,
   Users as UsersIcon,
   Layers,
   Megaphone,
@@ -108,6 +110,7 @@ function Layout({ children }: { children: JSX.Element }) {
     {
       heading: "Comunicação",
       items: [
+        { id: "inbox", title: "Inbox WhatsApp", icon: MessageCircle, path: "/inbox" },
         { id: "campaigns", title: "Campanhas", icon: Megaphone, path: "/campaigns" },
         { id: "templates", title: "Templates", icon: FileText, path: "/templates" },
         { id: "automations", title: "Automações", icon: Zap, path: "/automations" },
@@ -222,6 +225,7 @@ export default function App() {
                 <Route path="/clients" element={<Clients />} />
                 <Route path="/clients/:id" element={<ClientProfile />} />
                 <Route path="/segments" element={<Segments />} />
+                <Route path="/inbox" element={<Inbox />} />
                 <Route path="/perfis-renda/:perfil?" element={<PerfisRenda />} />
                 <Route
                   path="/commerce"
