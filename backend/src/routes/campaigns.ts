@@ -15,6 +15,9 @@ import {
   sendTestMessages,
 } from "../services/campaignQueue";
 import { computeABSignificance } from "../services/statistics";
+import { linkRecipients, matchManualAudience, parseManualRows } from "../services/manualCampaign";
+import { usesLimiteDisponivel } from "../services/messageContext";
+import { maskPhone } from "../services/masking";
 import {
   buildCampaignResults,
   liftAtDay,
@@ -33,6 +36,188 @@ router.get("/", async (req, res) => {
     include: { segment: true, template: true },
   });
   res.json(campaigns);
+});
+
+
+/* ───────────────────────── campanha manual (lista de planilha) ───────────────────────── */
+
+const MAX_MANUAL_ROWS = 5000;
+const manualRowsSchema = z
+  .array(z.object({ nome: z.any(), telefone: z.any(), cpf: z.any().optional(), limiteDisponivel: z.any().optional() }))
+  .min(1)
+  .max(MAX_MANUAL_ROWS);
+
+/** Valida a lista contra o template e a base: o que será enviado, o que fica de fora e por quê. */
+async function prepareManual(tenantId: string, rows: z.infer<typeof manualRowsSchema>, templateId: string) {
+  const template = await prisma.messageTemplate.findFirst({ where: { id: templateId, tenantId } });
+  if (!template || template.channel !== "WHATSAPP") return { error: "Template do WhatsApp não encontrado" as const };
+  if (template.status !== "APROVADO") return { error: "Escolha um template aprovado" as const };
+  const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { cpfSalt: true } });
+
+  const { valid, rejected } = parseManualRows(rows, tenant.cpfSalt);
+  const needsLimite = usesLimiteDisponivel(template.body);
+  const matched = await matchManualAudience(prisma, tenantId, valid);
+
+  const enviar = matched.filter((m) => {
+    if (m.excluidoMotivo) {
+      rejected.push({ linha: m.linha, motivo: m.excluidoMotivo });
+      return false;
+    }
+    if (needsLimite && m.limiteDisponivel === null) {
+      rejected.push({ linha: m.linha, motivo: "Sem limite disponível (o template usa essa variável)" });
+      return false;
+    }
+    return true;
+  });
+  rejected.sort((a, b) => a.linha - b.linha);
+  return { template, enviar, rejected, daBase: enviar.filter((m) => m.clientId).length };
+}
+
+const manualPreviewSchema = z.object({ templateId: z.string(), rows: manualRowsSchema });
+
+/** POST /api/campaigns/manual/preview — confere a lista sem gravar nada. */
+router.post("/manual/preview", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const parsed = manualPreviewSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const r = await prepareManual(req.user!.tenantId, parsed.data.rows, parsed.data.templateId);
+  if ("error" in r) return res.status(400).json({ error: r.error });
+  res.json({
+    total: parsed.data.rows.length,
+    enviar: r.enviar.length,
+    daBase: r.daBase,
+    foraDaBase: r.enviar.length - r.daBase,
+    recusadas: r.rejected.length,
+    motivos: r.rejected.slice(0, 200),
+  });
+});
+
+const manualCreateSchema = z.object({
+  name: z.string().min(1),
+  objective: z.string().optional(),
+  templateId: z.string(),
+  rows: manualRowsSchema,
+  throttlePerMin: z.number().int().positive().default(60),
+  costPerMessage: z.number().nonnegative().default(0),
+  // Aceite obrigatório: quem sobe a lista responde por ter autorização para contatar os números.
+  consentimento: z.literal(true),
+});
+
+/**
+ * POST /api/campaigns/manual — cria a campanha com a lista e já enfileira os envios (status FILA).
+ * O disparo é o mesmo das outras campanhas ("Disparar lote" / cron). Os contatos ficam guardados
+ * (CampaignRecipient) para a análise depois.
+ */
+router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const parsed = manualCreateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { tenantId, id: userId } = req.user!;
+  const d = parsed.data;
+
+  const r = await prepareManual(tenantId, d.rows, d.templateId);
+  if ("error" in r) return res.status(400).json({ error: r.error });
+  if (r.enviar.length === 0) return res.status(400).json({ error: "Nenhum contato da lista pode receber a mensagem", motivos: r.rejected.slice(0, 200) });
+
+  const campaign = await prisma.campaign.create({
+    data: {
+      tenantId,
+      name: d.name,
+      objective: d.objective,
+      channel: "WHATSAPP",
+      manual: true,
+      templateId: r.template.id,
+      messageTemplate: r.template.body,
+      throttlePerMin: d.throttlePerMin,
+      dedupeWindowHrs: 1,
+      attributionDays: 30,
+      costPerMessage: d.costPerMessage,
+      audienceCount: r.enviar.length,
+      status: "AGENDADA",
+    },
+  });
+
+  for (let i = 0; i < r.enviar.length; i += 500) {
+    const part = r.enviar.slice(i, i + 500);
+    await prisma.campaignRecipient.createMany({
+      data: part.map((m) => ({
+        tenantId,
+        campaignId: campaign.id,
+        nome: m.nome,
+        telefone: m.telefone,
+        cpfHash: m.cpfHash,
+        cpfMasked: m.cpfMasked,
+        limiteDisponivel: m.limiteDisponivel,
+        clientId: m.clientId,
+      })),
+    });
+  }
+  const saved = await prisma.campaignRecipient.findMany({ where: { tenantId, campaignId: campaign.id }, select: { id: true, clientId: true } });
+  for (let i = 0; i < saved.length; i += 500) {
+    await prisma.messageEvent.createMany({
+      data: saved.slice(i, i + 500).map((rec) => ({ campaignId: campaign.id, clientId: rec.clientId, recipientId: rec.id, channel: "WHATSAPP" as const, status: "FILA" as const })),
+    });
+  }
+
+  // Só contagens no log: nome, telefone e CPF da lista não vão para o AuditLog.
+  await logAudit({
+    tenantId,
+    userId,
+    action: "CREATE_MANUAL_CAMPAIGN",
+    target: "Campaign",
+    targetId: campaign.id,
+    details: { templateId: r.template.id, recebem: r.enviar.length, daBase: r.daBase, recusadas: r.rejected.length, consentimento: true },
+  });
+  res.status(201).json({ campaign, enviar: r.enviar.length, daBase: r.daBase, recusadas: r.rejected.length, motivos: r.rejected.slice(0, 200) });
+});
+
+/**
+ * GET /api/campaigns/:id/destinatarios — quem entrou na lista manual, o que aconteceu com cada envio
+ * e, para quem é cliente da base, se usou o limite e quantos dias depois do envio.
+ */
+router.get("/:id/destinatarios", async (req, res) => {
+  const { tenantId } = req.user!;
+  const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
+
+  await linkRecipients(prisma, tenantId, campaign.id); // contatos que entraram na base depois do envio
+  const [recipients, evals] = await Promise.all([
+    prisma.campaignRecipient.findMany({
+      where: { tenantId, campaignId: campaign.id },
+      include: { messageEvents: { select: { id: true, status: true, sentAt: true, error: true } } },
+      orderBy: { nome: "asc" },
+    }),
+    loadCampaignEvaluations(prisma, tenantId, campaign.id),
+  ]);
+  const evalById = new Map(evals.map((e) => [e.id, e]));
+
+  const rows = recipients.map((rec) => {
+    const evt = rec.messageEvents[0];
+    const ev = evt ? evalById.get(evt.id) : undefined;
+    const first = ev?.usos[0];
+    return {
+      id: rec.id,
+      nome: rec.nome,
+      telefone: maskPhone(rec.telefone),
+      naBase: !!rec.clientId,
+      limiteDisponivel: rec.limiteDisponivel === null ? null : Number(rec.limiteDisponivel),
+      status: evt?.status ?? null,
+      erro: evt?.error ?? null,
+      enviadoEm: evt?.sentAt?.toISOString() ?? null,
+      // null com naBase=true e enviado = ainda não usou (na janela de 30 dias)
+      usou: ev ? ev.usos.length > 0 : null,
+      diasAteUso: first ? first.dayOffset : null,
+      primeiroUsoEm: first ? first.confirmedAt.toISOString() : null,
+      valorMovimentado: ev ? Number(ev.usos.reduce((a, u) => a + u.valorPrincipal, 0).toFixed(2)) : null,
+    };
+  });
+  const medidos = rows.filter((r) => r.naBase && r.enviadoEm);
+  res.json({
+    total: rows.length,
+    naBase: rows.filter((r) => r.naBase).length,
+    foraDaBase: rows.filter((r) => !r.naBase).length,
+    medidos: medidos.length,
+    usaram: medidos.filter((r) => r.usou).length,
+    destinatarios: rows,
+  });
 });
 
 router.get("/:id", async (req, res) => {
@@ -240,6 +425,7 @@ router.get("/:id/report", async (req, res) => {
   const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
 
+  if (campaign.manual) await linkRecipients(prisma, tenantId, campaign.id);
   const [grouped, costAgg, evals] = await Promise.all([
     prisma.messageEvent.groupBy({ by: ["status"], where: { campaignId: campaign.id }, _count: true }),
     prisma.messageEvent.aggregate({ where: { campaignId: campaign.id }, _sum: { cost: true } }),
@@ -326,6 +512,7 @@ router.get("/:id/report", async (req, res) => {
 
   res.json({
     campaignId: campaign.id,
+    manual: campaign.manual,
     porPerfil,
     isSandbox: campaign.isSandbox,
     audienceCount: campaign.audienceCount,
@@ -359,10 +546,11 @@ router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST")
   const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
 
+  if (campaign.manual) await linkRecipients(prisma, tenantId, campaign.id);
   const [events, evals] = await Promise.all([
     prisma.messageEvent.findMany({
       where: { campaignId: campaign.id },
-      include: { client: { select: { nome: true, telefone: true, cidade: true } } },
+      include: { client: { select: { nome: true, telefone: true, cidade: true } }, recipient: { select: { nome: true, telefone: true } } },
       orderBy: { queuedAt: "asc" },
     }),
     loadCampaignEvaluations(prisma, tenantId, campaign.id),
@@ -383,9 +571,9 @@ router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST")
       const ev = evalById.get(e.id);
       const usos = ev?.usos ?? [];
       return [
-        csvEscape(e.client.nome),
-        e.client.telefone,
-        csvEscape(e.client.cidade || ""),
+        csvEscape(e.client?.nome ?? e.recipient?.nome ?? ""),
+        e.client?.telefone ?? e.recipient?.telefone ?? "",
+        csvEscape(e.client?.cidade || ""),
         e.status === "CONTROLE" ? "CONTROLE" : "TRATADO",
         e.variant,
         e.status,

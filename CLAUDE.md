@@ -158,6 +158,20 @@ que a tabela foi criada e não é reconstruível. Com filtro de cidade/convênio
 ficam indisponíveis (a foto é da base inteira). A nota de saúde (`services/health.ts`) tem pesos e
 metas fixos e é testada em `health.test.ts`. O SQL da tabela está em `backend/prisma/sql/`.
 
+### Campanha manual (lista de planilha)
+
+Tela `/campaigns/manual` (botão "Campanha por planilha"): sobe `.xlsx`/`.csv` (lido no navegador com `read-excel-file`, linhas vão em JSON, até 5000) com nome,
+telefone, CPF (opcional) e limite disponível (opcional). `services/manualCampaign.ts`: `parseManualRows` (telefone E.164, CPF/CNPJ com zero perdido recomposto e só
+em hash, limite por `parseMoney`), `matchManualAudience` (liga ao `Client` por CPF, senão telefone com variações do 9º dígito; exclui opt-out, conta bloqueada,
+sem limite e quem pediu PARAR numa lista anterior) e `linkRecipients` (refaz o vínculo depois de novas importações). `POST /api/campaigns/manual/preview` e
+`POST /api/campaigns/manual` (exige `consentimento: true`, template WhatsApp `APROVADO`) criam `Campaign.manual=true`, os `CampaignRecipient` (ficam guardados para
+análise) e os `MessageEvent` em FILA; o disparo é o mesmo ("Disparar lote"/cron) e só sai por template aprovado pela Meta. `MessageEvent.clientId` agora é opcional
+(`recipientId` aponta o destinatário); a mensagem usa nome e limite da planilha (`recipientContext`) e o envio aparece na Inbox mesmo sem cliente. O limite da
+planilha **nunca** altera `Client.saldoDisponivel`. Variável nova `{{limite_disponivel}}` (= `{{saldo}}` nas campanhas tradicionais; na manual vem da planilha;
+linha sem valor é recusada/bloqueada se o texto a usa). Resultado: o relatório normal mede os contatos ligados a cliente; `GET /api/campaigns/:id/destinatarios`
+traz, por contato, se usou e em quantos dias (`diasAteUso`). Contatos fora da base passam a ser medidos quando entrarem na base. Retenção anonimiza destinatários.
+SQL: `backend/prisma/sql/2026-10-campanha-manual.sql` (rodar antes do deploy).
+
 ### Fila de oportunidades e campanhas por categoria
 
 `services/opportunities.ts` calcula a fila do dashboard (`GET /api/dashboard/oportunidades`): faixas

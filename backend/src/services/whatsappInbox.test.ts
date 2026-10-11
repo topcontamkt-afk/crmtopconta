@@ -5,7 +5,7 @@ jest.mock("../middleware/audit", () => ({ logAudit: jest.fn(async () => undefine
 import { logAudit } from "../middleware/audit";
 
 function makeFake(opts: { client?: any; duplicate?: boolean; evento?: any; lastInboundAt?: Date | null } = {}) {
-  const calls: Record<string, any[]> = { msgCreate: [], convUpdate: [], clientUpdate: [], eventoUpdate: [] };
+  const calls: Record<string, any[]> = { msgCreate: [], convUpdate: [], clientUpdate: [], eventoUpdate: [], recipientUpdate: [] };
   const prisma: any = {
     client: {
       findFirst: jest.fn(async () => opts.client ?? null),
@@ -23,6 +23,7 @@ function makeFake(opts: { client?: any; duplicate?: boolean; evento?: any; lastI
         return { id: "msg1" };
       }),
     },
+    campaignRecipient: { updateMany: jest.fn(async (a: any) => void calls.recipientUpdate.push(a)) },
     messageEvent: {
       findFirst: jest.fn(async () => opts.evento ?? null),
       update: jest.fn(async (a: any) => void calls.eventoUpdate.push(a)),
@@ -58,7 +59,8 @@ describe("storeInboundMessage", () => {
     const { prisma } = makeFake();
     const r = await storeInboundMessage(prisma, "t1", "acc1", msg());
     expect(r.clientId).toBeNull();
-    expect(prisma.messageEvent.findFirst).not.toHaveBeenCalled();
+    // só procura o envio por destinatário de lista manual (telefone), nunca por cliente
+    expect((prisma.messageEvent.findFirst as jest.Mock).mock.calls[0][0].where).toHaveProperty("recipient");
   });
 
   it("resposta a uma campanha marca o envio como respondido", async () => {
@@ -82,11 +84,13 @@ describe("storeInboundMessage", () => {
     expect(calls.clientUpdate).toHaveLength(1);
   });
 
-  it("PARAR de número desconhecido não mexe em nenhum cliente", async () => {
+  it("PARAR de número fora da base não mexe em cliente, mas bloqueia o contato nas próximas listas", async () => {
     const { prisma, calls } = makeFake();
     const r = await storeInboundMessage(prisma, "t1", "acc1", msg({ body: "parar" }));
-    expect(r.optedOut).toBe(false);
+    expect(r.optedOut).toBe(true);
     expect(calls.clientUpdate).toHaveLength(0);
+    expect(calls.recipientUpdate[0].where).toMatchObject({ tenantId: "t1" });
+    expect(calls.recipientUpdate[0].data.optOutAt).toBeInstanceOf(Date);
   });
 
   it("mensagem mais antiga que a última não sobrescreve o resumo da conversa", async () => {

@@ -7,6 +7,8 @@ import { buildBodyParams, renderMetaPreview } from "./whatsappTemplates";
 import { recordOutboundTemplateMessage } from "./whatsappInbox";
 import { credentialsOf } from "./whatsappAccount";
 import { decryptSecret, isEncryptedPayload } from "./crypto";
+import { brl, recipientContext, renderTemplate, templateContext, usesLimiteDisponivel } from "./messageContext";
+export { recipientContext, renderTemplate, templateContext, usesLimiteDisponivel };
 
 /**
  * Processamento de fila de campanha.
@@ -130,32 +132,6 @@ export async function resolveWhatsAppTemplate(
   return { template: null, bloqueado: `O template "${template.name}" ainda não está aprovado pela Meta (status: ${template.metaStatus ?? "não enviado"}).` };
 }
 
-const brl = (n: unknown) => Number(n ?? 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
-
-/** Contexto de renderização de um cliente real (usado no envio). */
-export function templateContext(client: {
-  nome: string;
-  cidade: string | null;
-  percentualUtilizado: unknown;
-  saldoDisponivel: unknown;
-  limiteTotal: unknown;
-}): Record<string, unknown> {
-  return {
-    nome: client.nome,
-    cidade: client.cidade,
-    percentual: client.percentualUtilizado,
-    saldo: brl(client.saldoDisponivel),
-    limite: brl(client.limiteTotal),
-  };
-}
-
-export function renderTemplate(template: string, client: Record<string, any>): string {
-  return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => {
-    const value = client[key];
-    return value === undefined || value === null ? "" : String(value);
-  });
-}
-
 /** Monta o público da campanha a partir do segmento salvo ou de filtros ad-hoc, sempre excluindo opt-outs. */
 export async function buildAudience(prisma: AppPrismaClient, tenantId: string, campaignId: string) {
   const campaign = await prisma.campaign.findUniqueOrThrow({
@@ -275,45 +251,57 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
   const pending = await prisma.messageEvent.findMany({
     where: { campaignId, status: "FILA" },
     take: batchSize,
-    include: { client: true },
+    include: { client: true, recipient: true },
   });
 
   const results = [];
   for (const evt of pending) {
-    if (!evt.client.autorizacaoComunicacao || evt.client.optOutAt) {
-      await prisma.messageEvent.update({
-        where: { id: evt.id },
-        data: { status: "BLOQUEADO", error: "Cliente sem autorização/opt-out" },
-      });
+    const block = async (error: string) => {
+      await prisma.messageEvent.update({ where: { id: evt.id }, data: { status: "BLOQUEADO", error } });
+    };
+    const client = evt.client;
+    if (client && (!client.autorizacaoComunicacao || client.optOutAt)) {
+      await block("Cliente sem autorização/opt-out");
+      continue;
+    }
+    if (!client && !evt.recipient) {
+      await block("Destinatário sem cliente");
       continue;
     }
     // Garantia no envio: mensagem já na fila de quem (ainda) não tem limite não sai.
-    if (!(Number(evt.client.limiteTotal) > 0)) {
-      await prisma.messageEvent.update({
-        where: { id: evt.id },
-        data: { status: "BLOQUEADO", error: "Cliente sem limite (comércio credenciado)" },
-      });
+    // (Contato de lista manual que não é cliente da base não tem limite cadastrado: vale a lista.)
+    if (client && !(Number(client.limiteTotal) > 0)) {
+      await block("Cliente sem limite (comércio credenciado)");
       continue;
     }
 
+    const ctx = evt.recipient ? recipientContext(evt.recipient, client) : templateContext(client!);
+    const telefone = evt.recipient?.telefone ?? client!.telefone;
     const templateBody = evt.variant === "B" && campaign.messageTemplateB ? campaign.messageTemplateB : campaign.messageTemplate;
-    const body = renderTemplate(templateBody, templateContext(evt.client));
+    if (evt.recipient && evt.recipient.limiteDisponivel === null && usesLimiteDisponivel(metaTemplate ? metaTemplate.body : templateBody)) {
+      await block("Sem limite disponível na planilha (a mensagem usa essa variável)");
+      continue;
+    }
+    const body = renderTemplate(templateBody, ctx);
 
-    // Template da Meta: os parâmetros saem do cadastro do cliente (variante B não existe aqui: a Meta aprova um texto só).
-    const ctx = templateContext(evt.client);
+    // Template da Meta: os parâmetros saem do cadastro do cliente / da lista (variante B não existe aqui: a Meta aprova um texto só).
     const tplParams = metaTemplate ? buildBodyParams(metaTemplate.body, ctx) : null;
     const sendResult = await sendWithFailover(
       providers,
-      evt.client.telefone,
+      telefone,
       body,
       metaTemplate ? { name: metaTemplate.metaName, language: metaTemplate.language, params: tplParams! } : undefined
     );
 
     // A conversa da inbox passa a mostrar o que foi enviado (quando o cliente responder, quem atende vê a oferta).
     if (metaTemplate && sendResult.status === "SENT" && sendResult.providerMessageId) {
-      await recordOutboundTemplateMessage(prisma, campaign.tenantId, evt.client, sendResult.providerMessageId, renderMetaPreview(metaTemplate.body, tplParams!)).catch((e) =>
-        console.warn("[campaignQueue] não registrou na inbox:", e.message)
-      );
+      await recordOutboundTemplateMessage(
+        prisma,
+        campaign.tenantId,
+        { id: client?.id ?? null, telefone, nome: evt.recipient?.nome },
+        sendResult.providerMessageId,
+        renderMetaPreview(metaTemplate.body, tplParams!)
+      ).catch((e) => console.warn("[campaignQueue] não registrou na inbox:", e.message));
     }
 
     await prisma.messageEvent.update({
@@ -327,7 +315,7 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
         sentAt: sendResult.status === "SENT" ? new Date() : undefined,
       },
     });
-    results.push({ clientId: evt.clientId, status: sendResult.status, provider: sendResult.provider });
+    results.push({ clientId: evt.clientId, recipientId: evt.recipientId, status: sendResult.status, provider: sendResult.provider });
   }
 
   const remaining = await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } });
@@ -354,7 +342,7 @@ export async function sendTestMessages(
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
   const providers = await resolveProviders(prisma, tenantId, campaign.channel);
 
-  const sample = { nome: "Cliente Teste", cidade: "São Paulo", percentual: 42, saldo: brl(850), limite: brl(1500) };
+  const sample = { nome: "Cliente Teste", cidade: "São Paulo", percentual: 42, saldo: brl(850), limite: brl(1500), limite_disponivel: brl(850) };
   const body = renderTemplate(campaign.messageTemplate, sample);
 
   const { template: metaTemplate, bloqueado } = await resolveWhatsAppTemplate(prisma, campaign, providers);

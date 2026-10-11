@@ -9,6 +9,7 @@ jest.mock("../config/db", () => ({
   prisma: {
     tenant: { findMany: jest.fn() },
     client: { findMany: jest.fn(), update: jest.fn() },
+    campaignRecipient: { findMany: jest.fn().mockResolvedValue([]), update: jest.fn() },
     // findFirst: usado por logAudit() (via getLastAuditHash(), hash-chain — achado #11) toda
     // vez que o sweep registra a própria ação de anonimização no AuditLog.
     auditLog: { findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), create: jest.fn() },

@@ -47,6 +47,7 @@ export const TENANT_SCOPED_MODELS = [
   "ImportJob",
   "SegmentDefinition",
   "Campaign",
+  "CampaignRecipient",
   "AutomationRule",
   "AuditLog",
   "SheetConnection",

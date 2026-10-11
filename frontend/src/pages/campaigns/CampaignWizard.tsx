@@ -355,14 +355,14 @@ export default function CampaignWizard() {
             )}
             {!templateId && (
               <div className="form-row">
-                <label>Mensagem — variante A (placeholders: {"{{nome}}"}, {"{{cidade}}"}, {"{{percentual}}"})</label>
+                <label>Mensagem — variante A (placeholders: {"{{nome}}"}, {"{{cidade}}"}, {"{{percentual}}"}, {"{{saldo}}"} ou {"{{limite_disponivel}}"}, {"{{limite}}"})</label>
                 <textarea rows={4} value={messageTemplate} onChange={(e) => setMessageTemplate(e.target.value)} />
               </div>
             )}
 
             <div className="card" style={{ background: "var(--surface-alt)" }}>
               <strong>Pré-visualização (variante A):</strong>
-              <p>{effectiveMessage.replace("{{nome}}", "Maria").replace("{{cidade}}", cidade || "São Paulo").replace("{{percentual}}", "45")}</p>
+              <p>{effectiveMessage.replace("{{nome}}", "Maria").replace("{{cidade}}", cidade || "São Paulo").replace("{{percentual}}", "45").replace("{{limite_disponivel}}", "R$ 850,00").replace("{{saldo}}", "R$ 850,00")}</p>
             </div>
 
             <div className="form-row" style={{ marginTop: 10 }}>

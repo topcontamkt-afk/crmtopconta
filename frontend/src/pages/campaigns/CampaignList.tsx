@@ -8,6 +8,7 @@ interface Campaign {
   channel: string;
   status: string;
   audienceCount: number | null;
+  manual?: boolean;
   scheduledAt: string | null;
   createdAt: string;
 }
@@ -36,7 +37,10 @@ export default function CampaignList() {
     <div>
       <div className="topbar">
         <h2>Campanhas</h2>
-        <Link className="btn" to="/campaigns/new">+ Nova campanha</Link>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Link className="btn secondary" to="/campaigns/manual">Campanha por planilha</Link>
+          <Link className="btn" to="/campaigns/new">+ Nova campanha</Link>
+        </div>
       </div>
 
       <div className="card">
@@ -47,7 +51,7 @@ export default function CampaignList() {
           <tbody>
             {campaigns.map((c) => (
               <tr key={c.id}>
-                <td><Link to={`/campaigns/${c.id}/report`}>{c.name}</Link></td>
+                <td><Link to={`/campaigns/${c.id}/report`}>{c.name}</Link>{c.manual && <> <span className="badge">planilha</span></>}</td>
                 <td>{c.channel}</td>
                 <td><span className="badge">{c.status}</span></td>
                 <td>{c.audienceCount ?? "—"}</td>

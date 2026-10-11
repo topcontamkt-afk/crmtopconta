@@ -125,6 +125,23 @@ export async function runRetentionSweep(prisma: AppPrismaClient) {
 
         redactedCount += await cascadeAuditLogRedaction(prisma, tenant.id, client.id);
       }
+
+      // Lista de campanha manual: anonimiza quem virou cliente anonimizado e os contatos que nunca
+      // entraram na base depois do mesmo prazo de retenção (o envio e o resultado agregado ficam).
+      const recipients = await prisma.campaignRecipient.findMany({
+        where: {
+          tenantId: tenant.id,
+          nome: { not: "Contato anonimizado" },
+          OR: [{ client: { anonymizedAt: { not: null } } }, { clientId: null, createdAt: { lte: cutoff } }],
+        },
+        select: { id: true },
+      });
+      for (const r of recipients) {
+        await prisma.campaignRecipient.update({
+          where: { id: r.id },
+          data: { nome: "Contato anonimizado", telefone: `anon-${r.id}`, cpfHash: null, cpfMasked: null, limiteDisponivel: null },
+        });
+      }
       return { anonymized: anonymizedCount, auditLogsRedacted: redactedCount };
     });
 

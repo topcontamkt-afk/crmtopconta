@@ -93,18 +93,19 @@ enum NotificationSeverity {
 }
 
 model Tenant {
-  id                 String   @id @default(uuid())
-  name               String
-  cpfSalt            String   @default(uuid()) // salt por tenant para hash de CPF
-  retentionDays       Int      @default(1095) // 3 anos default (LGPD)
-  maxMsgsPerMinute    Int      @default(600) // rate limit global do tenant, aplicado no dispatch de campanhas
-  createdAt          DateTime @default(now())
+  id               String   @id @default(uuid())
+  name             String
+  cpfSalt          String   @default(uuid()) // salt por tenant para hash de CPF
+  retentionDays    Int      @default(1095) // 3 anos default (LGPD)
+  maxMsgsPerMinute Int      @default(600) // rate limit global do tenant, aplicado no dispatch de campanhas
+  createdAt        DateTime @default(now())
 
   users              User[]
   clients            Client[]
   importJobs         ImportJob[]
   segments           SegmentDefinition[]
   campaigns          Campaign[]
+  campaignRecipients CampaignRecipient[]
   automationRules    AutomationRule[]
   auditLogs          AuditLog[]
   sheetConnections   SheetConnection[]
@@ -134,54 +135,54 @@ model User {
 
   // Segurança de login (rate limiting anti brute-force) — armazenado no banco (não em memória
   // do processo) para funcionar de forma consistente entre invocações serverless distintas.
-  failedLoginCount   Int       @default(0)
-  lockedUntil        DateTime? // conta bloqueada para login até este instante
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime? // conta bloqueada para login até este instante
 
   // Forçado após reset de senha por um Admin (sem fluxo de e-mail) — o próprio usuário troca no
   // primeiro login seguinte.
-  mustChangePassword Boolean   @default(false)
+  mustChangePassword Boolean @default(false)
 
   // 2FA (TOTP, tipo Google Authenticator) — segredo cifrado em repouso (envelope encryption,
   // mesma abordagem de ChannelConfig.credentials, ver services/crypto.ts). O segredo só é
   // considerado válido para login quando twoFactorEnabled = true (setup não confirmado ainda
   // não afeta o login).
-  twoFactorSecret    String?
-  twoFactorEnabled   Boolean   @default(false)
+  twoFactorSecret  String?
+  twoFactorEnabled Boolean @default(false)
 
-  auditLogs    AuditLog[]
+  auditLogs AuditLog[]
 }
 
 model Client {
-  id                     String       @id @default(uuid())
-  tenantId               String
-  tenant                 Tenant       @relation(fields: [tenantId], references: [id])
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
 
-  externalId             String? // id_cliente da planilha de origem
-  nome                   String
-  telefone               String // normalizado E.164
-  email                  String?
+  externalId    String? // id_cliente da planilha de origem
+  nome          String
+  telefone      String // normalizado E.164
+  email         String?
   // cpfHash/cpfMasked guardam CPF (pessoa física) OU CNPJ (pessoa jurídica) — a coluna de
   // origem real ("CpfCnpjCliente") traz os dois; documentoTipo diferencia qual é qual.
   // Ver services/masking.ts (isValidDocument/hashDocument/maskDocument).
-  cpfHash                String
-  cpfMasked              String
-  documentoTipo          String? // "CPF" | "CNPJ"
-  cidade                 String?
+  cpfHash       String
+  cpfMasked     String
+  documentoTipo String? // "CPF" | "CNPJ"
+  cidade        String?
 
-  dataCadastro           DateTime?
-  dataAberturaConta      DateTime?
-  limiteTotal            Decimal      @default(0) @db.Decimal(14, 2)
-  valorUtilizado         Decimal      @default(0) @db.Decimal(14, 2)
-  saldoDisponivel        Decimal      @default(0) @db.Decimal(14, 2)
-  valorAntecipado        Decimal      @default(0) @db.Decimal(14, 2)
-  dataUltimaUtilizacao   DateTime?
+  dataCadastro         DateTime?
+  dataAberturaConta    DateTime?
+  limiteTotal          Decimal   @default(0) @db.Decimal(14, 2)
+  valorUtilizado       Decimal   @default(0) @db.Decimal(14, 2)
+  saldoDisponivel      Decimal   @default(0) @db.Decimal(14, 2)
+  valorAntecipado      Decimal   @default(0) @db.Decimal(14, 2)
+  dataUltimaUtilizacao DateTime?
   // Uso REAL pelo extrato (antecipação/compra), refeito por services/usageRefresh.ts
-  ultimoUsoReal          DateTime?
-  usosUltimos90d         Int          @default(0)
-  usosTotal              Int          @default(0)
+  ultimoUsoReal        DateTime?
+  usosUltimos90d       Int       @default(0)
+  usosTotal            Int       @default(0)
 
-  percentualUtilizado    Decimal      @default(0) @db.Decimal(6, 2)
-  faixaUso               UsageFaixa   @default(SEM_USO)
+  percentualUtilizado Decimal    @default(0) @db.Decimal(6, 2)
+  faixaUso            UsageFaixa @default(SEM_USO)
 
   statusConta            ClientStatus @default(ATIVO)
   origemCliente          String?
@@ -199,34 +200,35 @@ model Client {
 
   // Encerramento de conta — distinto de statusConta=BLOQUEADO (que é uma trava ativa); conta
   // encerrada é tratada como INATIVA na importação, mas mantém o motivo para consulta.
-  encerradoEm             DateTime?
-  motivoEncerramento      String?
-  obsEncerramento         String?
+  encerradoEm        DateTime?
+  motivoEncerramento String?
+  obsEncerramento    String?
 
   // Campos da aba "SaldoCartao" (fonte real mais completa, confirmada com o cliente) — nem
   // toda planilha real traz isso, por isso tudo opcional.
-  razaoSocial             String? // razão social da promotora/associação que administra o cartão
-  lotacao                 String? // departamento/unidade de trabalho do titular (servidor público)
-  dataValidadeCartao      DateTime?
-  dataNascimento          DateTime?
-  sexo                    String?
-  remuneracaoBruta        Decimal?     @db.Decimal(14, 2)
-  remuneracaoLiquida      Decimal?     @db.Decimal(14, 2)
-  bonus                   Decimal?     @db.Decimal(14, 2)
-  saldoLiquidoSaque       Decimal?     @db.Decimal(14, 2)
+  razaoSocial        String? // razão social da promotora/associação que administra o cartão
+  lotacao            String? // departamento/unidade de trabalho do titular (servidor público)
+  dataValidadeCartao DateTime?
+  dataNascimento     DateTime?
+  sexo               String?
+  remuneracaoBruta   Decimal?  @db.Decimal(14, 2)
+  remuneracaoLiquida Decimal?  @db.Decimal(14, 2)
+  bonus              Decimal?  @db.Decimal(14, 2)
+  saldoLiquidoSaque  Decimal?  @db.Decimal(14, 2)
 
-  tags                   String[]     @default([])
-  purchases              Purchase[]
+  tags      String[]   @default([])
+  purchases Purchase[]
 
-  createdAt              DateTime     @default(now())
-  updatedAt               DateTime     @updatedAt
-  lastImportJobId        String?
-  anonymizedAt           DateTime? // preenchido pelo job de retenção/right-to-be-forgotten (LGPD)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  lastImportJobId String?
+  anonymizedAt    DateTime? // preenchido pelo job de retenção/right-to-be-forgotten (LGPD)
 
-  movements              Movement[]
-  messageEvents          MessageEvent[]
-  accountSnapshots       AccountSnapshot[]
-  conversations          Conversation[]
+  movements          Movement[]
+  messageEvents      MessageEvent[]
+  campaignRecipients CampaignRecipient[]
+  accountSnapshots   AccountSnapshot[]
+  conversations      Conversation[]
 
   @@unique([tenantId, cpfHash])
   @@index([tenantId, telefone])
@@ -247,17 +249,17 @@ model ImportJob {
   addedCount   Int          @default(0)
   updatedCount Int          @default(0)
   errorCount   Int          @default(0)
-  errors       Json?        // lista de {row, motivo}
+  errors       Json? // lista de {row, motivo}
   startedAt    DateTime     @default(now())
   finishedAt   DateTime?
-  triggeredBy  String?      // userId ou "scheduler"
+  triggeredBy  String? // userId ou "scheduler"
 }
 
 model Movement {
   id        String   @id @default(uuid())
   clientId  String
   client    Client   @relation(fields: [clientId], references: [id])
-  tipo      String   // ex: utilizacao, pagamento, antecipacao
+  tipo      String // ex: utilizacao, pagamento, antecipacao
   valor     Decimal  @db.Decimal(14, 2)
   data      DateTime
   createdAt DateTime @default(now())
@@ -293,101 +295,135 @@ model AccountSnapshot {
 }
 
 model SegmentDefinition {
-  id               String    @id @default(uuid())
-  tenantId         String
-  tenant           Tenant    @relation(fields: [tenantId], references: [id])
-  name             String
+  id              String    @id @default(uuid())
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id])
+  name            String
   // Estrutura de grupos combináveis (AND/OR): { operator: 'AND'|'OR', conditions: SegmentFilters,
   // groups?: SegmentGroup[] } — ver src/services/segments.ts. Mantido em Json para não exigir
   // migração a cada novo campo de filtro suportado.
-  filters          Json
-  operator         String    @default("AND") // AND | OR entre grupos de filtro (legado/top-level)
-  lastCount        Int?
-  dynamic          Boolean   @default(true) // segmento dinâmico: recontagem periódica via scheduler
-  refreshCron      String    @default("0 * * * *") // a cada hora, por padrão
-  lastRefreshedAt  DateTime?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  filters         Json
+  operator        String    @default("AND") // AND | OR entre grupos de filtro (legado/top-level)
+  lastCount       Int?
+  dynamic         Boolean   @default(true) // segmento dinâmico: recontagem periódica via scheduler
+  refreshCron     String    @default("0 * * * *") // a cada hora, por padrão
+  lastRefreshedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   campaigns Campaign[]
 }
 
 model Campaign {
-  id              String         @id @default(uuid())
-  tenantId        String
-  tenant          Tenant         @relation(fields: [tenantId], references: [id])
-  name            String
-  objective       String?
-  channel         Channel
-  segmentId       String?
-  segment         SegmentDefinition? @relation(fields: [segmentId], references: [id])
-  adHocFilters    Json?          // filtros aplicados diretamente no wizard, se não usar segmento salvo
+  id           String             @id @default(uuid())
+  tenantId     String
+  tenant       Tenant             @relation(fields: [tenantId], references: [id])
+  name         String
+  objective    String?
+  channel      Channel
+  segmentId    String?
+  segment      SegmentDefinition? @relation(fields: [segmentId], references: [id])
+  adHocFilters Json? // filtros aplicados diretamente no wizard, se não usar segmento salvo
 
   templateId      String?
   template        MessageTemplate? @relation(fields: [templateId], references: [id])
-  messageTemplate String         // corpo com placeholders {{nome}}, {{cidade}}, {{percentual}}... (variante A, ou texto livre se sem templateId)
-  status          CampaignStatus @default(RASCUNHO)
+  messageTemplate String // corpo com placeholders {{nome}}, {{cidade}}, {{percentual}}... (variante A, ou texto livre se sem templateId)
+  status          CampaignStatus   @default(RASCUNHO)
 
   // A/B testing básico: quando variantSplitPercent está definido, uma fração do público
   // recebe messageTemplateB no lugar de messageTemplate (variante A).
-  messageTemplateB     String?
-  variantSplitPercent  Int?      // 0-100, % do público que recebe a variante B
+  messageTemplateB    String?
+  variantSplitPercent Int? // 0-100, % do público que recebe a variante B
 
-  isSandbox       Boolean        @default(false) // campanhas de teste/QA não contam para relatórios agregados
+  manual    Boolean @default(false) // lista de planilha (CampaignRecipient) em vez de segmento
+  isSandbox Boolean @default(false) // campanhas de teste/QA não contam para relatórios agregados
 
-  scheduledAt     DateTime?
-  throttlePerMin  Int            @default(60)
-  dedupeWindowHrs Int            @default(72) // janela mínima entre envios da mesma msg ao mesmo cliente
-  attributionDays Int            @default(7)
+  scheduledAt         DateTime?
+  throttlePerMin      Int       @default(60)
+  dedupeWindowHrs     Int       @default(72) // janela mínima entre envios da mesma msg ao mesmo cliente
+  attributionDays     Int       @default(7)
   // Grupo de controle (opcional): % do público reservado que NÃO recebe a mensagem, só para
   // comparar o uso de quem recebeu com o de quem não recebeu. Nulo/0 = desligado.
   controlGroupPercent Int?
-  costPerMessage  Decimal        @default(0) @db.Decimal(10, 4)
+  costPerMessage      Decimal   @default(0) @db.Decimal(10, 4)
 
-  audienceCount   Int?
+  audienceCount Int?
 
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  messageEvents   MessageEvent[]
+  messageEvents MessageEvent[]
+  recipients    CampaignRecipient[]
 }
 
 model MessageEvent {
-  id           String        @id @default(uuid())
-  campaignId   String
-  campaign     Campaign      @relation(fields: [campaignId], references: [id])
-  clientId     String
-  client       Client        @relation(fields: [clientId], references: [id])
-  channel      Channel
-  status       MessageStatus @default(FILA)
-  variant      String        @default("A") // "A" ou "B" — usado quando a campanha tem A/B testing ativo
-  provider     String?       // provedor efetivamente usado (para failover multi-provider de SMS)
-  providerMsgId String?
-  cost         Decimal       @default(0) @db.Decimal(10, 4)
-  error        String?
-  queuedAt     DateTime      @default(now())
-  sentAt       DateTime?
-  deliveredAt  DateTime?
-  respondedAt  DateTime?
-  convertedAt  DateTime?     // primeira movimentação dentro da janela de atribuição
-  convertedValue Decimal?    @db.Decimal(14, 2) // valor da movimentação que gerou a conversão (ROI)
+  id             String             @id @default(uuid())
+  campaignId     String
+  campaign       Campaign           @relation(fields: [campaignId], references: [id])
+  // Nulo só em campanha manual (lista de planilha) com contato que ainda não está na base;
+  // o vínculo é refeito depois (services/manualCampaign.ts linkRecipients).
+  clientId       String?
+  client         Client?            @relation(fields: [clientId], references: [id])
+  recipientId    String?
+  recipient      CampaignRecipient? @relation(fields: [recipientId], references: [id])
+  channel        Channel
+  status         MessageStatus      @default(FILA)
+  variant        String             @default("A") // "A" ou "B" — usado quando a campanha tem A/B testing ativo
+  provider       String? // provedor efetivamente usado (para failover multi-provider de SMS)
+  providerMsgId  String?
+  cost           Decimal            @default(0) @db.Decimal(10, 4)
+  error          String?
+  queuedAt       DateTime           @default(now())
+  sentAt         DateTime?
+  deliveredAt    DateTime?
+  respondedAt    DateTime?
+  convertedAt    DateTime? // primeira movimentação dentro da janela de atribuição
+  convertedValue Decimal?           @db.Decimal(14, 2) // valor da movimentação que gerou a conversão (ROI)
 
   @@index([campaignId, status])
+  @@index([clientId])
+  @@index([recipientId])
+}
+
+/// Destinatário de uma campanha manual (lista de planilha). Fica guardado depois do envio para
+/// analisar a campanha. CPF só como hash (mesmo HMAC por tenant da base); `clientId` é preenchido
+/// quando o contato existe (ou passa a existir) na base.
+model CampaignRecipient {
+  id               String   @id @default(uuid())
+  tenantId         String
+  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+  campaignId       String
+  campaign         Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  nome             String
+  telefone         String // E.164
+  cpfHash          String?
+  cpfMasked        String?
+  limiteDisponivel Decimal? @db.Decimal(14, 2) // valor da planilha; só aparece na mensagem, não altera o cliente
+  clientId         String?
+  client           Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  optOutAt         DateTime? // pediu para parar (contato fora da base); vale para as próximas listas
+  createdAt        DateTime @default(now())
+
+  messageEvents MessageEvent[]
+
+  @@unique([campaignId, telefone])
+  @@index([tenantId, cpfHash])
+  @@index([tenantId, telefone])
   @@index([clientId])
 }
 
 model AutomationRule {
-  id         String   @id @default(uuid())
-  tenantId   String
-  tenant     Tenant   @relation(fields: [tenantId], references: [id])
-  name       String
-  trigger    String   // NOVO_CLIENTE_SEM_USO | INATIVO_30_DIAS | LIMITE_RENOVADO | ESTIMULO_FAIXA | OPT_OUT_TELEFONE_INVALIDO
-  condition  Json?
-  action     Json     // { type: 'campaign' | 'notification' | 'block', ... }
-  enabled    Boolean  @default(false)
-  lastRunAt  DateTime? // usado para não reavaliar o mesmo evento repetidamente (janela desde a última execução)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id        String    @id @default(uuid())
+  tenantId  String
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  name      String
+  trigger   String // NOVO_CLIENTE_SEM_USO | INATIVO_30_DIAS | LIMITE_RENOVADO | ESTIMULO_FAIXA | OPT_OUT_TELEFONE_INVALIDO
+  condition Json?
+  action    Json // { type: 'campaign' | 'notification' | 'block', ... }
+  enabled   Boolean   @default(false)
+  lastRunAt DateTime? // usado para não reavaliar o mesmo evento repetidamente (janela desde a última execução)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
 }
 
 model AuditLog {
@@ -413,63 +449,63 @@ model AuditLog {
 }
 
 model SheetConnection {
-  id            String   @id @default(uuid())
+  id            String    @id @default(uuid())
   tenantId      String
-  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  tenant        Tenant    @relation(fields: [tenantId], references: [id])
   sheetId       String
-  sheetRange    String   @default("A1:Z")
-  authType      String   @default("service_account") // service_account | oauth2
-  columnMapping Json     // { "id_cliente": "A", "nome": "B", ... }
-  cronSchedule  String   @default("0 6 * * 1,4") // 2x/semana por padrão
+  sheetRange    String    @default("A1:Z")
+  authType      String    @default("service_account") // service_account | oauth2
+  columnMapping Json // { "id_cliente": "A", "nome": "B", ... }
+  cronSchedule  String    @default("0 6 * * 1,4") // 2x/semana por padrão
   lastSyncAt    DateTime?
-  active        Boolean  @default(true)
-  createdAt     DateTime @default(now())
+  active        Boolean   @default(true)
+  createdAt     DateTime  @default(now())
 }
 
 model ChannelConfig {
-  id         String   @id @default(uuid())
-  tenantId   String
-  tenant     Tenant   @relation(fields: [tenantId], references: [id])
-  channel    Channel
-  provider   String   // whatsapp_cloud_api | twilio | zenvia ...
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  channel       Channel
+  provider      String // whatsapp_cloud_api | twilio | zenvia ...
   // Envelope encryption: { iv, authTag, ciphertext } em base64, cifrado com AES-256-GCM usando
   // a chave mestra da aplicação (env CREDENTIALS_ENCRYPTION_KEY — simula uma KMS externa).
   // Nunca contém as credenciais em texto plano. Ver src/services/crypto.ts.
-  credentials Json
+  credentials   Json
   // Ordem de fallback entre múltiplos provedores do mesmo canal (menor = tentado primeiro).
   // Usado principalmente para failover multi-provider de SMS.
-  priority   Int      @default(0)
+  priority      Int      @default(0)
   webhookSecret String?
-  active     Boolean  @default(true)
-  createdAt  DateTime @default(now())
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
 
   @@unique([tenantId, channel, provider])
   @@index([tenantId, channel, priority])
 }
 
 model MessageTemplate {
-  id                String         @id @default(uuid())
-  tenantId          String
-  tenant            Tenant         @relation(fields: [tenantId], references: [id])
-  channel           Channel
-  name              String
-  body              String         // placeholders {{nome}}, {{cidade}}, {{percentual}}, ...
-  status            TemplateStatus @default(RASCUNHO)
-  providerTemplateId String?       // id do template aprovado no provedor (ex.: WhatsApp Business Template Name)
-  rejectionReason   String?
+  id                 String         @id @default(uuid())
+  tenantId           String
+  tenant             Tenant         @relation(fields: [tenantId], references: [id])
+  channel            Channel
+  name               String
+  body               String // placeholders {{nome}}, {{cidade}}, {{percentual}}, ...
+  status             TemplateStatus @default(RASCUNHO)
+  providerTemplateId String? // id do template aprovado no provedor (ex.: WhatsApp Business Template Name)
+  rejectionReason    String?
   // WhatsApp (Meta): o template precisa ser criado e aprovado na Meta antes de qualquer envio fora
   // da janela de 24h (services/whatsappTemplates.ts). `body` usa {{nome}}...; na Meta vira {{1}}...
-  language          String         @default("pt_BR")
-  category          String?        // MARKETING | UTILITY
-  footer            String?
-  quickReplies      Json?          // string[] (até 3 botões de resposta rápida)
-  version           Int            @default(1) // sobe a cada edição do texto depois de enviado à Meta
-  metaName          String?        // nome registrado na Meta (slug + _v{version})
-  metaStatus        String?        // APPROVED | PENDING | REJECTED | PAUSED | DISABLED ...
-  qualityScore      String?        // GREEN | YELLOW | RED | UNKNOWN
-  submittedAt       DateTime?
-  createdAt         DateTime       @default(now())
-  updatedAt         DateTime       @updatedAt
+  language           String         @default("pt_BR")
+  category           String? // MARKETING | UTILITY
+  footer             String?
+  quickReplies       Json? // string[] (até 3 botões de resposta rápida)
+  version            Int            @default(1) // sobe a cada edição do texto depois de enviado à Meta
+  metaName           String? // nome registrado na Meta (slug + _v{version})
+  metaStatus         String? // APPROVED | PENDING | REJECTED | PAUSED | DISABLED ...
+  qualityScore       String? // GREEN | YELLOW | RED | UNKNOWN
+  submittedAt        DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
 
   campaigns Campaign[]
 
@@ -477,16 +513,16 @@ model MessageTemplate {
 }
 
 model Notification {
-  id          String                @id @default(uuid())
+  id          String               @id @default(uuid())
   tenantId    String
-  tenant      Tenant                @relation(fields: [tenantId], references: [id])
-  severity    NotificationSeverity  @default(INFO)
-  type        String                // ex: IMPORT_FAILED, CAMPAIGN_BLOCKED, AUTOMATION_FIRED
+  tenant      Tenant               @relation(fields: [tenantId], references: [id])
+  severity    NotificationSeverity @default(INFO)
+  type        String // ex: IMPORT_FAILED, CAMPAIGN_BLOCKED, AUTOMATION_FIRED
   message     String
   relatedType String?
   relatedId   String?
-  read        Boolean               @default(false)
-  createdAt   DateTime              @default(now())
+  read        Boolean              @default(false)
+  createdAt   DateTime             @default(now())
 
   @@index([tenantId, read, createdAt])
 }
@@ -510,8 +546,8 @@ model DashboardSnapshot {
   saldoDisponivel Decimal  @db.Decimal(16, 2)
   usaramNoDia     Int      @default(0) // clientes com dataUltimaUtilizacao naquele dia
   encerradosNoDia Int      @default(0) // clientes com encerradoEm naquele dia
-  faixas          Json     // { FAIXA_USO: contagem }
-  healthScore     Int?     // nota por uso real do dia (null = sem extrato em dia; ver healthData.ts)
+  faixas          Json // { FAIXA_USO: contagem }
+  healthScore     Int? // nota por uso real do dia (null = sem extrato em dia; ver healthData.ts)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -527,7 +563,7 @@ model Merchant {
   tenantId       String
   tenant         Tenant   @relation(fields: [tenantId], references: [id])
   name           String
-  nameKey        String   // nome normalizado (minúsculas, sem acento) — chave de dedupe por tenant
+  nameKey        String // nome normalizado (minúsculas, sem acento) — chave de dedupe por tenant
   category       String   @default("OUTROS")
   categorySource String   @default("AUTO") // AUTO | MANUAL
   createdAt      DateTime @default(now())
@@ -543,23 +579,23 @@ model Merchant {
 // saque, Pix, assinatura e débito de fatura entram com merchantId nulo. externalId = idTransacaoCartao
 // (reimportar a mesma planilha não duplica).
 model Purchase {
-  id            String    @id @default(uuid())
-  tenantId      String
-  tenant        Tenant    @relation(fields: [tenantId], references: [id])
-  clientId      String
-  client        Client    @relation(fields: [clientId], references: [id])
-  merchantId    String?
-  merchant      Merchant? @relation(fields: [merchantId], references: [id])
-  externalId    String
-  occurredAt    DateTime
-  tipo          String    // Descricao da planilha (ex.: "Compra à Vista Cartão Top Convênio")
-  merchantName  String?
-  valorPrincipal Decimal  @db.Decimal(14, 2)
-  valorParcela  Decimal?  @db.Decimal(14, 2)
-  juros         Decimal?  @db.Decimal(14, 2)
-  razaoSocial   String?
-  importJobId   String?
-  createdAt     DateTime  @default(now())
+  id             String    @id @default(uuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id])
+  clientId       String
+  client         Client    @relation(fields: [clientId], references: [id])
+  merchantId     String?
+  merchant       Merchant? @relation(fields: [merchantId], references: [id])
+  externalId     String
+  occurredAt     DateTime
+  tipo           String // Descricao da planilha (ex.: "Compra à Vista Cartão Top Convênio")
+  merchantName   String?
+  valorPrincipal Decimal   @db.Decimal(14, 2)
+  valorParcela   Decimal?  @db.Decimal(14, 2)
+  juros          Decimal?  @db.Decimal(14, 2)
+  razaoSocial    String?
+  importJobId    String?
+  createdAt      DateTime  @default(now())
 
   @@unique([tenantId, externalId])
   @@index([tenantId, occurredAt])
@@ -573,7 +609,7 @@ model Purchase {
 
 enum WaDirection {
   ENTRADA // do cliente para nós
-  SAIDA   // de nós para o cliente
+  SAIDA // de nós para o cliente
 }
 
 enum ConversationStatus {
@@ -584,26 +620,26 @@ enum ConversationStatus {
 /// Número de WhatsApp Business ligado a um tenant. O webhook da Meta identifica o número por
 /// `phoneNumberId`, que por isso é único no banco inteiro. O token de acesso NÃO fica aqui.
 model WhatsAppAccount {
-  id            String   @id @default(uuid())
-  tenantId      String
-  tenant        Tenant   @relation(fields: [tenantId], references: [id])
-  phoneNumberId String   @unique
-  wabaId        String?
-  displayName   String?
-  displayPhone  String?
-  active        Boolean  @default(true)
+  id               String    @id @default(uuid())
+  tenantId         String
+  tenant           Tenant    @relation(fields: [tenantId], references: [id])
+  phoneNumberId    String    @unique
+  wabaId           String?
+  displayName      String?
+  displayPhone     String?
+  active           Boolean   @default(true)
   // Credenciais da Meta ficam CIFRADAS aqui ({ accessToken, appSecret }, services/crypto.ts), nunca em
   // texto puro nem de volta para a tela. As "dicas" guardam só os 4 últimos caracteres para exibição.
-  credentials   Json?
-  accessTokenHint String?
-  appSecretHint   String?
+  credentials      Json?
+  accessTokenHint  String?
+  appSecretHint    String?
   // Token que o sistema gera e a Meta devolve no desafio (GET) ao cadastrar o webhook.
-  verifyToken   String?  @unique
-  lastCheckAt   DateTime?
-  lastCheckOk   Boolean?
+  verifyToken      String?   @unique
+  lastCheckAt      DateTime?
+  lastCheckOk      Boolean?
   lastCheckMessage String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   conversations Conversation[]
 
@@ -613,23 +649,23 @@ model WhatsAppAccount {
 /// Uma conversa por (número nosso, número do cliente). `clientId` é nulo quando o telefone não
 /// bate com nenhum cliente da base. A janela de 24 horas conta a partir de `lastInboundAt`.
 model Conversation {
-  id            String             @id @default(uuid())
-  tenantId      String
-  tenant        Tenant             @relation(fields: [tenantId], references: [id])
-  accountId     String
-  account       WhatsAppAccount    @relation(fields: [accountId], references: [id])
-  clientId      String?
-  client        Client?            @relation(fields: [clientId], references: [id])
-  waId          String             // telefone do cliente como a Meta informa (só dígitos, com DDI)
-  contactName   String?            // nome do perfil do WhatsApp
-  status        ConversationStatus @default(ABERTA)
-  lastMessageAt DateTime
-  lastInboundAt DateTime?
-  lastPreview   String?
-  unreadCount   Int                @default(0)
+  id             String             @id @default(uuid())
+  tenantId       String
+  tenant         Tenant             @relation(fields: [tenantId], references: [id])
+  accountId      String
+  account        WhatsAppAccount    @relation(fields: [accountId], references: [id])
+  clientId       String?
+  client         Client?            @relation(fields: [clientId], references: [id])
+  waId           String // telefone do cliente como a Meta informa (só dígitos, com DDI)
+  contactName    String? // nome do perfil do WhatsApp
+  status         ConversationStatus @default(ABERTA)
+  lastMessageAt  DateTime
+  lastInboundAt  DateTime?
+  lastPreview    String?
+  unreadCount    Int                @default(0)
   assignedUserId String?
-  createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
 
   messages WaMessage[]
 
@@ -645,16 +681,16 @@ model WaMessage {
   conversationId String
   conversation   Conversation @relation(fields: [conversationId], references: [id])
   direction      WaDirection
-  wamid          String?      // id da mensagem na Meta (idempotência do webhook)
-  type           String       // text | image | audio | video | document | sticker | location | ...
-  body           String?      // texto, legenda ou descrição
-  mediaId        String?      // id da mídia na Meta (o download é a Fase 2)
+  wamid          String? // id da mensagem na Meta (idempotência do webhook)
+  type           String // text | image | audio | video | document | sticker | location | ...
+  body           String? // texto, legenda ou descrição
+  mediaId        String? // id da mídia na Meta (o download é a Fase 2)
   mediaMime      String?
   mediaFilename  String?
-  status         String?      // só saída: sent | delivered | read | failed
-  sentByUserId   String?      // quem respondeu (só saída)
+  status         String? // só saída: sent | delivered | read | failed
+  sentByUserId   String? // quem respondeu (só saída)
   errorText      String?
-  timestamp      DateTime     // horário da mensagem segundo a Meta
+  timestamp      DateTime // horário da mensagem segundo a Meta
   createdAt      DateTime     @default(now())
 
   @@unique([tenantId, wamid])

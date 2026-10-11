@@ -29,8 +29,8 @@ const STATUS_LABEL: Record<Template["status"], string> = {
   APROVADO: "Aprovado",
   REJEITADO: "Não aprovado",
 };
-const VARIAVEIS = ["nome", "cidade", "percentual", "saldo", "limite"];
-const SAMPLE: Record<string, string> = { nome: "Maria", cidade: "Natal", percentual: "45", saldo: "R$ 850,00", limite: "R$ 1.500,00" };
+const VARIAVEIS = ["nome", "cidade", "percentual", "saldo", "limite", "limite_disponivel"];
+const SAMPLE: Record<string, string> = { nome: "Maria", cidade: "Natal", percentual: "45", saldo: "R$ 850,00", limite: "R$ 1.500,00", limite_disponivel: "R$ 850,00" };
 const BODY_MAX = 1024;
 
 function textoDoErro(e: any): string {
