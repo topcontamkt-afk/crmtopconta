@@ -1,4 +1,5 @@
 import { AppPrismaClient } from "../config/db";
+import { credentialsOf } from "./whatsappAccount";
 import { baseMime } from "./whatsappMedia";
 import {
   assertJanelaAberta,
@@ -36,14 +37,14 @@ export async function sendReply(
   input: ReplyInput,
   deps: ReplyDeps = {}
 ) {
-  const token = deps.token ?? process.env.WHATSAPP_ACCESS_TOKEN;
   const now = deps.now ?? new Date();
 
   const conversation = await prisma.conversation.findFirst({
     where: { id: conversationId, tenantId },
-    include: { account: { select: { phoneNumberId: true, active: true } } },
+    include: { account: { select: { phoneNumberId: true, active: true, credentials: true } } },
   });
   if (!conversation) throw new SendError("NAO_ENCONTRADA", "Conversa não encontrada.");
+  const token = deps.token ?? credentialsOf(conversation.account).accessToken;
   assertJanelaAberta(conversation.lastInboundAt, now);
   if (!conversation.account.active) throw new SendError("META", "O número do WhatsApp desta conversa está desativado.");
 
@@ -140,14 +141,14 @@ export async function sendTemplateReply(
   templateId: string,
   deps: ReplyDeps = {}
 ) {
-  const token = deps.token ?? process.env.WHATSAPP_ACCESS_TOKEN;
   const now = deps.now ?? new Date();
   const conversation = await prisma.conversation.findFirst({
     where: { id: conversationId, tenantId },
-    include: { account: { select: { phoneNumberId: true, active: true } }, client: true },
+    include: { account: { select: { phoneNumberId: true, active: true, credentials: true } }, client: true },
   });
   if (!conversation) throw new SendError("NAO_ENCONTRADA", "Conversa não encontrada.");
   if (!conversation.account.active) throw new SendError("META", "O número do WhatsApp desta conversa está desativado.");
+  const token = deps.token ?? credentialsOf(conversation.account).accessToken;
   if (conversation.client && (!conversation.client.autorizacaoComunicacao || conversation.client.optOutAt)) {
     throw new SendError("OPT_OUT", "Este cliente pediu para não receber mensagens: o envio de template está bloqueado.");
   }

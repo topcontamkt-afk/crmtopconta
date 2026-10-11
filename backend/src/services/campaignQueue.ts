@@ -5,6 +5,7 @@ import { MockWhatsAppAdapter, WhatsAppCloudAdapter } from "./channels/whatsapp";
 import { buildSegmentWhere, ENVIAVEL_WHERE, SegmentFilters, SegmentGroup } from "./segments";
 import { buildBodyParams, renderMetaPreview } from "./whatsappTemplates";
 import { recordOutboundTemplateMessage } from "./whatsappInbox";
+import { credentialsOf } from "./whatsappAccount";
 import { decryptSecret, isEncryptedPayload } from "./crypto";
 
 /**
@@ -69,6 +70,13 @@ async function resolveProviders(
   }
 
   if (resolved.length > 0) return resolved;
+
+  // WhatsApp configurado pela tela de Integrações (WhatsAppAccount, credenciais cifradas)
+  if (channel === "WHATSAPP") {
+    const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+    const token = credentialsOf(account).accessToken;
+    if (account && token && account.credentials) return [{ name: "whatsapp_cloud_api", adapter: new WhatsAppCloudAdapter(account.phoneNumberId, token) }];
+  }
 
   // Fallback env-based (Fase 1)
   if (channel === "WHATSAPP") {

@@ -4,6 +4,7 @@ import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { renderTemplate } from "../services/campaignQueue";
+import { credentialsOf } from "../services/whatsappAccount";
 import { SendError } from "../services/whatsappSend";
 import { syncTemplatesFromMeta } from "../services/whatsappTemplateSync";
 import {
@@ -25,13 +26,13 @@ router.use(requireAuth);
 /** Conta WhatsApp do tenant + token: o que é preciso para falar com a Meta sobre templates. */
 async function metaContext(tenantId: string) {
   const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
-  const token = process.env.WHATSAPP_ACCESS_TOKEN;
+  const token = credentialsOf(account).accessToken;
   return {
     account,
     token,
     wabaId: account?.wabaId ?? null,
     configurado: !!(account?.wabaId && token),
-    faltando: [!account && "número conectado na Inbox", account && !account.wabaId && "WABA ID", !token && "WHATSAPP_ACCESS_TOKEN"].filter(Boolean) as string[],
+    faltando: [!account && "WhatsApp conectado em Integrações", account && !account.wabaId && "WABA ID", !token && "Access Token"].filter(Boolean) as string[],
   };
 }
 

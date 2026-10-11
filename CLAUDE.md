@@ -235,6 +235,17 @@ A/B não existe com template da Meta; o texto enviado aparece na conversa da inb
 /api/inbox/conversations/:id/template(s)` envia template fora da janela de 24h (cliente em opt-out é bloqueado); o toque num botão "SAIR" também
 descadastra. SQL: `backend/prisma/sql/2026-10-whatsapp-templates.sql`.
 
+### Conexão com a Meta pela tela de Integrações
+
+As credenciais do WhatsApp NÃO ficam mais em variáveis da Vercel: a tela **Integrações → WhatsApp (Meta Cloud API)** (`WhatsAppConfigModal`) grava
+em `WhatsAppAccount` o Phone Number ID, o WABA ID e, **cifrados** (`services/whatsappAccount.ts` + `crypto.ts`, `CREDENTIALS_ENCRYPTION_KEY`), o
+Access Token e o App Secret (a tela só recebe os 4 últimos caracteres). O token de verificação do webhook é gerado pelo sistema (`verifyToken`, único)
+e mostrado para colar na Meta. Rotas (`routes/integrations.ts`, ADMIN para escrever): `GET/PUT/DELETE /api/integrations/whatsapp`, `POST .../test`
+(valida número e WABA na Graph API e guarda o resultado) e `POST .../subscribe` (`/{WABA}/subscribed_apps`). O webhook acha a conta pelo
+`phone_number_id`/WABA ID do corpo e valida `X-Hub-Signature-256` com o App Secret DAQUELA conta (sem segredo, mensagens/status/templates são
+ignorados); o desafio GET aceita o `verifyToken` de qualquer conta. Todos os consumidores (campanha, inbox, mídia, templates) leem o token por
+`credentialsOf(account)`; as variáveis `WHATSAPP_*` só valem como reserva. SQL: `backend/prisma/sql/2026-10-whatsapp-credentials.sql`.
+
 ### Comércio credenciado (compras por categoria)
 
 A aba "Todas as Compras" da planilha (transações do cartão) entra por `POST /api/purchases/import`

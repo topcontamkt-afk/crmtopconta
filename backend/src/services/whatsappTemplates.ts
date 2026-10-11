@@ -172,7 +172,7 @@ function metaError(j: any, status: number): SendError {
 }
 
 async function call(url: string, token: string | undefined, init: any, fetchImpl: FetchLike): Promise<any> {
-  if (!token) throw new SendError("SEM_TOKEN", "WHATSAPP_ACCESS_TOKEN não configurado.");
+  if (!token) throw new SendError("SEM_TOKEN", "Token de acesso da Meta não configurado (Integrações > WhatsApp).");
   let r: any;
   try {
     r = await fetchImpl(url, { ...init, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, signal: timeout() });

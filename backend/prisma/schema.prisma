@@ -592,6 +592,16 @@ model WhatsAppAccount {
   displayName   String?
   displayPhone  String?
   active        Boolean  @default(true)
+  // Credenciais da Meta ficam CIFRADAS aqui ({ accessToken, appSecret }, services/crypto.ts), nunca em
+  // texto puro nem de volta para a tela. As "dicas" guardam só os 4 últimos caracteres para exibição.
+  credentials   Json?
+  accessTokenHint String?
+  appSecretHint   String?
+  // Token que o sistema gera e a Meta devolve no desafio (GET) ao cadastrar o webhook.
+  verifyToken   String?  @unique
+  lastCheckAt   DateTime?
+  lastCheckOk   Boolean?
+  lastCheckMessage String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 

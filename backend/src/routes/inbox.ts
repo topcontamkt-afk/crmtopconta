@@ -1,14 +1,13 @@
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
-import { withCrossTenantAccess } from "../config/tenantGuard";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { logAudit } from "../middleware/audit";
 import { maskPhone } from "../services/masking";
 import { classificarPerfil } from "../services/rendaPerfil";
 import { getOrCacheMessageMedia, isInlineSafeMime, MediaError, MEDIA_MAX_BYTES } from "../services/whatsappMedia";
 import { isSendableTemplate, previewTemplateFor, sendReply, sendTemplateReply } from "../services/whatsappReply";
 import { SendError, OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
+import { accessTokenFor, credentialsOf } from "../services/whatsappAccount";
 import { janelaAte } from "../services/whatsappPayload";
 
 /**
@@ -18,54 +17,15 @@ import { janelaAte } from "../services/whatsappPayload";
 const router = Router();
 router.use(requireAuth);
 
-const present = (v: string | undefined | null) => !!v && v.trim().length > 0;
-
-/** GET /api/inbox/status — a conexão com a Meta está pronta? (só indicadores, nunca os segredos) */
+/** GET /api/inbox/status — o WhatsApp está conectado? (a configuração fica em Integrações) */
 router.get("/status", async (req, res) => {
   const { tenantId } = req.user!;
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId }, orderBy: { createdAt: "asc" } });
-  const base = process.env.PUBLIC_BACKEND_URL || "https://crmtopconta-backend.vercel.app";
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+  const cred = credentialsOf(account && account.credentials ? account : null);
   res.json({
-    account: account
-      ? { id: account.id, phoneNumberId: account.phoneNumberId, wabaId: account.wabaId, displayName: account.displayName, displayPhone: account.displayPhone, active: account.active }
-      : null,
-    webhookUrl: `${base}/api/integrations/webhooks/whatsapp`,
-    config: {
-      appSecret: present(process.env.WHATSAPP_APP_SECRET),
-      verifyToken: present(process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN),
-      accessToken: present(process.env.WHATSAPP_ACCESS_TOKEN),
-    },
+    account: account ? { id: account.id, phoneNumberId: account.phoneNumberId, displayName: account.displayName, displayPhone: account.displayPhone } : null,
+    config: { appSecret: !!cred.appSecret, accessToken: !!cred.accessToken },
   });
-});
-
-const accountSchema = z.object({
-  phoneNumberId: z.string().regex(/^\d{5,30}$/, "Phone Number ID são só dígitos"),
-  wabaId: z.string().regex(/^\d{5,30}$/).optional().or(z.literal("").transform(() => undefined)),
-  displayName: z.string().max(120).optional(),
-  displayPhone: z.string().max(40).optional(),
-});
-
-/** PUT /api/inbox/account — liga um número da Meta (Phone Number ID) a este tenant. */
-router.put("/account", requireRole("ADMIN"), async (req, res) => {
-  const parsed = accountSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { tenantId, id: userId } = req.user!;
-  const { phoneNumberId, wabaId, displayName, displayPhone } = parsed.data;
-
-  // Cross-tenant de propósito: phoneNumberId é único no banco inteiro (o webhook da Meta só
-  // conhece esse id), então é preciso saber se OUTRO tenant já o registrou.
-  const existing = await withCrossTenantAccess(() => prisma.whatsAppAccount.findFirst({ where: { phoneNumberId } }));
-  if (existing && existing.tenantId !== tenantId) {
-    return res.status(409).json({ error: "Este número já está conectado a outra conta." });
-  }
-
-  const data = { wabaId: wabaId ?? null, displayName: displayName ?? null, displayPhone: displayPhone ?? null, active: true };
-  const account = existing
-    ? await prisma.whatsAppAccount.update({ where: { id: existing.id }, data })
-    : await prisma.whatsAppAccount.create({ data: { tenantId, phoneNumberId, ...data } });
-
-  await logAudit({ tenantId, userId, action: "CONFIGURE_WHATSAPP_ACCOUNT", target: "WhatsAppAccount", targetId: account.id, details: { phoneNumberId } });
-  res.json({ id: account.id, phoneNumberId: account.phoneNumberId });
 });
 
 const listQuery = z.object({
@@ -292,7 +252,8 @@ router.get("/media/:messageId", async (req, res) => {
   if (!msg || !msg.mediaId) return res.status(404).json({ error: "Mídia não encontrada" });
 
   try {
-    const media = await getOrCacheMessageMedia(prisma, tenantId, msg);
+    const token = await accessTokenFor(prisma, tenantId);
+    const media = await getOrCacheMessageMedia(prisma, tenantId, msg, token);
     const inline = isInlineSafeMime(media.mime);
     const nome = (msg.mediaFilename || `arquivo-${msg.id.slice(0, 8)}`).replace(/[^\w.\- ]+/g, "_");
     res.setHeader("Content-Type", inline ? media.mime : "application/octet-stream");
@@ -307,7 +268,7 @@ router.get("/media/:messageId", async (req, res) => {
       const status = e.code === "SEM_TOKEN" ? 503 : e.code === "MUITO_GRANDE" ? 413 : 502;
       const texto =
         e.code === "SEM_TOKEN"
-          ? "Configure WHATSAPP_ACCESS_TOKEN na Vercel para baixar mídias."
+          ? "Configure o Access Token em Integrações > WhatsApp para baixar mídias."
           : e.code === "MUITO_GRANDE"
             ? `Arquivo maior que ${MEDIA_MAX_BYTES / 1048576} MB: não dá para exibir aqui.`
             : "Mídia indisponível (pode ter expirado na Meta).";

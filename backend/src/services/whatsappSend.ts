@@ -93,13 +93,13 @@ async function post(url: string, token: string, body: unknown, fetchImpl: FetchL
 }
 
 export async function sendText(phoneNumberId: string, token: string | undefined, to: string, text: string, fetchImpl: FetchLike = fetch as any): Promise<string> {
-  if (!token) throw new SendError("SEM_TOKEN", "WHATSAPP_ACCESS_TOKEN não configurado.");
+  if (!token) throw new SendError("SEM_TOKEN", "Token de acesso da Meta não configurado (Integrações > WhatsApp).");
   return post(`${base(phoneNumberId)}/messages`, token, { messaging_product: "whatsapp", recipient_type: "individual", to, type: "text", text: { body: text, preview_url: false } }, fetchImpl);
 }
 
 /** Sobe o arquivo para a Meta e devolve o `media_id`. */
 export async function uploadMedia(phoneNumberId: string, token: string | undefined, data: Buffer, mime: string, filename: string, fetchImpl: FetchLike = fetch as any): Promise<string> {
-  if (!token) throw new SendError("SEM_TOKEN", "WHATSAPP_ACCESS_TOKEN não configurado.");
+  if (!token) throw new SendError("SEM_TOKEN", "Token de acesso da Meta não configurado (Integrações > WhatsApp).");
   const form = new FormData();
   form.append("messaging_product", "whatsapp");
   form.append("type", baseMime(mime));
@@ -125,7 +125,7 @@ export async function sendMedia(
   opts: { caption?: string; filename?: string },
   fetchImpl: FetchLike = fetch as any
 ): Promise<string> {
-  if (!token) throw new SendError("SEM_TOKEN", "WHATSAPP_ACCESS_TOKEN não configurado.");
+  if (!token) throw new SendError("SEM_TOKEN", "Token de acesso da Meta não configurado (Integrações > WhatsApp).");
   const payload: Record<string, unknown> = { id: mediaId };
   // Legenda vale para imagem, vídeo e documento; áudio não aceita legenda.
   if (opts.caption && tipo !== "audio") payload.caption = opts.caption;

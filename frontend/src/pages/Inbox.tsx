@@ -1,4 +1,5 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { api, getToken } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 
@@ -302,80 +303,9 @@ function tempoRestante(iso: string | null): string {
   return h > 0 ? `${h}h${String(m).padStart(2, "0")}` : `${m} min`;
 }
 
-/** Conexão com a Meta: guia o ADMIN a ligar o número e mostra o que falta configurar. */
-function Conectar({ status, onSaved, isAdmin }: { status: Status; onSaved: () => void; isAdmin: boolean }) {
-  const [phoneNumberId, setPhoneNumberId] = useState("");
-  const [wabaId, setWabaId] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [erro, setErro] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  async function salvar(e: FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    setErro(null);
-    try {
-      await api("/inbox/account", { method: "PUT", body: { phoneNumberId: phoneNumberId.trim(), wabaId: wabaId.trim(), displayName: displayName.trim() || undefined } });
-      onSaved();
-    } catch (err: any) {
-      setErro(err.message ?? "Não foi possível salvar.");
-    } finally {
-      setBusy(false);
-    }
-  }
-  const ok = (v: boolean) => (v ? "✅" : "⬜");
-
-  return (
-    <div className="card" style={{ maxWidth: 760 }}>
-      <h3>Conectar o WhatsApp (Meta Cloud API)</h3>
-      <p className="seg-hint">
-        Quando um cliente responde no WhatsApp, a Meta avisa este sistema pelo <strong>webhook</strong> e a conversa aparece aqui. Siga o roteiro da Fase 0 e depois informe o número abaixo.
-      </p>
-      <div className="seg-section">
-        <strong style={{ fontSize: 13 }}>Checklist do ambiente</strong>
-        <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 13, lineHeight: 1.8 }}>
-          <li>{ok(!!status.account)} Número conectado a esta conta</li>
-          <li>{ok(status.config.appSecret)} <code>WHATSAPP_APP_SECRET</code> na Vercel (obrigatório para receber mensagens)</li>
-          <li>{ok(status.config.verifyToken)} <code>WHATSAPP_WEBHOOK_VERIFY_TOKEN</code> na Vercel</li>
-          <li>{ok(status.config.accessToken)} <code>WHATSAPP_ACCESS_TOKEN</code> na Vercel (necessário para responder, Fase 3)</li>
-        </ul>
-      </div>
-      <div className="seg-section">
-        <strong style={{ fontSize: 13 }}>No painel da Meta (WhatsApp → Configuração → Webhook)</strong>
-        <p className="seg-hint" style={{ marginBottom: 6 }}>URL de retorno (copie e cole):</p>
-        <code style={{ display: "block", padding: 8, background: "var(--bg)", borderRadius: 8, wordBreak: "break-all" }}>{status.webhookUrl}</code>
-        <p className="seg-hint" style={{ marginTop: 8 }}>Token de verificação: o mesmo valor de <code>WHATSAPP_WEBHOOK_VERIFY_TOKEN</code>. Assine o campo <strong>messages</strong>.</p>
-      </div>
-      {isAdmin ? (
-        <form onSubmit={salvar}>
-          <div className="seg-row">
-            <div className="form-row">
-              <label>Phone Number ID (da Meta)</label>
-              <input required value={phoneNumberId} onChange={(e) => setPhoneNumberId(e.target.value)} placeholder="Ex: 105512345678901" />
-            </div>
-            <div className="form-row">
-              <label>WABA ID (opcional)</label>
-              <input value={wabaId} onChange={(e) => setWabaId(e.target.value)} placeholder="ID da conta do WhatsApp Business" />
-            </div>
-            <div className="form-row">
-              <label>Nome de exibição (opcional)</label>
-              <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Como o número aparece" />
-            </div>
-          </div>
-          {erro && <div className="error-text">{erro}</div>}
-          <button className="btn" disabled={busy}>{status.account ? "Atualizar número" : "Conectar número"}</button>
-        </form>
-      ) : (
-        <p className="seg-hint">Peça a um administrador para conectar o número.</p>
-      )}
-    </div>
-  );
-}
-
 export default function Inbox() {
   const { user } = useAuth();
-  const isAdmin = user?.role === "ADMIN";
-  const [status, setStatus] = useState<Status | null>(null);
+    const [status, setStatus] = useState<Status | null>(null);
   const [filtro, setFiltro] = useState<"todas" | "nao_lidas" | "janela_aberta" | "sem_cliente">("todas");
   const [busca, setBusca] = useState("");
   const [conversas, setConversas] = useState<Conversa[]>([]);
@@ -383,7 +313,6 @@ export default function Inbox() {
   const [sel, setSel] = useState<string | null>(null);
   const [thread, setThread] = useState<Thread | null>(null);
   const [erro, setErro] = useState<string | null>(null);
-  const [mostrarConexao, setMostrarConexao] = useState(false);
   const [imagemAberta, setImagemAberta] = useState<string | null>(null);
   const fim = useRef<HTMLDivElement>(null);
   const ultimoTotal = useRef(0);
@@ -440,12 +369,18 @@ export default function Inbox() {
 
   if (!status) return <div>{erro ? <div className="error-text">{erro}</div> : "Carregando…"}</div>;
 
-  if (!status.account || mostrarConexao) {
+  if (!status.account) {
     return (
       <div>
         <h2>Inbox do WhatsApp</h2>
-        <Conectar status={status} isAdmin={isAdmin} onSaved={() => { setMostrarConexao(false); carregarStatus(); }} />
-        {status.account && <button className="btn secondary" style={{ marginTop: 12 }} onClick={() => setMostrarConexao(false)}>Voltar para as conversas</button>}
+        <div className="card" style={{ maxWidth: 640 }}>
+          <h3>WhatsApp ainda não conectado</h3>
+          <p className="seg-hint">
+            Para receber e responder mensagens aqui, conecte o número da Meta em <Link to="/integrations">Integrações → WhatsApp</Link>. Lá você
+            informa o Phone Number ID, o WABA ID, o Access Token e o App Secret, e copia a URL e o token de verificação do webhook.
+          </p>
+          <Link to="/integrations" className="btn" style={{ textDecoration: "none" }}>Ir para Integrações</Link>
+        </div>
       </div>
     );
   }
@@ -456,11 +391,11 @@ export default function Inbox() {
     <div>
       <div className="pd-card-head" style={{ marginBottom: 8 }}>
         <h2 style={{ margin: 0 }}>Inbox do WhatsApp {naoLidas > 0 && <span className="inbox-badge">{naoLidas}</span>}</h2>
-        <button className="btn secondary" onClick={() => setMostrarConexao(true)}>Conexão com a Meta</button>
+        <Link to="/integrations" className="btn secondary" style={{ textDecoration: "none" }}>Conexão com a Meta</Link>
       </div>
       {!status.config.appSecret && (
         <div className="card" style={{ borderLeft: "4px solid var(--warning)", marginBottom: 10, fontSize: 13 }}>
-          <code>WHATSAPP_APP_SECRET</code> não está configurado: as mensagens dos clientes são ignoradas até você configurá-lo na Vercel.
+          O App Secret não está configurado: as mensagens dos clientes são ignoradas até você informá-lo em Integrações → WhatsApp.
         </div>
       )}
       {erro && <div className="error-text">{erro}</div>}

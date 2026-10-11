@@ -1011,3 +1011,8 @@ input, select, textarea {
 .wa-sticker { display: block; width: 120px; height: 120px; object-fit: contain; }
 .wa-lightbox { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, 0.85); display: flex; align-items: center; justify-content: center; cursor: zoom-out; padding: 24px; }
 .wa-lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; }
+
+/* ---- Modal "Configurar WhatsApp" ---- */
+.wa-modal-bg { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, 0.6); display: flex; align-items: flex-start; justify-content: center; padding: 24px 12px; overflow-y: auto; }
+.wa-modal { width: 100%; max-width: 560px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 18px 20px; }
+.wa-modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }

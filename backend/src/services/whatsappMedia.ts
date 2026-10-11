@@ -54,7 +54,7 @@ type FetchLike = (url: string, init?: any) => Promise<any>;
 
 /** Busca o arquivo na Meta (2 passos). `fetchImpl` é injetável para teste. */
 export async function fetchMetaMedia(mediaId: string, token: string | undefined, fetchImpl: FetchLike = fetch as any): Promise<FetchedMedia> {
-  if (!token) throw new MediaError("SEM_TOKEN", "WHATSAPP_ACCESS_TOKEN não configurado");
+  if (!token) throw new MediaError("SEM_TOKEN", "Token de acesso da Meta não configurado");
   const headers = { Authorization: `Bearer ${token}` };
   const signal = () => AbortSignal.timeout(FETCH_TIMEOUT_MS);
 
@@ -97,7 +97,7 @@ export async function getOrCacheMessageMedia(
   prisma: AppPrismaClient,
   tenantId: string,
   message: { id: string; mediaId: string | null },
-  token: string | undefined = process.env.WHATSAPP_ACCESS_TOKEN,
+  token: string | undefined,
   fetchImpl?: FetchLike
 ): Promise<CachedMedia> {
   const cached = await prisma.waMediaBlob.findFirst({ where: { tenantId, messageId: message.id } });

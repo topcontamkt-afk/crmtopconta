@@ -149,7 +149,7 @@ export default function Templates() {
       {meta && (
         <div className="card" style={{ marginBottom: 16, borderLeft: `4px solid ${meta.configurado ? "var(--success)" : "var(--warning)"}`, display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
           <span style={{ fontSize: 13 }}>
-            {meta.configurado ? "Conectado à Meta: os templates são enviados para aprovação de verdade." : `Meta ainda não conectada (falta: ${meta.faltando.join(", ") || "configuração"}). Sem ela, a aprovação é manual e só serve para testes.`}
+            {meta.configurado ? "Conectado à Meta: os templates são enviados para aprovação de verdade." : `Meta ainda não conectada em Integrações → WhatsApp (falta: ${meta.faltando.join(", ") || "configuração"}). Sem ela, a aprovação é manual e só serve para testes.`}
           </span>
           {meta.configurado && <button className="btn secondary" disabled={busy} onClick={sincronizar}>Sincronizar com a Meta</button>}
         </div>
