@@ -27,7 +27,8 @@ export default function CampaignList() {
   }
 
   async function dispatch(id: string) {
-    await api(`/campaigns/${id}/dispatch`, { method: "POST", body: { limit: 50 } });
+    const r = await api<{ bloqueado?: string }>(`/campaigns/${id}/dispatch`, { method: "POST", body: { limit: 50 } });
+    if (r?.bloqueado) window.alert(r.bloqueado);
     load();
   }
 

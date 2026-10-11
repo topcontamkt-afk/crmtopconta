@@ -7,6 +7,7 @@ import {
   runRetentionJob,
   runSegmentRefreshJob,
   runSheetSyncJob,
+  runSnapshotJobEntry,
 } from "../services/scheduler";
 
 /**
@@ -39,6 +40,10 @@ router.all("/dispatch", async (_req, res) => {
 
 router.all("/retention", async (_req, res) => {
   res.json(await runRetentionJob());
+});
+
+router.all("/snapshot", async (_req, res) => {
+  res.json(await runSnapshotJobEntry());
 });
 
 router.all("/bi-export", async (_req, res) => {

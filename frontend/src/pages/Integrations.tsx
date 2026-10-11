@@ -1,5 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api/client";
+import WhatsAppConfigModal, { WhatsAppConfig } from "../components/WhatsAppConfigModal";
+import { useAuth } from "../context/AuthContext";
 
 interface ServiceAccountStatus {
   configured: boolean;
@@ -30,9 +32,14 @@ export default function Integrations() {
   const [cronSchedule, setCronSchedule] = useState("0 6 * * 1,4");
   const [status, setStatus] = useState<string | null>(null);
   const [serviceAccount, setServiceAccount] = useState<ServiceAccountStatus | null>(null);
+  const { user } = useAuth();
+  const [wa, setWa] = useState<WhatsAppConfig | null>(null);
+  const [waAberto, setWaAberto] = useState(false);
+  const carregarWa = () => api<WhatsAppConfig>("/integrations/whatsapp").then(setWa).catch(() => undefined);
 
   useEffect(() => {
     api<ServiceAccountStatus>("/integrations/sheets/service-account").then(setServiceAccount);
+    carregarWa();
     // Bug: a tela nunca recarregava a conexão já salva ao abrir/atualizar a página — o "Salvar
     // conexão" funcionava (fica no banco), mas os campos voltavam ao valor padrão a cada reload,
     // dando a impressão de que o link "sumia" mesmo estando salvo.
@@ -171,12 +178,40 @@ export default function Integrations() {
         </p>
       </form>
 
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <div>
+            <h3 style={{ margin: 0 }}>WhatsApp (Meta Cloud API)</h3>
+            <p className="seg-hint" style={{ margin: "4px 0 0" }}>
+              Conexão oficial com a Meta para disparar campanhas, receber respostas na Inbox e gerenciar templates.
+            </p>
+          </div>
+          {user?.role === "ADMIN" && <button className="btn" onClick={() => setWaAberto(true)}>{wa?.account?.hasCredentials ? "Configurar WhatsApp" : "Conectar WhatsApp"}</button>}
+        </div>
+        <div style={{ marginTop: 12, fontSize: 13, display: "grid", gap: 4 }}>
+          {wa?.account?.hasCredentials && wa.account.active ? (
+            <>
+              <span><strong style={{ color: "var(--success)" }}>● Conectado</strong> · {wa.account.displayName ?? "número"} {wa.account.displayPhone ? `(${wa.account.displayPhone})` : ""}</span>
+              <span className="pd-hint">Phone Number ID {wa.account.phoneNumberId} · WABA {wa.account.wabaId ?? "—"}</span>
+              <span className="pd-hint">
+                {wa.account.lastCheckAt
+                  ? `Último teste (${new Date(wa.account.lastCheckAt).toLocaleString("pt-BR")}): ${wa.account.lastCheckOk ? "tudo certo" : "com falhas — abra a configuração e teste de novo"}`
+                  : "Ainda não testado: abra a configuração e clique em “Testar conexão”."}
+              </span>
+            </>
+          ) : (
+            <span><strong style={{ color: "var(--warning)" }}>● Não conectado</strong> {user?.role !== "ADMIN" && "— peça a um administrador para conectar."}</span>
+          )}
+        </div>
+      </div>
+      {waAberto && <WhatsAppConfigModal onClose={() => setWaAberto(false)} onChanged={carregarWa} />}
+
       <div className="card">
-        <h3>WhatsApp Cloud API / SMS</h3>
+        <h3>SMS</h3>
         <p style={{ color: "var(--text-muted)" }}>
-          As credenciais de canal (WhatsApp Cloud API e provedor de SMS) são configuradas por variáveis de
-          ambiente no MVP (ver <code>backend/.env.example</code>) ou via <code>PUT /api/integrations/channels</code>{" "}
-          (perfil Admin). Nenhuma credencial é exibida na interface.
+          As credenciais do provedor de SMS são configuradas por variáveis de ambiente (ver{" "}
+          <code>backend/.env.example</code>) ou via <code>PUT /api/integrations/channels</code> (perfil Admin). Nenhuma
+          credencial é exibida na interface.
         </p>
       </div>
     </div>

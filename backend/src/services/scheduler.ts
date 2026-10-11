@@ -8,6 +8,7 @@ import { evaluateAutomationRules } from "./automationEngine";
 import { processQueueBatch } from "./campaignQueue";
 import { runRetentionSweep } from "./retention";
 import { exportAllTenantsSummary } from "./biExport";
+import { runSnapshotJob } from "./snapshots";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 
 /**
@@ -129,6 +130,11 @@ export async function runBiExportJob() {
   return exportAllTenantsSummary(prisma);
 }
 
+/** Foto diária dos KPIs (histórico do dashboard) — roda depois da sincronização da planilha. */
+export async function runSnapshotJobEntry() {
+  return runSnapshotJob(prisma);
+}
+
 function cronMatchesNow(expr: string, date: Date): boolean {
   // Comparação simples campo a campo (minuto hora dia-mês mês dia-semana) — sem libs extras.
   const [min, hour, dom, month, dow] = expr.split(" ");
@@ -153,5 +159,6 @@ export function startScheduler() {
   cron.schedule("*/5 * * * *", () => runAutomationJob().catch((e) => console.error("[scheduler] automations:", e)));
   cron.schedule("* * * * *", () => runCampaignDispatchJob().catch((e) => console.error("[scheduler] dispatch:", e)));
   cron.schedule("0 3 * * *", () => runRetentionJob().catch((e) => console.error("[scheduler] retention:", e)));
+  cron.schedule("30 6 * * *", () => runSnapshotJobEntry().catch((e) => console.error("[scheduler] snapshot:", e)));
   cron.schedule("0 4 * * *", () => runBiExportJob().catch((e) => console.error("[scheduler] bi-export:", e)));
 }

@@ -21,12 +21,14 @@ import segmentRoutes from "./routes/segments";
 import campaignRoutes from "./routes/campaigns";
 import automationRoutes from "./routes/automations";
 import integrationRoutes from "./routes/integrations";
+import inboxRoutes from "./routes/inbox";
 import auditRoutes from "./routes/audit";
 import userRoutes from "./routes/users";
 import templateRoutes from "./routes/templates";
 import notificationRoutes from "./routes/notifications";
 import tenantRoutes from "./routes/tenant";
 import cronRoutes from "./routes/cron";
+import purchaseRoutes from "./routes/purchases";
 
 /**
  * Criação do Express app, sem app.listen() nem inicialização do scheduler — para poder ser
@@ -76,11 +78,13 @@ app.use("/api/segments", segmentRoutes);
 app.use("/api/campaigns", campaignRoutes);
 app.use("/api/automations", automationRoutes);
 app.use("/api/integrations", integrationRoutes);
+app.use("/api/inbox", inboxRoutes);
 app.use("/api/audit-logs", auditRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/templates", templateRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/tenant", tenantRoutes);
+app.use("/api/purchases", purchaseRoutes);
 // Equivalente HTTP do scheduler, para disparo via Vercel Cron Jobs em produção serverless
 // (ver src/services/scheduler.ts e routes/cron.ts).
 app.use("/api/cron", cronRoutes);

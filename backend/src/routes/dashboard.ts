@@ -1,7 +1,18 @@
+import { USO_TIPO_SQL } from "../services/usageRefresh";
+import { avaliarFrescor, mensagemFrescor } from "../services/dataFreshness";
+import { ETAPA_CASE_SQL } from "../services/etapaUso";
+import { ENVIAVEL_WHERE } from "../services/segments";
+import { limiteRange, isPerfilRenda, LIMITE_MAXIMO, LIMITE_TETO, PERFIL_LABELS, PERFIS_RENDA, estimarSalario } from "../services/rendaPerfil";
 import { Router } from "express";
-import { prisma } from "../config/db";
+import { z } from "zod";
+import { prisma, tenantRaw } from "../config/db";
 import { requireAuth } from "../middleware/auth";
 import { FAIXA_LABELS } from "../services/usage";
+import { addDays, clientWhere, computeKpis, DashboardFilters, rawFilterSql, todayBrt } from "../services/dashboardMetrics";
+import { loadRealHealth } from "../services/healthData";
+import { computeHealth } from "../services/health";
+import { ensureTodaySnapshot } from "../services/snapshots";
+import { computeOpportunities, OPPORTUNITY_KEYS, OpportunityKey, opportunityAudience, suggestedMessage } from "../services/opportunities";
 
 const router = Router();
 router.use(requireAuth);
@@ -21,7 +32,7 @@ interface RankingRow {
  * então interpolar o nome da coluna no texto do SQL é seguro.
  */
 async function rankingPorCampo(tenantId: string, column: "cidade" | "empresaConveniada"): Promise<RankingRow[]> {
-  const rows = await prisma.$queryRawUnsafe<
+  const rows = await tenantRaw.query<
     Array<{ chave: string; total: bigint; ativos: bigint; valor_utilizado: number | null }>
   >(
     `SELECT "${column}" AS chave,
@@ -71,7 +82,7 @@ router.get("/summary", async (req, res) => {
       _sum: { limiteTotal: true, valorUtilizado: true, saldoDisponivel: true },
       _avg: { valorUtilizado: true },
     }),
-    prisma.client.count({ where: { tenantId, faixaUso: "NAO_UTILIZOU" } }),
+    prisma.client.count({ where: { tenantId, faixaUso: "SEM_USO" } }),
     prisma.importJob.findFirst({ where: { tenantId }, orderBy: { startedAt: "desc" } }),
     rankingPorCampo(tenantId, "cidade"),
     // Ranking de "secretarias" (empresa conveniada / convênio de folha) que mais usam o app —
@@ -85,7 +96,7 @@ router.get("/summary", async (req, res) => {
     count: f._count,
   }));
 
-  const limiteCompleto = porFaixaRaw.find((f) => f.faixaUso === "LIMITE_COMPLETO")?._count || 0;
+  const limiteCompleto = porFaixaRaw.find((f) => f.faixaUso === "USO_100")?._count || 0;
 
   res.json({
     totalClientes,
@@ -121,7 +132,7 @@ router.get("/uso-mensal", async (req, res) => {
 
   const [totalClientes, porMesRaw] = await Promise.all([
     prisma.client.count({ where: { tenantId } }),
-    prisma.$queryRawUnsafe<Array<{ mes: Date; usados: bigint }>>(
+    tenantRaw.query<Array<{ mes: Date; usados: bigint }>>(
       `SELECT date_trunc('month', "dataUltimaUtilizacao") AS mes, COUNT(*)::bigint AS usados
        FROM "Client"
        WHERE "tenantId" = $1
@@ -166,7 +177,7 @@ router.get("/encerramentos", async (req, res) => {
 
   const [totalClientes, porMesRaw, motivosRaw] = await Promise.all([
     prisma.client.count({ where: { tenantId } }),
-    prisma.$queryRawUnsafe<Array<{ mes: Date; encerrados: bigint }>>(
+    tenantRaw.query<Array<{ mes: Date; encerrados: bigint }>>(
       `SELECT date_trunc('month', "encerradoEm") AS mes, COUNT(*)::bigint AS encerrados
        FROM "Client"
        WHERE "tenantId" = $1
@@ -224,7 +235,7 @@ router.get("/engajamento", async (req, res) => {
   const { tenantId } = req.user!;
 
   const [niveisRaw, totalAniversariantes, aniversariantesRaw] = await Promise.all([
-    prisma.$queryRawUnsafe<Array<{ nivel: string; count: bigint }>>(
+    tenantRaw.query<Array<{ nivel: string; count: bigint }>>(
       `SELECT
          CASE
            WHEN "statusConta" = 'BLOQUEADO' THEN 'bloqueado'
@@ -240,13 +251,13 @@ router.get("/engajamento", async (req, res) => {
        GROUP BY nivel`,
       tenantId
     ),
-    prisma.$queryRawUnsafe<Array<{ count: bigint }>>(
+    tenantRaw.query<Array<{ count: bigint }>>(
       `SELECT COUNT(*)::bigint AS count FROM "Client"
        WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL
          AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM CURRENT_DATE)`,
       tenantId
     ),
-    prisma.$queryRawUnsafe<
+    tenantRaw.query<
       Array<{ id: string; nome: string; telefone: string; cidade: string | null; dia: number }>
     >(
       `SELECT "id", "nome", "telefone", "cidade", EXTRACT(DAY FROM "dataNascimento")::int AS dia
@@ -294,7 +305,7 @@ router.get("/perfil", async (req, res) => {
   const { tenantId } = req.user!;
 
   const [faixaEtariaRaw, porSexoRaw, faixaRendaRaw] = await Promise.all([
-    prisma.$queryRawUnsafe<Array<{ faixa: string; count: bigint }>>(
+    tenantRaw.query<Array<{ faixa: string; count: bigint }>>(
       `SELECT
          CASE
            WHEN "dataNascimento" IS NULL THEN 'desconhecida'
@@ -312,7 +323,7 @@ router.get("/perfil", async (req, res) => {
       tenantId
     ),
     prisma.client.groupBy({ by: ["sexo"], where: { tenantId }, _count: true }),
-    prisma.$queryRawUnsafe<Array<{ faixa: string; count: bigint }>>(
+    tenantRaw.query<Array<{ faixa: string; count: bigint }>>(
       `SELECT
          CASE
            WHEN COALESCE("remuneracaoBruta", "remuneracaoLiquida") IS NULL THEN 'desconhecida'
@@ -355,7 +366,7 @@ router.get("/evolucao", async (req, res) => {
   const { tenantId } = req.user!;
   const granularity = (req.query.granularity as string) === "monthly" ? "month" : "week";
 
-  const rows: Array<{ periodo: Date; total: bigint }> = await prisma.$queryRawUnsafe(
+  const rows: Array<{ periodo: Date; total: bigint }> = await tenantRaw.query(
     `SELECT date_trunc('${granularity}', "createdAt") AS periodo, COUNT(*)::bigint AS total
      FROM "Client" WHERE "tenantId" = $1
      GROUP BY periodo ORDER BY periodo ASC LIMIT 52`,
@@ -363,6 +374,575 @@ router.get("/evolucao", async (req, res) => {
   );
 
   res.json(rows.map((r) => ({ periodo: r.periodo, total: Number(r.total) })));
+});
+
+const overviewQuerySchema = z.object({
+  days: z.enum(["7", "30", "90"]).default("30"),
+  cidade: z.string().trim().min(1).max(120).optional(),
+  empresaConveniada: z.string().trim().min(1).max(160).optional(),
+});
+
+type Insight = { tipo: "alerta" | "oportunidade" | "positivo" | "info"; texto: string };
+
+const pct1 = (n: number) => `${n.toFixed(1).replace(".", ",")}%`;
+const brl = (n: number) => n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+const isoDay = (d: Date) => d.toISOString().slice(0, 10);
+
+/** Variação absoluta e percentual contra a linha de base (null quando não há base real). */
+function delta(current: number, base: number | null | undefined) {
+  if (base === null || base === undefined) return null;
+  const abs = current - base;
+  return { abs, pct: base !== 0 ? (abs / base) * 100 : null };
+}
+
+/**
+ * GET /api/dashboard/overview — painel premium: KPIs com variação contra o período anterior,
+ * séries históricas (snapshots diários), nota de saúde, funil, oportunidades, resultado de
+ * campanhas, cobertura de dados e insights. Tudo calculado de dados reais: o que ainda não tem
+ * histórico/dado volta vazio ou null (a tela mostra estado vazio), nunca um valor inventado.
+ *
+ * Filtros (cidade, empresaConveniada) recortam os números "de agora"; o histórico (snapshots)
+ * é da base inteira, então com filtro ativo as séries e variações ficam indisponíveis.
+ */
+router.get("/overview", async (req, res) => {
+  const parsed = overviewQuerySchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  const { tenantId } = req.user!;
+  const days = Number(parsed.data.days);
+  const filters: DashboardFilters = { cidade: parsed.data.cidade, empresaConveniada: parsed.data.empresaConveniada };
+  const hasFilters = !!(filters.cidade || filters.empresaConveniada);
+
+  // Primeira visita do dia grava a foto de hoje — o histórico começa a acumular sem depender de cron.
+  await ensureTodaySnapshot(prisma, tenantId);
+
+  const today = todayBrt();
+  const sinceDay = addDays(today, -days);
+  const sinceTs = addDays(new Date(), -days);
+  const base = clientWhere(tenantId, filters);
+  const raw = rawFilterSql(filters, 2);
+
+  const notNull = (field: "cidade" | "empresaConveniada" | "remuneracaoBruta" | "dataUltimaUtilizacao" | "encerradoEm" | "dataNascimento") =>
+    prisma.client.count({ where: { AND: [base, { [field]: { not: null } }] } });
+
+  const msgBase = { campaign: { tenantId, isSandbox: false }, queuedAt: { gte: sinceTs } };
+
+  const [
+    kpis,
+    snaps,
+    lastImport,
+    stuckImport,
+    novos,
+    rankingCidades,
+    rankingSecretarias,
+    cidadeOpts,
+    convenioOpts,
+    aniversariantes,
+    cCidade,
+    cConvenio,
+    cRenda,
+    cUltimaUso,
+    cEncerrado,
+    cNascimento,
+    campanhas,
+    enviadas,
+    entregues,
+    respondidas,
+    convertidas,
+    msgAgg,
+  ] = await Promise.all([
+    computeKpis(prisma, tenantId, filters),
+    prisma.dashboardSnapshot.findMany({ where: { tenantId, day: { gte: sinceDay } }, orderBy: { day: "asc" } }),
+    prisma.importJob.findFirst({ where: { tenantId }, orderBy: { startedAt: "desc" } }),
+    prisma.importJob.findFirst({
+      where: { tenantId, status: "EM_EXECUCAO", startedAt: { lt: addDays(new Date(), -1 / 48) } }, // > 30 min
+      orderBy: { startedAt: "desc" },
+    }),
+    prisma.client.count({ where: { AND: [base, { createdAt: { gte: sinceTs } }] } }),
+    rankingPorCampo(tenantId, "cidade"),
+    rankingPorCampo(tenantId, "empresaConveniada"),
+    prisma.client.groupBy({
+      by: ["cidade"],
+      where: { tenantId, cidade: { not: null } },
+      _count: true,
+      orderBy: { _count: { cidade: "desc" } },
+      take: 100,
+    }),
+    prisma.client.groupBy({
+      by: ["empresaConveniada"],
+      where: { tenantId, empresaConveniada: { not: null } },
+      _count: true,
+      orderBy: { _count: { empresaConveniada: "desc" } },
+      take: 100,
+    }),
+    tenantRaw.query<Array<{ count: bigint }>>(
+      `SELECT COUNT(*)::bigint AS count FROM "Client"
+       WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL
+         AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM (now() AT TIME ZONE 'America/Sao_Paulo')) ${raw.sql}`,
+      tenantId,
+      ...raw.params
+    ),
+    notNull("cidade"),
+    notNull("empresaConveniada"),
+    notNull("remuneracaoBruta"),
+    notNull("dataUltimaUtilizacao"),
+    notNull("encerradoEm"),
+    notNull("dataNascimento"),
+    prisma.campaign.count({ where: { tenantId, isSandbox: false, createdAt: { gte: sinceTs } } }),
+    prisma.messageEvent.count({ where: { ...msgBase, sentAt: { not: null } } }),
+    prisma.messageEvent.count({ where: { ...msgBase, deliveredAt: { not: null } } }),
+    prisma.messageEvent.count({ where: { ...msgBase, respondedAt: { not: null } } }),
+    prisma.messageEvent.count({ where: { ...msgBase, convertedAt: { not: null } } }),
+    prisma.messageEvent.aggregate({ where: msgBase, _sum: { cost: true, convertedValue: true } }),
+  ]);
+
+  const total = kpis.totalClientes;
+  const health = computeHealth({
+    total,
+    ativos: kpis.ativos,
+    semUso: kpis.semUso,
+    indefinidos: kpis.faixas["INDEFINIDO"] ?? 0,
+    bloqueados: kpis.bloqueados,
+    limiteTotal: kpis.limiteTotal,
+    valorUtilizado: kpis.valorUtilizado,
+  });
+
+  // Nota por uso real (extrato em dia); sem extrato confiável cai na nota estimada e avisa.
+  const realLoad = await loadRealHealth(prisma, tenantId, filters, kpis.bloqueados, total);
+  const usaReal = !!realLoad.real;
+
+  // --- Histórico (snapshots) ---------------------------------------------------------------
+  const series = snaps.map((s) => {
+    const limite = Number(s.limiteTotal);
+    const usado = Number(s.valorUtilizado);
+    const h = computeHealth({
+      total: s.totalClientes,
+      ativos: s.ativos,
+      semUso: s.semUso,
+      indefinidos: (s.faixas as Record<string, number> | null)?.["INDEFINIDO"] ?? 0,
+      bloqueados: s.bloqueados,
+      limiteTotal: limite,
+      valorUtilizado: usado,
+    });
+    return {
+      day: isoDay(s.day),
+      totalClientes: s.totalClientes,
+      ativos: s.ativos,
+      inativos: s.inativos,
+      semUso: s.semUso,
+      limiteTotal: limite,
+      valorUtilizado: usado,
+      saldoDisponivel: Number(s.saldoDisponivel),
+      usoLimitePct: limite > 0 ? Number(((usado / limite) * 100).toFixed(2)) : 0,
+      ativosPct: s.totalClientes > 0 ? Number(((s.ativos / s.totalClientes) * 100).toFixed(2)) : 0,
+      usaramNoDia: s.usaramNoDia,
+      encerradosNoDia: s.encerradosNoDia,
+      // Nota real só existe nos dias gravados com extrato em dia; misturar com a estimada enganaria a tendência.
+      score: usaReal ? s.healthScore ?? null : h?.score ?? null,
+    };
+  });
+
+  // Linha de base = foto mais antiga da janela, desde que seja anterior a hoje. Com histórico
+  // mais curto que o período pedido, `baseline.dias` mostra o intervalo realmente comparado.
+  const baselineSnap = !hasFilters && snaps.length > 0 && snaps[0].day < today ? snaps[0] : null;
+  const baseline = baselineSnap
+    ? {
+        day: isoDay(baselineSnap.day),
+        dias: Math.round((today.getTime() - baselineSnap.day.getTime()) / 86_400_000),
+        pedidoDias: days,
+      }
+    : null;
+  const bl = baselineSnap
+    ? {
+        totalClientes: baselineSnap.totalClientes,
+        ativos: baselineSnap.ativos,
+        inativos: baselineSnap.inativos,
+        semUso: baselineSnap.semUso,
+        limiteTotal: Number(baselineSnap.limiteTotal),
+        valorUtilizado: Number(baselineSnap.valorUtilizado),
+        saldoDisponivel: Number(baselineSnap.saldoDisponivel),
+      }
+    : null;
+  const baselineHealth = baselineSnap
+    ? computeHealth({
+        total: baselineSnap.totalClientes,
+        ativos: baselineSnap.ativos,
+        semUso: baselineSnap.semUso,
+        indefinidos: (baselineSnap.faixas as Record<string, number> | null)?.["INDEFINIDO"] ?? 0,
+        bloqueados: baselineSnap.bloqueados,
+        limiteTotal: Number(baselineSnap.limiteTotal),
+        valorUtilizado: Number(baselineSnap.valorUtilizado),
+      })
+    : null;
+
+  const deltas = {
+    limiteTotal: delta(kpis.limiteTotal, bl?.limiteTotal),
+    valorUtilizado: delta(kpis.valorUtilizado, bl?.valorUtilizado),
+    saldoDisponivel: delta(kpis.saldoDisponivel, bl?.saldoDisponivel),
+    ativos: delta(kpis.ativos, bl?.ativos),
+    totalClientes: delta(total, bl?.totalClientes),
+    inativos: delta(kpis.inativos, bl?.inativos),
+    semUso: delta(kpis.semUso, bl?.semUso),
+    score: usaReal
+      ? realLoad.real && baselineSnap?.healthScore != null ? delta(realLoad.real.score, baselineSnap.healthScore) : null
+      : health && baselineHealth ? delta(health.score, baselineHealth.score) : null,
+  };
+
+  // --- Funil e oportunidades ---------------------------------------------------------------
+  const jaUtilizaram = Math.max(0, total - kpis.semUso - (kpis.faixas["INDEFINIDO"] ?? 0));
+  const funil = [
+    { key: "base", label: "Base total", count: total },
+    { key: "utilizaram", label: "Já utilizaram o limite", count: jaUtilizaram },
+    { key: "ativos", label: "Ativos hoje", count: kpis.ativos },
+    { key: "quase", label: "Com 71 a 99% do limite usado", count: kpis.quaseCompleto },
+  ];
+  const aniversariantesCount = Number(aniversariantes[0]?.count ?? 0);
+  const oportunidades = {
+    inativos: kpis.inativos,
+    semUso: kpis.semUso,
+    quaseCompleto: kpis.quaseCompleto,
+    aniversariantes: aniversariantesCount,
+  };
+
+  // --- Campanhas ---------------------------------------------------------------------------
+  const rate = (n: number, d: number) => (d > 0 ? Number(((n / d) * 100).toFixed(1)) : null);
+  const resultadoCampanhas = {
+    temDados: enviadas > 0 || campanhas > 0,
+    campanhas,
+    enviadas,
+    entregues,
+    respondidas,
+    convertidas,
+    taxaEntrega: rate(entregues, enviadas),
+    taxaResposta: rate(respondidas, entregues || enviadas),
+    taxaConversao: rate(convertidas, enviadas),
+    valorConvertido: Number(msgAgg._sum.convertedValue ?? 0),
+    custo: Number(msgAgg._sum.cost ?? 0),
+  };
+
+  // --- Cobertura dos dados (o que falta preencher na origem) ----------------------------------
+  const cob = (label: string, key: string, n: number, libera: string) => ({
+    key,
+    label,
+    preenchidos: n,
+    pct: total > 0 ? Number(((n / total) * 100).toFixed(1)) : 0,
+    libera,
+  });
+  const cobertura = [
+    cob("Cidade", "cidade", cCidade, "Ranking e filtro por cidade"),
+    cob("Convênio / secretaria", "empresaConveniada", cConvenio, "Ranking de convênios"),
+    cob("Renda", "remuneracaoBruta", cRenda, "Perfil de renda"),
+    cob("Última utilização", "dataUltimaUtilizacao", cUltimaUso, "Taxa de uso por mês"),
+    cob("Encerramento", "encerradoEm", cEncerrado, "Taxa de cancelamento"),
+    cob("Data de nascimento", "dataNascimento", cNascimento, "Faixa etária e aniversariantes"),
+  ];
+
+  // --- Insights (todos derivados dos números acima) --------------------------------------------
+  const insights: Insight[] = [];
+  if (stuckImport) {
+    insights.push({
+      tipo: "alerta",
+      texto: `Uma importação de ${stuckImport.totalRows.toLocaleString("pt-BR")} linhas (iniciada em ${stuckImport.startedAt.toLocaleDateString("pt-BR")}) nunca terminou. A base pode estar incompleta: reenvie o arquivo.`,
+    });
+  }
+  if (total === 0) {
+    insights.push({ tipo: "info", texto: "Ainda não há clientes neste recorte." });
+  } else {
+    if (kpis.inativos / total >= 0.5) {
+      insights.push({
+        tipo: "alerta",
+        texto: `${pct1((kpis.inativos / total) * 100)} da base está inativa (${kpis.inativos.toLocaleString("pt-BR")} de ${total.toLocaleString("pt-BR")}). É a maior alavanca de crescimento.`,
+      });
+    }
+    const indefinidos = kpis.faixas["INDEFINIDO"] ?? 0;
+    if (indefinidos / total >= 0.3) {
+      insights.push({
+        tipo: "alerta",
+        texto: `${indefinidos.toLocaleString("pt-BR")} clientes (${pct1((indefinidos / total) * 100)}) estão sem limite cadastrado. Os cálculos de uso ignoram esses clientes: confira a coluna de limite na planilha de origem.`,
+      });
+    }
+    if (kpis.semUso > 0) {
+      insights.push({
+        tipo: "oportunidade",
+        texto: `${kpis.semUso.toLocaleString("pt-BR")} clientes nunca usaram o cartão: público para campanha de ativação.`,
+      });
+    }
+    const reativar = Math.round(kpis.inativos * 0.1);
+    if (reativar >= 1) {
+      insights.push({
+        tipo: "oportunidade",
+        texto: `Reativar 10% dos inativos significa cerca de ${reativar.toLocaleString("pt-BR")} clientes ativos a mais.`,
+      });
+    }
+    if (kpis.limiteTotal > 0) {
+      insights.push({
+        tipo: "info",
+        texto: `${pct1((kpis.saldoDisponivel / kpis.limiteTotal) * 100)} do limite liberado (${brl(kpis.saldoDisponivel)}) ainda está disponível para uso.`,
+      });
+    }
+    if (kpis.quaseCompleto > 0) {
+      insights.push({
+        tipo: "oportunidade",
+        texto: `${kpis.quaseCompleto} cliente(s) estão com 71 a 99% do limite usado: avalie renovação ou aumento.`,
+      });
+    }
+    if (deltas.ativos && baseline && deltas.ativos.abs !== 0) {
+      const sinal = deltas.ativos.abs > 0 ? "+" : "";
+      insights.push({
+        tipo: deltas.ativos.abs > 0 ? "positivo" : "alerta",
+        texto: `Clientes ativos: ${sinal}${deltas.ativos.abs} nos últimos ${baseline.dias} dia(s).`,
+      });
+    }
+    const semCobertura = cobertura.filter((c) => c.pct < 50);
+    if (semCobertura.length > 0) {
+      insights.push({
+        tipo: "info",
+        texto: `Dados faltando na origem: ${semCobertura.map((c) => c.label.toLowerCase()).join(", ")}. Completar a planilha libera mais análises.`,
+      });
+    }
+  }
+  if (!hasFilters && snaps.length < 2) {
+    insights.push({
+      tipo: "info",
+      texto: `O histórico começou em ${(snaps[0]?.day ?? today).toISOString().slice(0, 10).split("-").reverse().join("/")}: tendências e variações aparecem a partir do segundo dia.`,
+    });
+  }
+
+  res.json({
+    periodo: { dias: days, desde: isoDay(sinceDay) },
+    filtros: {
+      aplicados: { cidade: filters.cidade ?? null, empresaConveniada: filters.empresaConveniada ?? null },
+      cidades: cidadeOpts.map((c) => ({ valor: c.cidade as string, count: c._count })),
+      convenios: convenioOpts.map((c) => ({ valor: c.empresaConveniada as string, count: c._count })),
+    },
+    kpis: { ...kpis, novosNoPeriodo: novos },
+    deltas,
+    baseline,
+    historicoDisponivel: !hasFilters && snaps.length >= 2,
+    series: hasFilters ? [] : series,
+    saude: realLoad.real
+      ? { ...realLoad.real, delta: deltas.score, modelo: "USO_REAL" as const, aviso: null }
+      : health
+        ? {
+            ...health,
+            delta: deltas.score,
+            modelo: "ESTIMADO" as const,
+            aviso:
+              realLoad.motivo === "EXTRATO_DESATUALIZADO"
+                ? "Nota estimada pelo saldo: o extrato de compras está parado. Atualize a planilha \"Todas as Compras\" para a nota por uso real."
+                : "Nota estimada pelo saldo: ainda não há extrato de compras importado. Com ele, a nota passa a medir o uso real.",
+          }
+        : null,
+    funil,
+    oportunidades,
+    rankingCidades: rankingCidades.map((r) => ({ cidade: r.chave, count: r.count, ativos: r.ativos, valorUtilizado: r.valorUtilizado })),
+    rankingSecretarias: rankingSecretarias.map((r) => ({ empresaConveniada: r.chave, count: r.count, ativos: r.ativos, valorUtilizado: r.valorUtilizado })),
+    campanhas: resultadoCampanhas,
+    cobertura,
+    insights,
+    ultimaAtualizacao: lastImport?.finishedAt || lastImport?.startedAt || null,
+  });
+});
+
+const filtersQuerySchema = z.object({
+  cidade: z.string().trim().min(1).max(120).optional(),
+  empresaConveniada: z.string().trim().min(1).max(160).optional(),
+});
+
+/** GET /api/dashboard/frescor — o extrato de compras está em dia? (aviso de dado velho) */
+router.get("/frescor", async (req, res) => {
+  const [r] = await tenantRaw.query<Array<{ ultima: Date | null }>>(
+    `SELECT MAX("occurredAt") AS ultima FROM "Purchase" WHERE "tenantId" = $1`,
+    req.user!.tenantId
+  );
+  const f = avaliarFrescor(r?.ultima ?? null);
+  res.json({ ...f, mensagem: mensagemFrescor(f) });
+});
+
+/**
+ * GET /api/dashboard/perfis-renda — PF1–PF4 estimados pelo limite (ver services/rendaPerfil.ts),
+ * com a quebra por faixa de uso. Clientes sem limite (comércio credenciado) ficam fora do perfil
+ * e voltam à parte. Aceita os mesmos filtros de cidade/convênio do painel.
+ */
+router.get("/perfis-renda", async (req, res) => {
+  const parsed = overviewQuerySchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  const { tenantId } = req.user!;
+  const raw = rawFilterSql({ cidade: parsed.data.cidade, empresaConveniada: parsed.data.empresaConveniada }, 5);
+  const rows = await tenantRaw.query<
+    Array<{ perfil: string | null; faixa: string; etapa: string; n: bigint; no_teto: bigint; sem_saldo: bigint }>
+  >(
+    `SELECT
+       CASE
+         WHEN "limiteTotal" IS NULL OR "limiteTotal" <= 0 THEN NULL
+         WHEN "limiteTotal" <= $2::numeric THEN 'PF1'
+         WHEN "limiteTotal" <= $3::numeric THEN 'PF2'
+         WHEN "limiteTotal" <= $4::numeric THEN 'PF3'
+         ELSE 'PF4'
+       END AS perfil,
+       "faixaUso"::text AS faixa,
+       ${ETAPA_CASE_SQL} AS etapa,
+       COUNT(*)::bigint AS n,
+       COUNT(*) FILTER (WHERE "limiteTotal" = ${LIMITE_TETO})::bigint AS no_teto,
+       COUNT(*) FILTER (WHERE "faixaUso" = 'USO_100')::bigint AS sem_saldo
+     FROM "Client"
+     WHERE "tenantId" = $1 ${raw.sql}
+     GROUP BY 1, 2, 3`,
+    tenantId,
+    LIMITE_MAXIMO.PF1,
+    LIMITE_MAXIMO.PF2,
+    LIMITE_MAXIMO.PF3,
+    ...raw.params
+  );
+  const perfis = PERFIS_RENDA.map((p) => {
+    const mine = rows.filter((r) => r.perfil === p);
+    const faixas: Record<string, number> = {};
+    for (const r of mine) faixas[r.faixa] = (faixas[r.faixa] ?? 0) + Number(r.n);
+    const etapas: Record<string, number> = {};
+    for (const r of mine) etapas[r.etapa] = (etapas[r.etapa] ?? 0) + Number(r.n);
+    const total = mine.reduce((a, r) => a + Number(r.n), 0);
+    const noTeto = mine.reduce((a, r) => a + Number(r.no_teto), 0);
+    return { perfil: p, label: PERFIL_LABELS[p], total, noTeto, faixas, etapas };
+  });
+  const semLimite = rows.filter((r) => r.perfil === null).reduce((a, r) => a + Number(r.n), 0);
+  const [cob] = await tenantRaw.query<Array<{ primeira: Date | null; ultima: Date | null }>>(
+    `SELECT MIN("occurredAt") AS primeira, MAX("occurredAt") AS ultima FROM "Purchase" WHERE "tenantId" = $1`,
+    tenantId
+  );
+  res.json({ perfis, semLimite, fatorSalario: estimarSalario(1), extrato: { primeira: cob?.primeira ?? null, ultima: cob?.ultima ?? null } });
+});
+
+/**
+ * GET /api/dashboard/perfis-renda/:perfil — página de detalhe de um perfil (PF1–PF4): totais,
+ * limite médio, uso do limite (todas as faixas), etapa de uso, cidades e convênios.
+ */
+const perfilDetalheQuery = z.object({
+  cidade: z.string().min(1).max(120).optional(),
+  de: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  ate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+});
+
+router.get("/perfis-renda/:perfil", async (req, res) => {
+  const perfil = String(req.params.perfil).toUpperCase();
+  if (!isPerfilRenda(perfil)) return res.status(404).json({ error: "Perfil inexistente" });
+  const q = perfilDetalheQuery.safeParse(req.query);
+  if (!q.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  const { tenantId } = req.user!;
+  const { cidade, de, ate } = q.data;
+  const r = limiteRange(perfil);
+  const faixaLimite = r.lte === undefined ? { gt: r.gt } : { gt: r.gt, lte: r.lte };
+  const base = { tenantId, limiteTotal: faixaLimite, ...(cidade ? { cidade } : {}) };
+
+  // SQL cru: parâmetros $1 tenant, $2 limite mínimo, $3 limite máximo (ou null), $4 cidade (ou null)
+  const params: unknown[] = [tenantId, r.gt, r.lte ?? null, cidade ?? null];
+  const filtroCliente = `c."tenantId" = $1 AND c."limiteTotal" > $2::numeric AND ($3::numeric IS NULL OR c."limiteTotal" <= $3::numeric) AND ($4::text IS NULL OR c."cidade" = $4::text)`;
+  const etapaRows = tenantRaw.query<Array<{ etapa: string; n: bigint }>>(
+    `SELECT ${ETAPA_CASE_SQL.replace(/"(ultimoUsoReal|usosTotal|usosUltimos90d)"/g, 'c."$1"')} AS etapa, COUNT(*)::bigint AS n FROM "Client" c WHERE ${filtroCliente} GROUP BY 1`,
+    ...params
+  );
+
+  // Uso no período (extrato): só antecipação e compra à vista. Dias em Brasília (UTC-3).
+  const periodo = de || ate
+    ? {
+        de: de ?? null,
+        ate: ate ?? null,
+      }
+    : null;
+  const usoSql = `FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
+    WHERE ${filtroCliente} AND ${USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"')}
+      AND ($5::date IS NULL OR (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date >= $5::date)
+      AND ($6::date IS NULL OR (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date <= $6::date)`;
+  const usoParams = [...params, de ?? null, ate ?? null];
+  const usoResumo = tenantRaw.query<Array<{ clientes: bigint; usos: bigint; valor: string | null; juros: string | null }>>(
+    `SELECT COUNT(DISTINCT p."clientId")::bigint AS clientes, COUNT(*)::bigint AS usos,
+            COALESCE(SUM(p."valorPrincipal"),0)::text AS valor,
+            COALESCE(SUM(p."juros") FILTER (WHERE p."tipo" ~* '^\\s*d[eé]bito\\s+pix'),0)::text AS juros
+     ${usoSql}`,
+    ...usoParams
+  );
+  const usoSerie = tenantRaw.query<Array<{ dia: string; usos: bigint; clientes: bigint }>>(
+    `SELECT to_char((p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS dia,
+            COUNT(*)::bigint AS usos, COUNT(DISTINCT p."clientId")::bigint AS clientes
+     ${usoSql} GROUP BY 1 ORDER BY 1`,
+    ...usoParams
+  );
+
+  const [total, agg, porFaixa, porCidade, cidadesDisp, porConvenio, noTeto, comSaldo, autorizados, etapaRaw, resumo, serie] = await Promise.all([
+    prisma.client.count({ where: base }),
+    prisma.client.aggregate({ where: base, _avg: { limiteTotal: true }, _sum: { limiteTotal: true, valorUtilizado: true, saldoDisponivel: true } }),
+    prisma.client.groupBy({ by: ["faixaUso"], where: base, _count: true }),
+    prisma.client.groupBy({ by: ["cidade"], where: { ...base, cidade: { not: null } }, _count: true, orderBy: { _count: { cidade: "desc" } }, take: 10 }),
+    prisma.client.groupBy({ by: ["cidade"], where: { tenantId, limiteTotal: faixaLimite, cidade: { not: null } }, _count: true, orderBy: { _count: { cidade: "desc" } }, take: 100 }),
+    prisma.client.groupBy({ by: ["empresaConveniada"], where: { ...base, empresaConveniada: { not: null } }, _count: true, orderBy: { _count: { empresaConveniada: "desc" } }, take: 10 }),
+    prisma.client.count({ where: { ...base, limiteTotal: 2000 } }),
+    prisma.client.count({ where: { ...base, saldoDisponivel: { gte: 10 } } }),
+    prisma.client.count({ where: { ...base, autorizacaoComunicacao: true, optOutAt: null } }),
+    etapaRows,
+    usoResumo,
+    usoSerie,
+  ]);
+  const etapas: Record<string, number> = {};
+  for (const e of etapaRaw) etapas[e.etapa] = Number(e.n);
+  const faixas: Record<string, number> = {};
+  for (const f of porFaixa) faixas[f.faixaUso] = f._count;
+  const u = resumo[0];
+  res.json({
+    perfil,
+    label: PERFIL_LABELS[perfil],
+    filtros: { cidade: cidade ?? null, de: de ?? null, ate: ate ?? null },
+    total,
+    noTeto,
+    comSaldo,
+    autorizados,
+    limiteMedio: Number(agg._avg.limiteTotal ?? 0),
+    limiteTotal: Number(agg._sum.limiteTotal ?? 0),
+    valorUtilizado: Number(agg._sum.valorUtilizado ?? 0),
+    saldoDisponivel: Number(agg._sum.saldoDisponivel ?? 0),
+    faixas,
+    etapas,
+    cidades: porCidade.map((c) => ({ cidade: c.cidade as string, count: c._count })),
+    cidadesDisponiveis: cidadesDisp.map((c) => ({ cidade: c.cidade as string, count: c._count })),
+    convenios: porConvenio.map((c) => ({ convenio: c.empresaConveniada as string, count: c._count })),
+    // Uso no período (extrato de compras): vale para o recorte de cidade e as datas escolhidas
+    uso: {
+      periodo,
+      clientes: Number(u?.clientes ?? 0),
+      transacoes: Number(u?.usos ?? 0),
+      valorMovimentado: Number(u?.valor ?? 0),
+      lucroJuros: Number(u?.juros ?? 0),
+      serie: serie.map((d) => ({ dia: d.dia, usos: Number(d.usos), clientes: Number(d.clientes) })),
+    },
+  });
+});
+
+/**
+ * GET /api/dashboard/oportunidades — fila de oportunidades (faixas de uso do limite, ativação,
+ * comércio, relacionamento, qualidade dos dados e itens que dependem de histórico). Ver
+ * services/opportunities.ts. Aceita os mesmos filtros de cidade/convênio do overview.
+ */
+router.get("/oportunidades", async (req, res) => {
+  const parsed = filtersQuerySchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  res.json(await computeOpportunities(prisma, req.user!.tenantId, parsed.data));
+});
+
+/**
+ * GET /api/dashboard/audiencia — ids dos clientes de uma oportunidade (para "Criar campanha"), junto
+ * da mensagem sugerida. `autorizados` conta quem de fato pode receber (sem opt-out).
+ */
+const audienciaSchema = filtersQuerySchema.extend({
+  tipo: z.enum(OPPORTUNITY_KEYS as [OpportunityKey, ...OpportunityKey[]]),
+});
+router.get("/audiencia", async (req, res) => {
+  const parsed = audienciaSchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  const { tenantId } = req.user!;
+  const { tipo, ...filters } = parsed.data;
+
+  const ids = await opportunityAudience(prisma, tenantId, filters, tipo);
+  const autorizados = ids.length
+    ? await prisma.client.count({ where: { tenantId, id: { in: ids }, autorizacaoComunicacao: true, optOutAt: null, ...ENVIAVEL_WHERE } })
+    : 0;
+  res.json({ tipo, total: ids.length, autorizados, clientIds: ids, mensagem: suggestedMessage(tipo) ?? null });
 });
 
 export default router;

@@ -9,4 +9,6 @@ export interface SendResult {
 export interface ChannelAdapter {
   channel: "WHATSAPP" | "SMS";
   send(to: string, body: string, meta?: Record<string, unknown>): Promise<SendResult>;
+  /** WhatsApp: envia um template aprovado pela Meta (único jeito de falar primeiro com o cliente). */
+  sendTemplate?(to: string, tpl: { name: string; language: string; params: string[] }): Promise<SendResult>;
 }

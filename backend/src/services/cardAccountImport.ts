@@ -4,6 +4,8 @@ import { computeUsage } from "./usage";
 import { hashDocument, isValidDocument, maskDocument, detectDocumentType, normalizePhone } from "./masking";
 import { notify } from "./notifications";
 import { ImportRunResult } from "./importService";
+import { recordAccountSnapshots, SnapshotCandidate } from "./accountSnapshot";
+import { normalizeDocumentDigits, parseMoney } from "./purchaseParsing";
 
 /**
  * Importador para o formato real de "Cartões e contas" — cadastro/ativação de cartão vinculado
@@ -80,10 +82,16 @@ const REQUIRED_FIELDS: (keyof CardAccountRow)[] = ["documento", "nome", "telefon
 //  - PODE_TER_MAS_NAO_ATIVOU: aprovado mas nunca ativou -> Inativo (público "sem uso")
 //  - NAO_PODE_TER: reprovado (cadastro originado no comércio) -> Inativo, sem autorização de
 //    comunicação (nunca houve contrato aceito) e origemCliente marcado como "comercio"
-const STATUS_CARTAO_MAP: Record<string, "ATIVO" | "INATIVO"> = {
+// Também aceita status em texto simples ("Ativo", "Inativo", "Bloqueado", "Encerrado"), como vem
+// em exportações de painéis de acompanhamento — sem marcar o cliente como reprovado.
+const STATUS_CARTAO_MAP: Record<string, "ATIVO" | "INATIVO" | "BLOQUEADO"> = {
   ATIVOU_CARTAO: "ATIVO",
   PODE_TER_MAS_NAO_ATIVOU: "INATIVO",
   NAO_PODE_TER: "INATIVO",
+  ATIVO: "ATIVO",
+  INATIVO: "INATIVO",
+  BLOQUEADO: "BLOQUEADO",
+  ENCERRADO: "INATIVO",
 };
 
 // Concorrência limitada em vez de Promise.all irrestrito: grava várias linhas ao mesmo tempo
@@ -110,15 +118,12 @@ function parseDate(v?: string): Date | undefined {
   return isNaN(d.getTime()) ? undefined : d;
 }
 
-function parseNumber(v?: string | number): number | undefined {
+export function parseNumber(v?: string | number): number | undefined {
   if (v === undefined || v === null || v === "") return undefined;
   if (typeof v === "number") return v;
-  // Colunas de valor na planilha real vêm formatadas como moeda (ex.: "R$ 500,00", "R$ -" pra
-  // zero, "R$ 0,34") — remove o símbolo antes de converter, e trata "-" isolado como zero.
-  let s = String(v).trim().replace(/^R\$\s*/i, "").trim();
-  if (s === "-" || s === "") return 0;
-  const n = Number(s.replace(/\./g, "").replace(",", "."));
-  return isNaN(n) ? undefined : n;
+  // Aceita "R$ 500,00" (BR), "2,000.00" / "10.50" (EUA, comum em CSV exportado do Sheets) e
+  // "R$ -" (zero): parseMoney deduz o separador decimal de cada valor em vez de assumir BR.
+  return parseMoney(v) ?? undefined;
 }
 
 function parseBool(v?: string | boolean): boolean {
@@ -144,11 +149,17 @@ interface PreparedRow {
   rowNumber: number;
   cpfHash: string;
   limiteTotal: number;
+  saldoDisponivel: number;
+  valorUtilizado: number;
+  statusConta: "ATIVO" | "INATIVO" | "BLOQUEADO";
   data: Prisma.ClientCreateInput;
 }
 
 /** Fase 1 (sem banco): valida e transforma cada linha crua no formato de gravação. */
-function prepareRow(raw: CardAccountRow, rowNumber: number, tenantCpfSalt: string, jobId: string, tenantId: string, errors: RowError[]): PreparedRow | null {
+function prepareRow(rawIn: CardAccountRow, rowNumber: number, tenantCpfSalt: string, jobId: string, tenantId: string, errors: RowError[]): PreparedRow | null {
+  // Planilhas perdem o zero à esquerda do CPF/CNPJ (ex.: CPF com 10 dígitos): recompõe antes de validar.
+  const doc = rawIn.documento ? normalizeDocumentDigits(rawIn.documento) : null;
+  const raw: CardAccountRow = doc ? { ...rawIn, documento: doc } : rawIn;
   const err = validateRow(raw, rowNumber);
   if (err) {
     errors.push(err);
@@ -247,7 +258,7 @@ function prepareRow(raw: CardAccountRow, rowNumber: number, tenantCpfSalt: strin
     lastImportJobId: jobId,
   };
 
-  return { rowNumber, cpfHash, limiteTotal, data };
+  return { rowNumber, cpfHash, limiteTotal, saldoDisponivel, valorUtilizado, statusConta, data };
 }
 
 /**
@@ -281,11 +292,14 @@ export async function runCardAccountImport(
   // Fase 2: uma única consulta pra descobrir quem já existe no lote inteiro (em vez de uma
   // consulta por linha) — dá pra saber criado-vs-atualizado e aplicar o opt-out sticky e o
   // registro de renovação de limite sem precisar reconsultar linha a linha.
-  const existingByCpfHash = new Map<string, { id: string; limiteTotal: Prisma.Decimal; optOutAt: Date | null }>();
+  const existingByCpfHash = new Map<
+    string,
+    { id: string; limiteTotal: Prisma.Decimal; saldoDisponivel: Prisma.Decimal; statusConta: "ATIVO" | "INATIVO" | "BLOQUEADO"; optOutAt: Date | null }
+  >();
   if (prepared.length > 0) {
     const existing = await prisma.client.findMany({
       where: { tenantId, cpfHash: { in: prepared.map((p) => p.cpfHash) } },
-      select: { id: true, cpfHash: true, limiteTotal: true, optOutAt: true },
+      select: { id: true, cpfHash: true, limiteTotal: true, saldoDisponivel: true, statusConta: true, optOutAt: true },
     });
     for (const c of existing) existingByCpfHash.set(c.cpfHash, c);
   }
@@ -295,15 +309,34 @@ export async function runCardAccountImport(
   let added = 0;
   let updated = 0;
   const movementsToCreate: { clientId: string; valor: number }[] = [];
+  const snapshotCandidates: SnapshotCandidate[] = [];
 
   await mapWithConcurrency(prepared, CONCURRENCY, async (p) => {
     const existing = existingByCpfHash.get(p.cpfHash);
     const data = { ...p.data, autorizacaoComunicacao: existing?.optOutAt ? false : p.data.autorizacaoComunicacao };
     try {
-      await prisma.client.upsert({
+      const saved = await prisma.client.upsert({
         where: { tenantId_cpfHash: { tenantId, cpfHash: p.cpfHash } },
         create: data,
         update: data,
+        select: { id: true },
+      });
+      snapshotCandidates.push({
+        clientId: saved.id,
+        // estado de ANTES desta importação (lido na Fase 2) — undefined para cliente novo
+        previous: existing
+          ? {
+              limiteTotal: Number(existing.limiteTotal),
+              saldoDisponivel: Number(existing.saldoDisponivel),
+              statusConta: existing.statusConta,
+            }
+          : undefined,
+        current: {
+          limiteTotal: p.limiteTotal,
+          saldoDisponivel: p.saldoDisponivel,
+          valorUtilizado: p.valorUtilizado,
+          statusConta: p.statusConta,
+        },
       });
       if (existing) {
         updated++;
@@ -327,6 +360,9 @@ export async function runCardAccountImport(
       })
       .catch(() => {});
   }
+
+  // Histórico de saldo/limite/status (AccountSnapshot) — não derruba a importação se falhar.
+  await recordAccountSnapshots(prisma, tenantId, snapshotCandidates, job.id);
 
   const hardErrors = errors.filter((e) => !e.motivo.startsWith("Aviso:"));
   const status =
