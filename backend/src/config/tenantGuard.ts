@@ -22,6 +22,17 @@ import { poolerSafeDatabaseUrl } from "./databaseUrl";
  */
 
 /**
+ * Opções das transactions que isolam cada operação por tenant (uma por query, ver o hook abaixo).
+ * O padrão do Prisma é maxWait=2s e timeout=5s. Só que o pool é pequeno (connection_limit=5, ver
+ * databaseUrl.ts) e o dashboard dispara dezenas de queries em paralelo — cada uma é uma
+ * transaction que precisa de uma conexão —, então as que ficam na fila por mais de 2s falhavam
+ * com P2028 "Unable to start a transaction in the given time" e o painel inteiro caía com
+ * "Erro interno do servidor". Aqui elas passam a esperar a vez (até 15s) em vez de falhar; a
+ * query em si continua limitada pelo `timeout`.
+ */
+export const TENANT_TX_OPTIONS = { maxWait: 15_000, timeout: 15_000 } as const;
+
+/**
  * Every Prisma model that carries its own `tenantId` scalar field, per prisma/schema.prisma.
  * Confirmed by grepping the schema for `tenantId` — NOT every model with tenant-owned data:
  * `Movement` (scoped via `Client.tenantId`) and `MessageEvent` (scoped via `Campaign.tenantId`)
@@ -42,6 +53,10 @@ export const TENANT_SCOPED_MODELS = [
   "ChannelConfig",
   "MessageTemplate",
   "Notification",
+  "AccountSnapshot",
+  "DashboardSnapshot",
+  "Merchant",
+  "Purchase",
 ] as const;
 
 type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number];
@@ -281,9 +296,36 @@ export const tenantGuardExtension = Prisma.defineExtension((client) =>
                   modelToDelegateKey(model)
                 ][operation](args)
             );
-          });
+          }, TENANT_TX_OPTIONS);
         },
       },
     },
   })
 );
+
+/**
+ * Consultas SQL cruas ($queryRaw/$executeRaw) NÃO passam pelo hook $allModels acima — então rodam
+ * numa conexão sem `app.tenant_id` e, sob RLS real (role `app_runtime`), enxergariam zero linhas.
+ * Esta função abre a mesma transaction com `set_config` que as queries de model usam e executa o
+ * callback dentro dela. Use sempre que precisar de SQL cru (ver `tenantRaw` em config/db.ts).
+ * Continua exigindo contexto de tenant: fora de uma request/job com tenant, lança erro.
+ */
+export async function runRawInTenantTx<T>(
+  // `any`: o client estendido tem `$transaction` sobrecarregado (array de promises OU callback), o
+  // que não casa com uma assinatura estrutural simples. Só a forma com callback é usada aqui.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client: any,
+  fn: (tx: Prisma.TransactionClient) => Promise<T>
+): Promise<T> {
+  const tenantId = requestTenantContext.getStore();
+  if (!tenantId) {
+    throw new Error(
+      "[tenantGuard] Refusing to run raw SQL with no tenant context set. Use it only inside an " +
+        "authenticated request (requireAuth) or runWithTenantContextAsync()."
+    );
+  }
+  return client.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+    return fn(tx);
+  }, TENANT_TX_OPTIONS);
+}

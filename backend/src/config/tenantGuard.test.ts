@@ -31,6 +31,9 @@ jest.mock("@prisma/client", () => {
 
 import {
   TENANT_SCOPED_MODELS,
+  TENANT_TX_OPTIONS,
+  runRawInTenantTx,
+  runWithTenantContextAsync as runWithTenantCtxForRaw,
   runWithTenantContext,
   tenantGuardExtension,
   whereHasTenantId,
@@ -54,13 +57,15 @@ function makeFakeClient() {
   let captured: any;
   const txCalls: Array<{ model: string; operation: string; args: unknown }> = [];
   const executeRawCalls: unknown[][] = [];
+  const txOptions: unknown[] = [];
 
   const fakeClient = {
     $extends(config: any) {
       captured = config.query.$allModels.$allOperations;
       return config;
     },
-    async $transaction(callback: (tx: any) => Promise<any>) {
+    async $transaction(callback: (tx: any) => Promise<any>, options?: unknown) {
+      txOptions.push(options);
       const txBase = {
         $executeRaw: (_strings: TemplateStringsArray, ...values: unknown[]) => {
           executeRawCalls.push(values);
@@ -101,6 +106,7 @@ function makeFakeClient() {
     }) => Promise<any>,
     txCalls,
     executeRawCalls,
+    txOptions,
   };
 }
 
@@ -127,7 +133,7 @@ describe("whereHasTenantId", () => {
   });
 
   it("finds tenantId nested inside AND (array form)", () => {
-    const where = { AND: [{ tenantId: "t1" }, { faixaUso: "USO_ALTO" }] };
+    const where = { AND: [{ tenantId: "t1" }, { faixaUso: "USO_71_99" }] };
     expect(whereHasTenantId(where)).toBe(true);
   });
 
@@ -162,6 +168,10 @@ describe("TENANT_SCOPED_MODELS", () => {
         "ChannelConfig",
         "MessageTemplate",
         "Notification",
+        "AccountSnapshot",
+        "DashboardSnapshot",
+        "Merchant",
+        "Purchase",
       ].sort()
     );
   });
@@ -219,6 +229,16 @@ describe("tenantGuard $allOperations hook — code-level checks (run before any 
 });
 
 describe("tenantGuard $allOperations hook — RLS transaction wrapping (real tenant context)", () => {
+  it("abre a transaction com maxWait/timeout folgados: o pool é pequeno e o painel dispara dezenas de queries em paralelo", async () => {
+    const { hook, txOptions } = makeFakeClient();
+    await runWithTenantContext("tenant-A", () =>
+      hook({ model: "Client", operation: "findMany", args: { where: { tenantId: "tenant-A" } }, query: jest.fn() })
+    );
+    // O padrão do Prisma (maxWait 2s) derrubava o painel com P2028 quando as queries ficavam na fila do pool.
+    expect(txOptions).toEqual([TENANT_TX_OPTIONS]);
+    expect(TENANT_TX_OPTIONS.maxWait).toBeGreaterThan(2000);
+  });
+
   it("opens one transaction, sets app.tenant_id via set_config, and dispatches the real op to tx", async () => {
     const { hook, txCalls, executeRawCalls } = makeFakeClient();
     const args = { where: { tenantId: "t1", cidade: "São Paulo" } };
@@ -239,7 +259,7 @@ describe("tenantGuard $allOperations hook — RLS transaction wrapping (real ten
     const orShape = { where: { tenantId: "t1", OR: [{ cidade: "São Paulo" }, { cidade: "Rio de Janeiro" }] } };
     await runWithTenantContext("t1", () => hook({ model: "Client", operation: "findMany", args: orShape, query: jest.fn() }));
 
-    const nestedShape = { where: { AND: [{ tenantId: "t1" }, { faixaUso: "USO_ALTO" }] } };
+    const nestedShape = { where: { AND: [{ tenantId: "t1" }, { faixaUso: "USO_71_99" }] } };
     await runWithTenantContext("t1", () =>
       hook({ model: "Client", operation: "findMany", args: nestedShape, query: jest.fn() })
     );
@@ -337,5 +357,32 @@ describe("withCrossTenantAccess exemption", () => {
 
     expect(rejection).toBeInstanceOf(Error);
     expect((rejection as Error).message).toMatch(/tenantGuard/);
+  });
+});
+
+describe("runRawInTenantTx (SQL cru sob RLS)", () => {
+  function fakeRawClient() {
+    const executed: unknown[][] = [];
+    const tx = { $executeRaw: jest.fn(async (...args: unknown[]) => { executed.push(args); return 1; }) };
+    const client = { $transaction: jest.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx)) };
+    return { client, tx, executed };
+  }
+
+  it("recusa SQL cru sem contexto de tenant", async () => {
+    const { client } = fakeRawClient();
+    await expect(runRawInTenantTx(client, async () => "x")).rejects.toThrow(/no tenant context/);
+    expect(client.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("seta app.tenant_id na mesma transaction antes de rodar o callback", async () => {
+    const { client, tx } = fakeRawClient();
+    const order: string[] = [];
+    tx.$executeRaw.mockImplementationOnce(async () => { order.push("set_config"); return 1; });
+    const result = await runWithTenantCtxForRaw("tenant-1", () =>
+      runRawInTenantTx(client, async () => { order.push("callback"); return 42; })
+    );
+    expect(result).toBe(42);
+    expect(order).toEqual(["set_config", "callback"]);
+    expect(client.$transaction).toHaveBeenCalledTimes(1);
   });
 });

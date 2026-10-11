@@ -2,7 +2,7 @@ import { AppPrismaClient } from "../config/db";
 import { ChannelAdapter, SendResult } from "./channels/types";
 import { MockSMSAdapter, TwilioSMSAdapter, ZenviaSMSAdapter } from "./channels/sms";
 import { MockWhatsAppAdapter, WhatsAppCloudAdapter } from "./channels/whatsapp";
-import { buildSegmentWhere, SegmentFilters, SegmentGroup } from "./segments";
+import { buildSegmentWhere, ENVIAVEL_WHERE, SegmentFilters, SegmentGroup } from "./segments";
 import { decryptSecret, isEncryptedPayload } from "./crypto";
 
 /**
@@ -97,6 +97,25 @@ async function sendWithFailover(
   return { ...last, provider: providers[providers.length - 1]?.name ?? "none" };
 }
 
+const brl = (n: unknown) => Number(n ?? 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+
+/** Contexto de renderização de um cliente real (usado no envio). */
+export function templateContext(client: {
+  nome: string;
+  cidade: string | null;
+  percentualUtilizado: unknown;
+  saldoDisponivel: unknown;
+  limiteTotal: unknown;
+}): Record<string, unknown> {
+  return {
+    nome: client.nome,
+    cidade: client.cidade,
+    percentual: client.percentualUtilizado,
+    saldo: brl(client.saldoDisponivel),
+    limite: brl(client.limiteTotal),
+  };
+}
+
 export function renderTemplate(template: string, client: Record<string, any>): string {
   return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => {
     const value = client[key];
@@ -121,6 +140,8 @@ export async function buildAudience(prisma: AppPrismaClient, tenantId: string, c
       autorizacaoComunicacao: true,
       optOutAt: null,
       statusConta: { not: "BLOQUEADO" },
+      // sem limite = comércio credenciado, nunca é público de disparo de cartão
+      ...ENVIAVEL_WHERE,
     },
   });
 }
@@ -135,6 +156,7 @@ export async function enqueueCampaign(prisma: AppPrismaClient, tenantId: string,
 
   const dedupeCutoff = new Date(Date.now() - campaign.dedupeWindowHrs * 60 * 60 * 1000);
   let queued = 0;
+  let control = 0;
   let skippedDedupe = 0;
 
   for (const client of audience) {
@@ -143,10 +165,24 @@ export async function enqueueCampaign(prisma: AppPrismaClient, tenantId: string,
         clientId: client.id,
         campaign: { messageTemplate: campaign.messageTemplate, tenantId },
         queuedAt: { gte: dedupeCutoff },
+        // Quem ficou no grupo de controle de uma campanha anterior NÃO recebeu a mensagem, então
+        // não conta para a janela de dedupe (senão seria excluído de campanhas futuras à toa).
+        status: { not: "CONTROLE" },
       },
     });
     if (recentSameCampaignType) {
       skippedDedupe++;
+      continue;
+    }
+
+    // Grupo de controle (opcional): parte do público fica de fora do envio, só para comparar o uso
+    // de quem recebeu com o de quem não recebeu. É sorteado ANTES da variante A/B, para o
+    // controle não distorcer a divisão entre A e B.
+    if (campaign.controlGroupPercent && Math.random() * 100 < campaign.controlGroupPercent) {
+      await prisma.messageEvent.create({
+        data: { campaignId, clientId: client.id, channel: campaign.channel, status: "CONTROLE", variant: "A" },
+      });
+      control++;
       continue;
     }
 
@@ -170,7 +206,7 @@ export async function enqueueCampaign(prisma: AppPrismaClient, tenantId: string,
     data: { audienceCount: audience.length, status: "AGENDADA" },
   });
 
-  return { audienceSize: audience.length, queued, skippedDedupe };
+  return { audienceSize: audience.length, queued, control, skippedDedupe };
 }
 
 /** Quantas mensagens já foram enviadas pelo tenant no último minuto (para o rate limit global). */
@@ -213,13 +249,17 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
       });
       continue;
     }
+    // Garantia no envio: mensagem já na fila de quem (ainda) não tem limite não sai.
+    if (!(Number(evt.client.limiteTotal) > 0)) {
+      await prisma.messageEvent.update({
+        where: { id: evt.id },
+        data: { status: "BLOQUEADO", error: "Cliente sem limite (comércio credenciado)" },
+      });
+      continue;
+    }
 
     const templateBody = evt.variant === "B" && campaign.messageTemplateB ? campaign.messageTemplateB : campaign.messageTemplate;
-    const body = renderTemplate(templateBody, {
-      nome: evt.client.nome,
-      cidade: evt.client.cidade,
-      percentual: evt.client.percentualUtilizado,
-    });
+    const body = renderTemplate(templateBody, templateContext(evt.client));
 
     const sendResult = await sendWithFailover(providers, evt.client.telefone, body);
 
@@ -261,7 +301,7 @@ export async function sendTestMessages(
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
   const providers = await resolveProviders(prisma, tenantId, campaign.channel);
 
-  const sample = { nome: "Cliente Teste", cidade: "São Paulo", percentual: 42 };
+  const sample = { nome: "Cliente Teste", cidade: "São Paulo", percentual: 42, saldo: brl(850), limite: brl(1500) };
   const body = renderTemplate(campaign.messageTemplate, sample);
 
   const results = [];
@@ -270,35 +310,4 @@ export async function sendTestMessages(
     results.push({ phone, status: sendResult.status, provider: sendResult.provider, error: sendResult.error });
   }
   return { body, results };
-}
-
-/**
- * Atribuição de conversão: para cada MessageEvent enviado, verifica se houve Movement do
- * cliente dentro da janela (campaign.attributionDays) após o envio. Regra de exclusividade:
- * primeira movimentação dentro da janela conta como conversão; o valor dessa movimentação é
- * guardado em convertedValue para cálculo de ROI (Fase 2).
- */
-export async function computeAttribution(prisma: AppPrismaClient, campaignId: string) {
-  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
-  const events = await prisma.messageEvent.findMany({
-    where: { campaignId, status: { in: ["ENVIADO", "ENTREGUE", "LIDO", "RESPONDIDO"] }, convertedAt: null },
-  });
-
-  let conversions = 0;
-  for (const evt of events) {
-    if (!evt.sentAt) continue;
-    const windowEnd = new Date(evt.sentAt.getTime() + campaign.attributionDays * 24 * 60 * 60 * 1000);
-    const movement = await prisma.movement.findFirst({
-      where: { clientId: evt.clientId, data: { gte: evt.sentAt, lte: windowEnd } },
-      orderBy: { data: "asc" },
-    });
-    if (movement) {
-      await prisma.messageEvent.update({
-        where: { id: evt.id },
-        data: { convertedAt: movement.data, convertedValue: movement.valor },
-      });
-      conversions++;
-    }
-  }
-  return { evaluated: events.length, conversions };
 }

@@ -1,3 +1,4 @@
+import PerfisRenda from "./pages/PerfisRenda";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import {
@@ -15,6 +16,7 @@ import {
   UserCircle,
   LogOut,
   Search,
+  Store,
 } from "lucide-react";
 import { useAuth, type AuthUser } from "./context/AuthContext";
 import Login from "./pages/Login";
@@ -38,6 +40,7 @@ import { SidebarNav, type NavGroupData, type NavItemData } from "./components/ui
 // Carregado sob demanda: é a única tela que usa a lib de gráficos (recharts), que sozinha
 // pesa mais que o resto do bundle inteiro — não faz sentido baixá-la em toda página do app.
 const Dashboard = lazy(() => import("./pages/Dashboard"));
+const Commerce = lazy(() => import("./pages/Commerce"));
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   const { user } = useAuth();
@@ -99,6 +102,7 @@ function Layout({ children }: { children: JSX.Element }) {
       items: [
         { id: "clients", title: "Base de clientes", icon: UsersIcon, path: "/clients" },
         { id: "segments", title: "Segmentos", icon: Layers, path: "/segments" },
+        { id: "commerce", title: "Comércio credenciado", icon: Store, path: "/commerce" },
       ],
     },
     {
@@ -218,6 +222,15 @@ export default function App() {
                 <Route path="/clients" element={<Clients />} />
                 <Route path="/clients/:id" element={<ClientProfile />} />
                 <Route path="/segments" element={<Segments />} />
+                <Route path="/perfis-renda/:perfil?" element={<PerfisRenda />} />
+                <Route
+                  path="/commerce"
+                  element={
+                    <Suspense fallback={<div>Carregando...</div>}>
+                      <Commerce />
+                    </Suspense>
+                  }
+                />
                 <Route path="/campaigns" element={<CampaignList />} />
                 <Route path="/campaigns/new" element={<CampaignWizard />} />
                 <Route path="/campaigns/:id/report" element={<CampaignReport />} />

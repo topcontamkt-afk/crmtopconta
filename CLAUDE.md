@@ -77,6 +77,24 @@ alternative input shape feeding the same pipeline. Usage percentage/tier
 (`services/usage.ts`) uses safe division — a zero/missing `limite_total`
 yields tier `INDEFINIDO`, never an error or false "no usage".
 
+The card transaction statement is the source of *real* usage, since `Client`
+only holds the latest snapshot (which swings with the payroll cycle: the
+invoice is deducted from payroll and the limit renews). It lives in `Purchase`
+(see "Comércio credenciado" below); `services/transactionClassifier.ts` decides
+what counts as usage from `Purchase.tipo`: `Débito Pix Cartão` = salary advance
+(`Juros` is profit), `Compra à Vista` = purchase at partner stores (no profit
+data) — subscription (`Assinatura`, fixed monthly fee), invoice debit and any
+unknown description never count.
+
+The "Cartões e contas" import also records `AccountSnapshot` rows
+(`services/accountSnapshot.ts`): a change log of saldo/limite/status, written
+only when one of them changes or on a client's first sighting — not a daily
+dump of the whole base. State on date D = latest row with `recordedAt <= D`;
+`saldoAnterior` gives the delta (the limit "returns" after payroll payment, so
+`limiteTotal` often stays flat while `saldoDisponivel` jumps — the existing
+`LIMITE_RENOVADO` automation only looks at `limiteTotal`). Failures never break
+the import.
+
 ### LGPD / security primitives
 
 - CPF: never persisted in plaintext — HMAC-SHA256 hash with a per-tenant salt
@@ -103,6 +121,22 @@ processes a batch. Channels are abstracted behind `ChannelAdapter`
 API and SMS (Twilio as the reference provider, `ChannelConfig.priority`
 enables multi-provider failover) plus mock adapters for credential-free dev.
 
+
+Campaign results are measured by *real usage*, not limit renewals
+(`services/campaignResults.ts`, computed on request from `Purchase` — no
+stored attribution state, so late-imported usage shows up on its own): a
+conversion is an antecipação or compra after the send (subscription never
+counts), reported as a cumulative D0/D1/D3/D7/D14/D30 curve in Brasília
+calendar days. If a client got several campaigns, usage is credited to the
+most recent one. Clients are split by balance at send time (`AccountSnapshot`
+as-of lookup; `MIN_SALDO_ELEGIVEL`) into com saldo / sem saldo / desconhecido
+(no history yet). Optional control group: `Campaign.controlGroupPercent` leaves
+that share of the audience unmessaged as `MessageStatus.CONTROLE`; since the
+send is spread over days, each control client is assigned the timestamp of a
+real send (matched by quantile) so both windows start alike, and the report
+shows lift (two-proportion z-test) and incremental profit. Profit is only
+`Juros` of antecipações — compra à vista profit (merchant fee) is unknown, so
+it's excluded from profit/ROI rather than counted as zero.
 ### Automation engine
 
 `services/automationEngine.ts` evaluates active `AutomationRule`s on a timer,
@@ -111,6 +145,85 @@ reactivation, limit renewed — detected via a `Movement` created on import
 when `limiteTotal` increases —, usage-tier nudges, opt-out/invalid-phone
 block) and firing the configured action (launch campaign, notify, or block).
 Repeat sends to the same client stay protected by the existing dedupe window.
+
+### Dashboard e histórico
+
+`routes/dashboard.ts` expõe `GET /api/dashboard/overview` (KPIs, variação vs. período anterior,
+séries, nota de saúde, funil, oportunidades, resultado de campanhas, cobertura de dados e insights;
+filtros `days`, `cidade`, `empresaConveniada`) e `GET /api/dashboard/audiencia` (ids do público de
+uma oportunidade, para "Criar campanha"). Tendência e variação vêm de `DashboardSnapshot`: uma foto
+diária dos KPIs por tenant (`services/snapshots.ts`), gravada pelo job `/api/cron/snapshot` e,
+como garantia no plano Hobby, na primeira visita do dia ao dashboard. O histórico começa no dia em
+que a tabela foi criada e não é reconstruível. Com filtro de cidade/convênio, séries e variações
+ficam indisponíveis (a foto é da base inteira). A nota de saúde (`services/health.ts`) tem pesos e
+metas fixos e é testada em `health.test.ts`. O SQL da tabela está em `backend/prisma/sql/`.
+
+### Fila de oportunidades e campanhas por categoria
+
+`services/opportunities.ts` calcula a fila do dashboard (`GET /api/dashboard/oportunidades`): faixas
+de uso do limite (cortes 50/70/80%), ativação, comércio (supermercado sem posto, 1 compra, 3+ compras,
+top 10% em valor), relacionamento, qualidade de dados (status `dados`: não é campanha) e itens que
+dependem de histórico (`historico`). `GET /api/dashboard/audiencia?tipo=` devolve os ids do público e a
+mensagem sugerida; o assistente de campanha recebe tudo via router state (`presetClientIds`,
+`presetMessage`, `presetChannel`). Em /commerce, `GET /api/purchases/audiencia` aceita `minCompras`
+(frequência mínima) e devolve o público por frequência e a mensagem da categoria. Mensagens sugeridas só
+podem usar as variáveis de `services/templateVariables.ts` (`nome`, `cidade`, `percentual`, `saldo`,
+`limite`), que o envio de fato preenche; `opportunities.test.ts` garante isso.
+
+### Perfil de renda PF1–PF4
+
+`services/rendaPerfil.ts` estima o salário pelo **limite total** (limite ÷ 0,40; nunca o saldo disponível) e
+classifica em PF1 (até R$ 4.000, inclui quem estaria abaixo do piso), PF2 (até 8.000), PF3 (até 12.000) e PF4
+(acima). Cálculo puro, sem coluna nova: `limiteRange` vira o filtro `perfilRenda` em `SegmentFilters` (e no
+assistente de campanha). O limite tem teto de R$ 2.000 (`noTetoLimite`), por isso PF3/PF4 aparecem quase vazios.
+**Limite zero/vazio = comércio credenciado**: `ENVIAVEL_WHERE` o exclui de todo público de campanha e o envio
+bloqueia o evento por garantia. `POST /api/segments/presets/perfis-renda` cria/atualiza os segmentos prontos
+(`PERFIL_RENDA_PRESETS`) e `GET /api/dashboard/perfis-renda` alimenta o card do dashboard.
+
+### Etapa de uso real (recorrência e dias sem uso)
+
+`services/etapaUso.ts` classifica cada cliente pelo **extrato** (`Purchase`, só antecipação e compra à vista) em
+NUNCA_USOU / RECORRENTE (3+ usos em 90 dias e uso nos últimos 30) / OCASIONAL / EM_RISCO (31–90 dias) / INATIVO
+(+90). Três colunas em `Client` (`ultimoUsoReal`, `usosUltimos90d`, `usosTotal`) são refeitas por
+`services/usageRefresh.ts` após cada importação de compras e no job diário de snapshot (a janela de 90 dias anda
+sozinha). Filtros: `etapaUso`, `usosMin/usosMax`, `diasSemUsoRealMin/Max` (diferentes de `dataUltimaUtilizacao`,
+que também recebe a data de ativação da planilha de contas). "Nunca usou" vale para o período coberto pelo
+extrato. SQL em `backend/prisma/sql/2026-10-uso-real-cliente.sql` (rodar antes do deploy). Presets:
+`POST /api/segments/presets/etapas-uso`.
+
+### Relatório por perfil, frescor do extrato e automação por etapa
+
+`services/campaignPerfil.ts` quebra o resultado da campanha por PF1–PF4 (limite atual do cliente; controle comparado
+dentro do mesmo perfil) — `porPerfil` em `GET /api/campaigns/:id/report`. `services/dataFreshness.ts` avalia se o
+extrato de compras está em dia (limite 3 dias; `GET /api/dashboard/frescor`, aviso no dashboard e no assistente).
+O gatilho de automação `ETAPA_PERFIL` (condição `etapaUso`, `perfilRenda`, `comSaldo`) dispara por etapa/perfil e
+**não roda com extrato velho** ou ausente.
+
+### Nota de saúde por uso real
+
+`services/health.ts` tem duas notas. Com extrato de compras em dia (`dataFreshness.ts`), vale a **nota por uso real**
+(`computeRealHealth`, dados em `healthData.ts`): alcance 25 (meta 60% já usaram), uso recente 30 (meta 30% nos
+últimos 30 dias), recorrência 20 (meta 15%), retenção 15 (dos que usaram, % ainda ativos em 90 dias) e
+regularidade 10, só com clientes com limite. Sem extrato ou com extrato parado, cai na nota estimada pelo saldo e o
+dashboard avisa (`saude.modelo`/`saude.aviso`). `DashboardSnapshot.healthScore` guarda a nota real diária (SQL em
+`backend/prisma/sql/2026-10-health-score-real.sql`); a tendência e a variação só usam dias com nota real.
+
+### Comércio credenciado (compras por categoria)
+
+A aba "Todas as Compras" da planilha (transações do cartão) entra por `POST /api/purchases/import`
+(`services/purchaseImport.ts`, formato "Compras" na tela de Importações; CSV exportado da aba). Cada linha
+liga ao cliente pelo hash do CPF/CNPJ (zero à esquerda perdido pela planilha é recomposto); transação
+de cliente que ainda não está na base é ignorada e reaparece ao reenviar o arquivo (idempotente por
+`idTransacaoCartao`). Só "Compra à Vista..." tem lojista (`Merchant`); saque/Pix/assinatura entram sem
+lojista e alimentam `Client.dataUltimaUtilizacao`. A planilha não traz categoria: ela é deduzida do nome
+do lojista (`services/merchantCategories.ts`) e é editável em /commerce (`categorySource=MANUAL` nunca é
+sobrescrito). Os valores desta aba vêm no formato dos EUA (`R$ 1,591.00`), por isso `parseMoney` deduz o
+separador decimal. Segmentos e campanhas filtram por `categoriasCompra`/`lojistaIds`/`compraNosUltimosDias`
+(`services/segments.ts`).
+
+**SQL cru e RLS:** `prisma.$queryRaw*` não passa pelo hook de tenant e, sob o role `app_runtime`, não
+enxerga nenhuma linha. Use sempre `tenantRaw.query/execute` (`config/db.ts`), que abre a transaction com
+`app.tenant_id`.
 
 ### Cron jobs: local vs. Vercel
 

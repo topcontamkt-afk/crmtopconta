@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api/client";
+import { FAIXA_OPTIONS } from "../utils/faixas";
 
 interface Rule {
   id: string;
@@ -21,6 +22,7 @@ const TRIGGERS = [
   ["INATIVO_30_DIAS", "Reativação após dias inativo"],
   ["LIMITE_RENOVADO", "Aviso de limite renovado"],
   ["ESTIMULO_FAIXA", "Estímulo por faixa de uso"],
+  ["ETAPA_PERFIL", "Etapa de uso + perfil de renda (PF1–PF4)"],
   ["OPT_OUT_TELEFONE_INVALIDO", "Bloqueio automático de inconsistências de opt-out"],
 ] as const;
 
@@ -40,7 +42,10 @@ export default function Automations() {
 
   // Condições por gatilho
   const [dias, setDias] = useState(7);
-  const [faixa, setFaixa] = useState("USO_INICIAL");
+  const [faixa, setFaixa] = useState("USO_21_30");
+  const [etapaUso, setEtapaUso] = useState("EM_RISCO");
+  const [perfilRenda, setPerfilRenda] = useState("");
+  const [comSaldo, setComSaldo] = useState(true);
 
   // Ação "campaign"
   const [channel, setChannel] = useState<"WHATSAPP" | "SMS">("WHATSAPP");
@@ -62,6 +67,7 @@ export default function Automations() {
     if (trigger === "INATIVO_30_DIAS") return { dias };
     if (trigger === "LIMITE_RENOVADO") return { horasJanela: dias * 24 };
     if (trigger === "ESTIMULO_FAIXA") return { faixa };
+    if (trigger === "ETAPA_PERFIL") return { etapaUso: etapaUso || undefined, perfilRenda: perfilRenda || undefined, comSaldo };
     return {};
   }
 
@@ -108,16 +114,47 @@ export default function Automations() {
             <input type="number" value={dias} onChange={(e) => setDias(Number(e.target.value))} />
           </div>
         )}
+        {trigger === "ETAPA_PERFIL" && (
+          <>
+            <div className="form-row">
+              <label>Etapa de uso</label>
+              <select value={etapaUso} onChange={(e) => setEtapaUso(e.target.value)}>
+                <option value="">Qualquer</option>
+                <option value="NUNCA_USOU">Nunca usou</option>
+                <option value="RECORRENTE">Recorrente</option>
+                <option value="OCASIONAL">Ocasional</option>
+                <option value="EM_RISCO">Em risco (31–90 dias)</option>
+                <option value="INATIVO">Inativo (+90 dias)</option>
+              </select>
+            </div>
+            <div className="form-row">
+              <label>Perfil de renda</label>
+              <select value={perfilRenda} onChange={(e) => setPerfilRenda(e.target.value)}>
+                <option value="">Qualquer</option>
+                <option value="PF1">PF1</option>
+                <option value="PF2">PF2</option>
+                <option value="PF3">PF3</option>
+                <option value="PF4">PF4</option>
+              </select>
+            </div>
+            <div className="form-row">
+              <label>
+                <input type="checkbox" checked={comSaldo} onChange={(e) => setComSaldo(e.target.checked)} /> Só quem tem saldo
+                disponível
+              </label>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                Não dispara se o extrato de compras estiver parado há mais de 3 dias.
+              </span>
+            </div>
+          </>
+        )}
         {trigger === "ESTIMULO_FAIXA" && (
           <div className="form-row">
             <label>Faixa de uso</label>
             <select value={faixa} onChange={(e) => setFaixa(e.target.value)}>
-              <option value="NAO_UTILIZOU">Não utilizou</option>
-              <option value="BAIXO_USO">Baixo uso</option>
-              <option value="USO_INICIAL">Uso inicial</option>
-              <option value="USO_INTERMEDIARIO">Uso intermediário</option>
-              <option value="USO_ALTO">Uso alto</option>
-              <option value="QUASE_COMPLETO">Quase completo</option>
+              {FAIXA_OPTIONS.map((f) => (
+                <option key={f.value} value={f.value}>{f.label}</option>
+              ))}
             </select>
           </div>
         )}

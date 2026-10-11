@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   Area,
@@ -12,46 +12,94 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Wallet, TrendingUp, PiggyBank, Users, RefreshCw, Cake, Megaphone } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowDownRight,
+  ArrowUpRight,
+  Cake,
+  Lightbulb,
+  Megaphone,
+  PiggyBank,
+  RefreshCw,
+  TrendingUp,
+  Users,
+  Wallet,
+} from "lucide-react";
 import { api } from "../api/client";
+import OpportunityQueue from "../components/OpportunityQueue";
+import FrescorExtrato from "../components/FrescorExtrato";
+import PerfisRendaCard from "../components/PerfisRendaCard";
+import { FAIXA_LABELS, FAIXA_OPTIONS } from "../utils/faixas";
 
-interface Summary {
-  totalClientes: number;
-  novosClientes: number;
-  ativos: number;
-  inativos: number;
-  porFaixa: { faixa: string; label: string; count: number }[];
-  ranking_cidades: { cidade: string; count: number; ativos: number; valorUtilizado: number }[];
-  ranking_secretarias: { empresaConveniada: string; count: number; ativos: number; valorUtilizado: number }[];
-  limiteTotalLiberado: number;
-  valorUtilizadoTotal: number;
-  saldoDisponivelTotal: number;
-  ticketMedio: number;
-  percentualClientes100: string;
-  clientesSemUso: number;
-  ultimaAtualizacao: string | null;
-}
+type Delta = { abs: number; pct: number | null } | null;
 
-interface UsoMensal {
-  totalClientes: number;
-  taxaMesAtual: number;
-  meses: { mes: string; label: string; usados: number; percent: number }[];
-}
-
-interface Encerramentos {
-  totalClientes: number;
-  taxaMesAtual: number;
-  meses: { mes: string; label: string; encerrados: number; percent: number }[];
-  motivos: { motivo: string; count: number }[];
-}
-
-interface Engajamento {
-  niveis: { nivel: string; label: string; count: number }[];
-  aniversariantes: {
-    mesLabel: string;
-    total: number;
-    itens: { id: string; nome: string; telefone: string; cidade: string | null; dia: number }[];
+interface Overview {
+  periodo: { dias: number; desde: string };
+  filtros: {
+    aplicados: { cidade: string | null; empresaConveniada: string | null };
+    cidades: { valor: string; count: number }[];
+    convenios: { valor: string; count: number }[];
   };
+  kpis: {
+    totalClientes: number;
+    ativos: number;
+    inativos: number;
+    bloqueados: number;
+    semUso: number;
+    quaseCompleto: number;
+    limiteCompleto: number;
+    limiteTotal: number;
+    valorUtilizado: number;
+    saldoDisponivel: number;
+    ticketMedio: number;
+    faixas: Record<string, number>;
+    novosNoPeriodo: number;
+  };
+  deltas: Record<"limiteTotal" | "valorUtilizado" | "saldoDisponivel" | "ativos" | "totalClientes" | "inativos" | "semUso" | "score", Delta>;
+  baseline: { day: string; dias: number; pedidoDias: number } | null;
+  historicoDisponivel: boolean;
+  series: {
+    day: string;
+    ativos: number;
+    totalClientes: number;
+    limiteTotal: number;
+    valorUtilizado: number;
+    saldoDisponivel: number;
+    usoLimitePct: number;
+    ativosPct: number;
+    usaramNoDia: number;
+    encerradosNoDia: number;
+    score: number | null;
+  }[];
+  saude: {
+    score: number;
+    band: "SAUDAVEL" | "ATENCAO" | "CRITICO";
+    bandLabel: string;
+    delta: Delta;
+    modelo?: "USO_REAL" | "ESTIMADO";
+    aviso?: string | null;
+    components: { key: string; label: string; peso: number; nota: number; valor: number; meta: number | null }[];
+  } | null;
+  funil: { key: string; label: string; count: number }[];
+  oportunidades: { inativos: number; semUso: number; quaseCompleto: number; aniversariantes: number };
+  rankingCidades: { cidade: string; count: number; ativos: number; valorUtilizado: number }[];
+  rankingSecretarias: { empresaConveniada: string; count: number; ativos: number; valorUtilizado: number }[];
+  campanhas: {
+    temDados: boolean;
+    campanhas: number;
+    enviadas: number;
+    entregues: number;
+    respondidas: number;
+    convertidas: number;
+    taxaEntrega: number | null;
+    taxaResposta: number | null;
+    taxaConversao: number | null;
+    valorConvertido: number;
+    custo: number;
+  };
+  cobertura: { key: string; label: string; preenchidos: number; pct: number; libera: string }[];
+  insights: { tipo: "alerta" | "oportunidade" | "positivo" | "info"; texto: string }[];
+  ultimaAtualizacao: string | null;
 }
 
 interface Perfil {
@@ -60,612 +108,665 @@ interface Perfil {
   faixaRenda: { faixa: string; count: number }[];
 }
 
+type ChartTab = "uso" | "ativos" | "encerramentos" | "saude";
+
 const currency = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
-const percentFmt = (n: number) => `${n.toFixed(1)}%`;
+const intFmt = new Intl.NumberFormat("pt-BR");
+const pct = (n: number) => `${n.toFixed(1).replace(".", ",")}%`;
+const dayLabel = (iso: string) => iso.slice(8, 10) + "/" + iso.slice(5, 7);
 
-// Uma única cor de marca por gráfico (magnitude é expressa pelo comprimento/altura da marca,
-// não por variação de matiz) — ver skill de dataviz: "sequential = uma cor".
-const CHART_COLOR = "#4f7cff";
-const CHART_DANGER = "#e15b5b";
-const CHART_GRID = "#2a3346";
-const CHART_MUTED = "#9aa4b8";
+const COLOR = { primary: "#4f7cff", accent: "#ff6907", success: "#35c17a", warning: "#e0a233", danger: "#e15b5b", purple: "#9b87f5" };
+const GRID = "#2a3346";
+const MUTED = "#9aa4b8";
 
-// Ordem canônica das faixas de uso (o groupBy do backend não garante ordem determinística).
-const FAIXA_ORDER = [
-  "NAO_UTILIZOU",
-  "BAIXO_USO",
-  "USO_INICIAL",
-  "USO_INTERMEDIARIO",
-  "USO_ALTO",
-  "QUASE_COMPLETO",
-  "LIMITE_COMPLETO",
-  "INDEFINIDO",
+const FAIXA_ORDER = [...FAIXA_OPTIONS.map((f) => f.value as string), "INDEFINIDO"];
+
+const CHART_TABS: { key: ChartTab; label: string }[] = [
+  { key: "uso", label: "Uso do limite" },
+  { key: "ativos", label: "Clientes ativos" },
+  { key: "encerramentos", label: "Encerramentos" },
+  { key: "saude", label: "Nota de saúde" },
 ];
+
+
+const REFRESH_MS = 60_000;
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [usoMensal, setUsoMensal] = useState<UsoMensal | null>(null);
-  const [encerramentos, setEncerramentos] = useState<Encerramentos | null>(null);
-  const [engajamento, setEngajamento] = useState<Engajamento | null>(null);
+  const [days, setDays] = useState<7 | 30 | 90>(30);
+  const [cidade, setCidade] = useState("");
+  const [convenio, setConvenio] = useState("");
+  const [tab, setTab] = useState<ChartTab>("uso");
+  const [data, setData] = useState<Overview | null>(null);
   const [perfil, setPerfil] = useState<Perfil | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const requestId = useRef(0);
 
-  function load() {
+  const load = useCallback(() => {
+    const id = ++requestId.current;
     setLoading(true);
-    Promise.all([
-      api<Summary>("/dashboard/summary"),
-      api<UsoMensal>("/dashboard/uso-mensal"),
-      api<Encerramentos>("/dashboard/encerramentos"),
-      api<Engajamento>("/dashboard/engajamento"),
-      api<Perfil>("/dashboard/perfil"),
-    ])
-      .then(([s, u, e, en, p]) => {
-        setSummary(s);
-        setUsoMensal(u);
-        setEncerramentos(e);
-        setEngajamento(en);
+    const qs = new URLSearchParams({ days: String(days) });
+    if (cidade) qs.set("cidade", cidade);
+    if (convenio) qs.set("empresaConveniada", convenio);
+    Promise.all([api<Overview>(`/dashboard/overview?${qs}`), api<Perfil>("/dashboard/perfil")])
+      .then(([o, p]) => {
+        if (id !== requestId.current) return; // resposta de um filtro anterior: descarta
+        setData(o);
         setPerfil(p);
+        setError(null);
       })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }
-
-  function criarCampanhaAniversariantes() {
-    if (!engajamento) return;
-    navigate("/campaigns/new", {
-      state: {
-        presetClientIds: engajamento.aniversariantes.itens.map((i) => i.id),
-        presetLabel: `Aniversariantes de ${engajamento.aniversariantes.mesLabel}`,
-      },
-    });
-  }
+      .catch((e) => id === requestId.current && setError(e.message))
+      .finally(() => id === requestId.current && setLoading(false));
+  }, [days, cidade, convenio]);
 
   useEffect(() => {
     load();
-    // Near-real-time (Fase 3): sem WebSocket, mas o dashboard se atualiza sozinho a cada 30s.
-    const interval = setInterval(load, 30000);
+    // Atualização automática leve: só com a aba visível, para não gastar função serverless à toa.
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, REFRESH_MS);
     return () => clearInterval(interval);
-  }, []);
+  }, [load]);
 
-  if (error) return <div className="error-text">{error}</div>;
-  if (!summary || !usoMensal || !encerramentos || !engajamento || !perfil) return <div>Carregando...</div>;
+  if (error && !data) return <div className="error-text">{error}</div>;
+  if (!data) return <DashboardSkeleton />;
 
-  const mesAtualLabel = usoMensal.meses[usoMensal.meses.length - 1]?.label ?? "";
-  const temDadosEncerramento = encerramentos.meses.some((m) => m.encerrados > 0);
-  const temDadosUso = usoMensal.meses.some((m) => m.usados > 0);
+  const k = data.kpis;
+  const temFiltro = !!(cidade || convenio);
+  const utilizadoPct = k.limiteTotal > 0 ? (k.valorUtilizado / k.limiteTotal) * 100 : 0;
+  const sparkOf = (pick: (s: Overview["series"][number]) => number) => (data.historicoDisponivel ? data.series.map(pick) : []);
 
-  const limite = Number(summary.limiteTotalLiberado);
-  const utilizado = Number(summary.valorUtilizadoTotal);
-  const disponivel = Number(summary.saldoDisponivelTotal);
-  const percentUtilizado = limite > 0 ? (utilizado / limite) * 100 : 0;
-  const percentDisponivel = limite > 0 ? (disponivel / limite) * 100 : 0;
-  const percentAtivos = summary.totalClientes > 0 ? (summary.ativos / summary.totalClientes) * 100 : 0;
-  const percentInativos = summary.totalClientes > 0 ? (summary.inativos / summary.totalClientes) * 100 : 0;
-  const percentSemUso = summary.totalClientes > 0 ? (summary.clientesSemUso / summary.totalClientes) * 100 : 0;
-
-  const porFaixaOrdenado = [...summary.porFaixa].sort(
-    (a, b) => FAIXA_ORDER.indexOf(a.faixa) - FAIXA_ORDER.indexOf(b.faixa)
-  );
-  const quaseCompleto = summary.porFaixa.find((f) => f.faixa === "QUASE_COMPLETO")?.count || 0;
-
-  // Cidades com pelo menos 5 clientes e a menor taxa de ativação entre as top 10 — oportunidade
-  // de foco comercial/comunicação. Calculado no cliente a partir do ranking já trazido.
-  const cidadesBaixaAtivacao = summary.ranking_cidades
+  const faixas = FAIXA_ORDER.filter((f) => (k.faixas[f] ?? 0) > 0).map((f) => ({ faixa: f, label: FAIXA_LABELS[f], count: k.faixas[f] }));
+  const cidadesBaixaAtivacao = data.rankingCidades
     .filter((c) => c.count >= 5)
-    .map((c) => ({ ...c, taxa: c.count ? (c.ativos / c.count) * 100 : 0 }))
+    .map((c) => ({ ...c, taxa: (c.ativos / c.count) * 100 }))
     .sort((a, b) => a.taxa - b.taxa)
     .slice(0, 3);
 
   return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-        <h2 style={{ margin: 0 }}>Dashboard</h2>
-        <button className="btn secondary" onClick={load} disabled={loading} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <RefreshCw size={14} className={loading ? "spin" : undefined} />
-          Atualizar
-        </button>
+    <div className="pd">
+      <div className="pd-head">
+        <div>
+          <h2 style={{ margin: 0 }}>Visão geral da base</h2>
+          <p className="pd-sub">
+            {intFmt.format(k.totalClientes)} clientes{temFiltro ? " neste recorte" : ""} · última importação:{" "}
+            {data.ultimaAtualizacao ? new Date(data.ultimaAtualizacao).toLocaleString("pt-BR") : "—"}
+          </p>
+        </div>
+        <div className="pd-filters">
+          <div className="pd-seg" role="group" aria-label="Período">
+            {([7, 30, 90] as const).map((d) => (
+              <button key={d} type="button" className={days === d ? "on" : ""} aria-pressed={days === d} onClick={() => setDays(d)}>
+                {d} dias
+              </button>
+            ))}
+          </div>
+          <select className="pd-select" aria-label="Filtrar por cidade" value={cidade} onChange={(e) => setCidade(e.target.value)}>
+            <option value="">Todas as cidades</option>
+            {data.filtros.cidades.map((c) => (
+              <option key={c.valor} value={c.valor}>
+                {c.valor} ({c.count})
+              </option>
+            ))}
+          </select>
+          <select className="pd-select" aria-label="Filtrar por convênio" value={convenio} onChange={(e) => setConvenio(e.target.value)}>
+            <option value="">Todos os convênios</option>
+            {data.filtros.convenios.map((c) => (
+              <option key={c.valor} value={c.valor}>
+                {c.valor} ({c.count})
+              </option>
+            ))}
+          </select>
+          <button className="btn secondary pd-refresh" onClick={load} disabled={loading}>
+            <RefreshCw size={14} className={loading ? "spin" : undefined} /> Atualizar
+          </button>
+        </div>
       </div>
-      <p style={{ color: "var(--text-muted)", fontSize: 13, marginTop: 0, marginBottom: 20 }}>
-        Última atualização: {summary.ultimaAtualizacao ? new Date(summary.ultimaAtualizacao).toLocaleString("pt-BR") : "—"}
+
+      {error && <div className="error-text" style={{ marginBottom: 12 }}>{error}</div>}
+
+      {/* KPIs principais com tendência real (snapshots) */}
+      <div className="pd-kpis">
+        <Kpi
+          icon={<Wallet size={17} />}
+          color={COLOR.primary}
+          label="Limite total liberado"
+          value={currency.format(k.limiteTotal)}
+          sub="Disponibilizado à base"
+          delta={data.deltas.limiteTotal}
+          deltaKind="pct"
+          spark={sparkOf((s) => s.limiteTotal)}
+        />
+        <Kpi
+          icon={<TrendingUp size={17} />}
+          color={COLOR.accent}
+          label="Valor utilizado"
+          value={currency.format(k.valorUtilizado)}
+          sub={`${pct(utilizadoPct)} do limite consumido`}
+          delta={data.deltas.valorUtilizado}
+          deltaKind="pct"
+          spark={sparkOf((s) => s.valorUtilizado)}
+        />
+        <Kpi
+          icon={<PiggyBank size={17} />}
+          color={COLOR.success}
+          label="Saldo disponível"
+          value={currency.format(k.saldoDisponivel)}
+          sub={`${pct(k.limiteTotal > 0 ? (k.saldoDisponivel / k.limiteTotal) * 100 : 0)} ainda disponível`}
+          delta={data.deltas.saldoDisponivel}
+          deltaKind="pct"
+          spark={sparkOf((s) => s.saldoDisponivel)}
+        />
+        <Kpi
+          icon={<Users size={17} />}
+          color={COLOR.purple}
+          label="Clientes ativos"
+          value={intFmt.format(k.ativos)}
+          sub={`${pct(k.totalClientes > 0 ? (k.ativos / k.totalClientes) * 100 : 0)} da base`}
+          delta={data.deltas.ativos}
+          deltaKind="abs"
+          spark={sparkOf((s) => s.ativos)}
+        />
+      </div>
+      <p className="pd-note">
+        {temFiltro
+          ? "Com filtro ativo os números são do recorte; variações e histórico só existem para a base inteira."
+          : data.baseline
+            ? `Variação contra ${dayLabel(data.baseline.day)} (${data.baseline.dias} dia${data.baseline.dias === 1 ? "" : "s"} atrás${
+                data.baseline.dias < data.baseline.pedidoDias ? `, o histórico mais antigo disponível — pedido: ${data.baseline.pedidoDias} dias` : ""
+              }).`
+            : "Histórico iniciado hoje: as variações aparecem a partir do segundo dia."}
       </p>
 
-      <div className="grid-kpi-primary">
-        <KpiPrimary
-          icon={<Wallet size={17} color="var(--primary)" />}
-          iconBg="var(--primary-soft)"
-          label="Limite total liberado"
-          value={currency.format(limite)}
-          trend="Valor total disponibilizado à base"
-        />
-        <KpiPrimary
-          icon={<TrendingUp size={17} color="var(--accent)" />}
-          iconBg="var(--accent-soft)"
-          label="Valor utilizado"
-          value={currency.format(utilizado)}
-          trend={<><strong>{percentFmt(percentUtilizado)}</strong> do limite consumido</>}
-        />
-        <KpiPrimary
-          icon={<PiggyBank size={17} color="var(--success)" />}
-          iconBg="var(--success-soft)"
-          label="Saldo disponível"
-          value={currency.format(disponivel)}
-          trend={<><strong>{percentFmt(percentDisponivel)}</strong> ainda disponível — oportunidade de ativação</>}
-        />
-        <KpiPrimary
-          icon={<Users size={17} color="var(--success)" />}
-          iconBg="var(--success-soft)"
-          label="Clientes ativos"
-          value={summary.ativos}
-          trend={<><strong>{percentFmt(percentAtivos)}</strong> da base total</>}
-        />
+      <div className="pd-row">
+        <ChartCard data={data} tab={tab} setTab={setTab} temFiltro={temFiltro} />
+        <HealthCard saude={data.saude} />
       </div>
 
-      <div className="grid-kpi-secondary">
-        <KpiSecondary label="Total de clientes" value={summary.totalClientes} />
-        <KpiSecondary label="Novos (30 dias)" value={summary.novosClientes} />
-        <KpiSecondary label="Inativos" value={summary.inativos} sub={`${percentFmt(percentInativos)} da base`} />
-        <KpiSecondary label="Sem utilização" value={summary.clientesSemUso} sub={`${percentFmt(percentSemUso)} da base`} />
-        <KpiSecondary label="Ticket médio" value={currency.format(Number(summary.ticketMedio))} />
-        <KpiSecondary label="% no limite" value={`${summary.percentualClientes100}%`} />
+      <FrescorExtrato />
+
+      <div className="pd-row">
+        <OpportunityQueue cidade={cidade} convenio={convenio} />
       </div>
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <h3 style={{ marginTop: 0, marginBottom: 2 }}>Utilização do limite</h3>
-        <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 0, marginBottom: 12 }}>
-          {currency.format(utilizado)} utilizados de {currency.format(limite)} liberados
-        </p>
-        <div className="progress-track">
-          <div className="progress-fill" style={{ width: `${Math.min(100, percentUtilizado)}%` }} />
-        </div>
-        <div className="progress-legend">
-          <span className="progress-legend-item">
-            <span className="progress-legend-dot" style={{ background: "var(--accent)" }} />
-            Utilizado: <strong>{currency.format(utilizado)}</strong> ({percentFmt(percentUtilizado)})
-          </span>
-          <span className="progress-legend-item">
-            <span className="progress-legend-dot" style={{ background: "var(--surface-alt)", border: "1px solid var(--border)" }} />
-            Disponível: <strong>{currency.format(disponivel)}</strong> ({percentFmt(percentDisponivel)})
-          </span>
-          <span className="progress-legend-item">
-            Ticket médio: <strong>{currency.format(Number(summary.ticketMedio))}</strong>
-          </span>
-        </div>
+      <div className="pd-row">
+        <PerfisRendaCard cidade={cidade} convenio={convenio} />
       </div>
 
-      <div className="section-title">Oportunidades de ação</div>
-      <div className="grid-opportunities" style={{ marginBottom: 20 }}>
-        <Link to="/clients?faixaUso=NAO_UTILIZOU" className="opportunity-card">
-          <div className="kpi-value">{summary.clientesSemUso}</div>
-          <div className="kpi-label">Clientes sem uso</div>
-          <p>Nunca utilizaram o cartão — bons candidatos a campanha de ativação.</p>
-        </Link>
-        <Link to="/clients?statusConta=INATIVO" className="opportunity-card">
-          <div className="kpi-value">{summary.inativos}</div>
-          <div className="kpi-label">Clientes inativos</div>
-          <p>{percentFmt(percentInativos)} da base — reengajamento é a prioridade.</p>
-        </Link>
-        <Link to="/clients?faixaUso=QUASE_COMPLETO" className="opportunity-card">
-          <div className="kpi-value">{quaseCompleto}</div>
-          <div className="kpi-label">Quase no limite</div>
-          <p>Perto de esgotar o limite — considerar renovação/aumento.</p>
-        </Link>
-        <div className="opportunity-card" style={{ cursor: "default" }}>
-          <div className="kpi-label" style={{ marginBottom: 8 }}>Cidades com baixa ativação</div>
-          {cidadesBaixaAtivacao.length === 0 ? (
-            <p>Sem dados suficientes por cidade ainda.</p>
-          ) : (
-            <div className="opportunity-city-list">
-              {cidadesBaixaAtivacao.map((c) => (
-                <Link key={c.cidade} to={`/clients?cidade=${encodeURIComponent(c.cidade)}&statusConta=INATIVO`} className="opportunity-city-row">
-                  <span>{c.cidade} ({c.count})</span>
-                  <span>{percentFmt(c.taxa)} ativos</span>
-                </Link>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="card chart-card" style={{ marginBottom: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
-          <h3 style={{ margin: 0 }}>Taxa de uso mensal da base</h3>
-          {temDadosUso && (
-            <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
-              {mesAtualLabel}: <strong style={{ color: "var(--text)", fontSize: 20 }}>{usoMensal.taxaMesAtual}%</strong> da base usou o limite
-            </span>
-          )}
-        </div>
-        <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2, marginBottom: 12 }}>
-          % de clientes cuja última utilização registrada caiu em cada mês (últimos 12 meses).
-        </p>
-        {!temDadosUso ? (
-          <div className="chart-empty-state">
-            <strong>Ainda não há histórico de uso suficiente para exibir a evolução mensal</strong>
-            <span>
-              Essa taxa depende da data de ativação/última utilização de cada cliente. Reimporte a
-              planilha com esse dado atualizado, ou sincronize as transações, para o gráfico passar
-              a mostrar tendência.
-            </span>
+      <div className="pd-row">
+        {cidadesBaixaAtivacao.length > 0 && (
+          <div className="card pd-card pd-grow-1">
+            <h3>Cidades com menor ativação</h3>
+            <p className="pd-card-sub">Cidades com pelo menos 5 clientes e a menor taxa de ativos.</p>
+            {cidadesBaixaAtivacao.map((c) => (
+              <Link key={c.cidade} to={`/clients?cidade=${encodeURIComponent(c.cidade)}&statusConta=INATIVO`} className="opportunity-city-row">
+                <span>
+                  {c.cidade} ({c.count})
+                </span>
+                <span>{pct(c.taxa)} ativos</span>
+              </Link>
+            ))}
           </div>
-        ) : (
-          <ResponsiveContainer width="100%" height={240}>
-            <AreaChart data={usoMensal.meses} margin={{ top: 8, right: 12, left: -18, bottom: 0 }}>
-              <defs>
-                <linearGradient id="usoGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={CHART_COLOR} stopOpacity={0.35} />
-                  <stop offset="100%" stopColor={CHART_COLOR} stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid stroke={CHART_GRID} vertical={false} />
-              <XAxis dataKey="label" tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={{ stroke: CHART_GRID }} tickLine={false} />
-              <YAxis
-                tick={{ fill: CHART_MUTED, fontSize: 12 }}
-                axisLine={false}
-                tickLine={false}
-                width={40}
-                unit="%"
-              />
-              <Tooltip content={<ChartTooltip suffix="% da base" countKey="usados" countLabel="clientes" />} />
-              <Area
-                type="monotone"
-                dataKey="percent"
-                stroke={CHART_COLOR}
-                strokeWidth={2}
-                fill="url(#usoGradient)"
-                dot={{ r: 3, fill: CHART_COLOR, strokeWidth: 0 }}
-                activeDot={{ r: 5, fill: CHART_COLOR, strokeWidth: 2, stroke: "#0f1420" }}
-                animationDuration={900}
-                animationEasing="ease-out"
-              />
-            </AreaChart>
-          </ResponsiveContainer>
         )}
-      </div>
 
-      <div className="card chart-card" style={{ marginBottom: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
-          <h3 style={{ margin: 0 }}>Taxa de cancelamento mensal</h3>
-          {temDadosEncerramento && (
-            <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
-              {mesAtualLabel}: <strong style={{ color: "var(--danger)", fontSize: 20 }}>{encerramentos.taxaMesAtual}%</strong> da base encerrou a conta
-            </span>
-          )}
-        </div>
-        <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2, marginBottom: 12 }}>
-          % de clientes cuja conta foi encerrada em cada mês (últimos 12 meses). Só disponível para
-          clientes importados no formato "Cartões e contas" / "SaldoCartao".
-        </p>
-        {!temDadosEncerramento ? (
-          <div className="chart-empty-state">
-            <strong>Nenhum encerramento de conta registrado ainda na base</strong>
-            <span>Assim que houver cancelamentos importados, essa evolução aparece aqui.</span>
-          </div>
-        ) : (
-          <>
-            <ResponsiveContainer width="100%" height={220}>
-              <AreaChart data={encerramentos.meses} margin={{ top: 8, right: 12, left: -18, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="encerramentoGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor={CHART_DANGER} stopOpacity={0.3} />
-                    <stop offset="100%" stopColor={CHART_DANGER} stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid stroke={CHART_GRID} vertical={false} />
-                <XAxis dataKey="label" tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={{ stroke: CHART_GRID }} tickLine={false} />
-                <YAxis
-                  tick={{ fill: CHART_MUTED, fontSize: 12 }}
-                  axisLine={false}
-                  tickLine={false}
-                  width={40}
-                  unit="%"
-                />
-                <Tooltip content={<ChartTooltip suffix="% da base" countKey="encerrados" countLabel="contas" />} />
-                <Area
-                  type="monotone"
-                  dataKey="percent"
-                  stroke={CHART_DANGER}
-                  strokeWidth={2}
-                  fill="url(#encerramentoGradient)"
-                  dot={{ r: 3, fill: CHART_DANGER, strokeWidth: 0 }}
-                  activeDot={{ r: 5, fill: CHART_DANGER, strokeWidth: 2, stroke: "#0f1420" }}
-                  animationDuration={900}
-                  animationEasing="ease-out"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-            {encerramentos.motivos.length > 0 && (
-              <div style={{ marginTop: 10 }}>
-                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Motivos mais comuns: </span>
-                {encerramentos.motivos.map((m) => (
-                  <span key={m.motivo} className="badge" style={{ marginRight: 6 }}>
-                    {m.motivo} ({m.count})
+        <div className="card pd-card pd-grow-1">
+          <h3>Ativação da base</h3>
+          <p className="pd-card-sub">Onde a base perde força.</p>
+          {data.funil.map((f) => {
+            const base = data.funil[0]?.count || 0;
+            const share = base > 0 ? (f.count / base) * 100 : 0;
+            return (
+              <div key={f.key} className="pd-bar-row">
+                <div className="pd-bar-head">
+                  <span>{f.label}</span>
+                  <span>
+                    {intFmt.format(f.count)} · {pct(share)}
                   </span>
-                ))}
+                </div>
+                <div className="pd-track">
+                  <div className="pd-fill" style={{ width: `${Math.max(share, f.count > 0 ? 1.5 : 0)}%`, background: f.key === "ativos" ? COLOR.success : COLOR.primary }} />
+                </div>
               </div>
-            )}
-          </>
-        )}
-      </div>
-
-      <div className="section-title">Engajamento da base</div>
-      <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: 16, marginBottom: 16 }}>
-        <div className="card chart-card">
-          <h3 style={{ marginBottom: 2 }}>Níveis de engajamento de uso do recurso</h3>
-          <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2, marginBottom: 12 }}>
-            Cruza status da conta com % de uso do limite — quanto mais alto o nível, mais a base
-            está de fato usando o benefício.
-          </p>
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart
-              data={engajamento.niveis}
-              layout="vertical"
-              margin={{ top: 4, right: 20, left: 8, bottom: 4 }}
-              barCategoryGap={10}
-            >
-              <CartesianGrid stroke={CHART_GRID} horizontal={false} />
-              <XAxis type="number" tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={{ stroke: CHART_GRID }} tickLine={false} allowDecimals={false} />
-              <YAxis type="category" dataKey="label" tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={false} tickLine={false} width={140} />
-              <Tooltip content={<ChartTooltip countLabel="clientes" />} />
-              <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={22} animationDuration={700} animationEasing="ease-out">
-                {engajamento.niveis.map((n) => (
-                  <Cell key={n.nivel} fill={n.nivel === "bloqueado" ? CHART_DANGER : CHART_COLOR} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+            );
+          })}
         </div>
 
-        <div className="card">
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
-            <Cake size={18} color="var(--accent)" />
-            <h3 style={{ margin: 0 }}>Aniversariantes de {engajamento.aniversariantes.mesLabel}</h3>
-          </div>
-          <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2, marginBottom: 12 }}>
-            <strong style={{ color: "var(--text)" }}>{engajamento.aniversariantes.total}</strong> clientes fazem
-            aniversário este mês — boa oportunidade de campanha de relacionamento.
-          </p>
-          {engajamento.aniversariantes.itens.length === 0 ? (
-            <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
-              Sem data de nascimento cadastrada na base ainda (só disponível para clientes
-              importados no formato "SaldoCartao").
-            </p>
+        <div className="card pd-card pd-grow-1">
+          <h3>Resultado das campanhas</h3>
+          <p className="pd-card-sub">Últimos {data.periodo.dias} dias, sem campanhas de teste.</p>
+          {!data.campanhas.temDados ? (
+            <div className="pd-empty">
+              <strong>Nenhuma campanha enviada no período</strong>
+              <span>Quando houver envios, entrega, resposta e conversão aparecem aqui.</span>
+              <Link to="/campaigns/new" className="btn" style={{ textDecoration: "none" }}>
+                Nova campanha
+              </Link>
+            </div>
           ) : (
             <>
-              <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 12 }}>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Dia</th>
-                      <th>Nome</th>
-                      <th>Cidade</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {engajamento.aniversariantes.itens.map((a) => (
-                      <tr key={a.id}>
-                        <td>{a.dia}</td>
-                        <td>
-                          <Link to={`/clients/${a.id}`}>{a.nome}</Link>
-                        </td>
-                        <td>{a.cidade || "—"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="pd-mini-grid">
+                <Mini label="Enviadas" value={intFmt.format(data.campanhas.enviadas)} />
+                <Mini label="Entregues" value={intFmt.format(data.campanhas.entregues)} sub={data.campanhas.taxaEntrega !== null ? pct(data.campanhas.taxaEntrega) : undefined} />
+                <Mini label="Respostas" value={intFmt.format(data.campanhas.respondidas)} sub={data.campanhas.taxaResposta !== null ? pct(data.campanhas.taxaResposta) : undefined} />
+                <Mini label="Conversões" value={intFmt.format(data.campanhas.convertidas)} sub={data.campanhas.taxaConversao !== null ? pct(data.campanhas.taxaConversao) : undefined} />
               </div>
-              <button className="btn" onClick={criarCampanhaAniversariantes} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <Megaphone size={14} />
-                Criar campanha para aniversariantes
-              </button>
+              <div className="pd-kv">
+                <span>Valor convertido</span>
+                <strong>{currency.format(data.campanhas.valorConvertido)}</strong>
+              </div>
+              <div className="pd-kv">
+                <span>Custo de envio</span>
+                <strong>{currency.format(data.campanhas.custo)}</strong>
+              </div>
             </>
           )}
         </div>
       </div>
 
-      <div className="section-title">Perfil demográfico e financeiro</div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
-        <div className="card chart-card">
-          <h3>Faixa etária</h3>
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={perfil.faixaEtaria} margin={{ top: 4, right: 12, left: -18, bottom: 4 }}>
-              <CartesianGrid stroke={CHART_GRID} vertical={false} />
-              <XAxis dataKey="faixa" tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={{ stroke: CHART_GRID }} tickLine={false} />
-              <YAxis tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={false} tickLine={false} width={36} allowDecimals={false} />
-              <Tooltip content={<ChartTooltip countLabel="clientes" />} />
-              <Bar dataKey="count" radius={[4, 4, 0, 0]} maxBarSize={34} fill={CHART_COLOR} animationDuration={700} animationEasing="ease-out" />
-            </BarChart>
-          </ResponsiveContainer>
+      <div className="pd-row">
+        <div className="card pd-card pd-grow-1">
+          <h3>Insights</h3>
+          <p className="pd-card-sub">Gerados automaticamente a partir dos dados acima.</p>
+          <div className="pd-insights">
+            {data.insights.map((i, idx) => (
+              <div key={idx} className={`pd-insight ${i.tipo}`}>
+                {i.tipo === "alerta" ? <AlertTriangle size={16} /> : <Lightbulb size={16} />}
+                <span>{i.texto}</span>
+              </div>
+            ))}
+            {data.insights.length === 0 && <span className="pd-card-sub">Sem insights no momento.</span>}
+          </div>
         </div>
 
-        <div className="card">
-          <h3 style={{ marginBottom: 12 }}>Sexo</h3>
-          {perfil.porSexo.length === 0 ? (
-            <p style={{ color: "var(--text-muted)", fontSize: 13 }}>Sem dado cadastrado ainda.</p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {perfil.porSexo.map((s) => {
-                const totalSexo = perfil.porSexo.reduce((acc, x) => acc + x.count, 0);
-                const pct = totalSexo ? (s.count / totalSexo) * 100 : 0;
-                return (
-                  <div key={s.sexo}>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
-                      <span>{s.sexo}</span>
-                      <span style={{ color: "var(--text-muted)" }}>{s.count} ({percentFmt(pct)})</span>
-                    </div>
-                    <div className="progress-track" style={{ height: 8 }}>
-                      <div className="progress-fill" style={{ width: `${pct}%`, background: "var(--primary)" }} />
-                    </div>
-                  </div>
-                );
-              })}
+        <div className="card pd-card pd-grow-1">
+          <h3>Cobertura dos dados</h3>
+          <p className="pd-card-sub">O que está preenchido na base e o que cada campo libera.</p>
+          {data.cobertura.map((c) => (
+            <div key={c.key} className="pd-bar-row">
+              <div className="pd-bar-head">
+                <span>{c.label}</span>
+                <span>{pct(c.pct)}</span>
+              </div>
+              <div className="pd-track">
+                <div className="pd-fill" style={{ width: `${c.pct}%`, background: c.pct >= 80 ? COLOR.success : c.pct >= 30 ? COLOR.warning : COLOR.danger }} />
+              </div>
+              {c.pct < 80 && <div className="pd-hint">Libera: {c.libera}</div>}
             </div>
-          )}
+          ))}
+          <Link to="/imports" className="btn secondary" style={{ textDecoration: "none", marginTop: 12, display: "inline-block" }}>
+            Importar / completar dados
+          </Link>
         </div>
 
-        <div className="card chart-card">
-          <h3>Perfil de renda</h3>
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={perfil.faixaRenda} layout="vertical" margin={{ top: 4, right: 20, left: 8, bottom: 4 }} barCategoryGap={8}>
-              <CartesianGrid stroke={CHART_GRID} horizontal={false} />
-              <XAxis type="number" tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={{ stroke: CHART_GRID }} tickLine={false} allowDecimals={false} />
-              <YAxis type="category" dataKey="faixa" tick={{ fill: CHART_MUTED, fontSize: 11 }} axisLine={false} tickLine={false} width={110} />
-              <Tooltip content={<ChartTooltip countLabel="clientes" />} />
-              <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={18} fill={CHART_COLOR} animationDuration={700} animationEasing="ease-out" />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 }}>
-        <div className="card chart-card">
+        <div className="card pd-card pd-grow-1">
           <h3>Clientes por faixa de utilização</h3>
-          <ResponsiveContainer width="100%" height={280}>
-            <BarChart
-              data={porFaixaOrdenado}
-              layout="vertical"
-              margin={{ top: 4, right: 20, left: 8, bottom: 4 }}
-              barCategoryGap={10}
-            >
-              <CartesianGrid stroke={CHART_GRID} horizontal={false} />
-              <XAxis type="number" tick={{ fill: CHART_MUTED, fontSize: 12 }} axisLine={{ stroke: CHART_GRID }} tickLine={false} allowDecimals={false} />
-              <YAxis
-                type="category"
-                dataKey="label"
-                tick={{ fill: CHART_MUTED, fontSize: 12 }}
-                axisLine={false}
-                tickLine={false}
-                width={120}
-              />
-              <Tooltip content={<ChartTooltip countLabel="clientes" />} />
-              <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={22} animationDuration={700} animationEasing="ease-out">
-                {porFaixaOrdenado.map((f) => (
-                  <Cell key={f.faixa} fill={CHART_COLOR} />
+          <ResponsiveContainer width="100%" height={Math.max(160, faixas.length * 34)}>
+            <BarChart data={faixas} layout="vertical" margin={{ top: 4, right: 20, left: 8, bottom: 4 }} barCategoryGap={10}>
+              <CartesianGrid stroke={GRID} horizontal={false} />
+              <XAxis type="number" tick={{ fill: MUTED, fontSize: 12 }} axisLine={{ stroke: GRID }} tickLine={false} allowDecimals={false} />
+              <YAxis type="category" dataKey="label" tick={{ fill: MUTED, fontSize: 12 }} axisLine={false} tickLine={false} width={120} />
+              <Tooltip content={<ChartTooltip countLabel="clientes" />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
+              <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={20} animationDuration={600}>
+                {faixas.map((f) => (
+                  <Cell key={f.faixa} fill={f.faixa === "SEM_USO" ? COLOR.warning : COLOR.primary} />
                 ))}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
-
-        <div className="card chart-card">
-          <h3>Ranking de cidades</h3>
-          {summary.ranking_cidades.length === 0 ? (
-            <p style={{ color: "var(--text-muted)", fontSize: 13 }}>Sem dados de cidade na base ainda.</p>
-          ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Cidade</th>
-                    <th>Clientes</th>
-                    <th>Ativos</th>
-                    <th>Taxa</th>
-                    <th>Valor utilizado</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {summary.ranking_cidades.map((c) => (
-                    <tr key={c.cidade}>
-                      <td>
-                        <Link to={`/clients?cidade=${encodeURIComponent(c.cidade)}`}>{c.cidade}</Link>
-                      </td>
-                      <td>{c.count}</td>
-                      <td>{c.ativos}</td>
-                      <td>{c.count ? percentFmt((c.ativos / c.count) * 100) : "—"}</td>
-                      <td>{currency.format(c.valorUtilizado)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        <div className="card chart-card">
-          <h3 style={{ marginBottom: 2 }}>Ranking de secretarias/convênios</h3>
-          <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2, marginBottom: 10 }}>
-            Convênios (ex.: secretarias de folha de pagamento) que mais usam o app.
-          </p>
-          {summary.ranking_secretarias.length === 0 ? (
-            <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
-              Sem dado de convênio/secretaria ainda (só disponível para clientes importados no
-              formato "Cartões e contas"/"SaldoCartao").
-            </p>
-          ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Secretaria/convênio</th>
-                    <th>Clientes</th>
-                    <th>Ativos</th>
-                    <th>Taxa</th>
-                    <th>Valor utilizado</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {summary.ranking_secretarias.map((s) => (
-                    <tr key={s.empresaConveniada}>
-                      <td>
-                        <Link to={`/clients?empresaConveniada=${encodeURIComponent(s.empresaConveniada)}`}>
-                          {s.empresaConveniada}
-                        </Link>
-                      </td>
-                      <td>{s.count}</td>
-                      <td>{s.ativos}</td>
-                      <td>{s.count ? percentFmt((s.ativos / s.count) * 100) : "—"}</td>
-                      <td>{currency.format(s.valorUtilizado)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
       </div>
+
+      <div className="pd-row">
+        <RankingCard
+          titulo="Ranking de cidades"
+          colunaNome="Cidade"
+          linhas={data.rankingCidades.map((r) => ({ nome: r.cidade, count: r.count, ativos: r.ativos, valor: r.valorUtilizado, link: `/clients?cidade=${encodeURIComponent(r.cidade)}` }))}
+          vazio="Nenhum cliente tem cidade preenchida ainda. Complete a coluna de cidade na planilha para liberar este ranking."
+        />
+        <RankingCard
+          titulo="Ranking de secretarias e convênios"
+          colunaNome="Secretaria / convênio"
+          linhas={data.rankingSecretarias.map((r) => ({ nome: r.empresaConveniada, count: r.count, ativos: r.ativos, valor: r.valorUtilizado, link: `/clients?empresaConveniada=${encodeURIComponent(r.empresaConveniada)}` }))}
+          vazio="Sem dado de convênio ainda. Disponível para clientes importados no formato “Cartões e contas”."
+        />
+      </div>
+
+      {perfil && (
+        <div className="pd-row">
+          <div className="card pd-card pd-grow-1">
+            <h3>Faixa etária</h3>
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={perfil.faixaEtaria} margin={{ top: 4, right: 12, left: -18, bottom: 4 }}>
+                <CartesianGrid stroke={GRID} vertical={false} />
+                <XAxis dataKey="faixa" tick={{ fill: MUTED, fontSize: 12 }} axisLine={{ stroke: GRID }} tickLine={false} />
+                <YAxis tick={{ fill: MUTED, fontSize: 12 }} axisLine={false} tickLine={false} width={36} allowDecimals={false} />
+                <Tooltip content={<ChartTooltip countLabel="clientes" />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
+                <Bar dataKey="count" radius={[4, 4, 0, 0]} maxBarSize={34} fill={COLOR.primary} animationDuration={600} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="card pd-card pd-grow-1">
+            <h3>Sexo</h3>
+            {perfil.porSexo.length === 0 ? (
+              <p className="pd-card-sub">Sem dado cadastrado ainda.</p>
+            ) : (
+              perfil.porSexo.map((s) => {
+                const tot = perfil.porSexo.reduce((a, x) => a + x.count, 0);
+                const share = tot ? (s.count / tot) * 100 : 0;
+                return (
+                  <div key={s.sexo} className="pd-bar-row">
+                    <div className="pd-bar-head">
+                      <span>{s.sexo}</span>
+                      <span>
+                        {intFmt.format(s.count)} · {pct(share)}
+                      </span>
+                    </div>
+                    <div className="pd-track">
+                      <div className="pd-fill" style={{ width: `${share}%`, background: COLOR.primary }} />
+                    </div>
+                  </div>
+                );
+              })
+            )}
+            <div className="pd-kv" style={{ marginTop: 12 }}>
+              <span>
+                <Cake size={14} style={{ verticalAlign: "-2px" }} /> Aniversariantes do mês
+              </span>
+              <strong>{intFmt.format(data.oportunidades.aniversariantes)}</strong>
+            </div>
+          </div>
+          {perfil.faixaRenda.some((r) => r.faixa !== "desconhecida") && (
+            <div className="card pd-card pd-grow-1">
+              <h3>Perfil de renda</h3>
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={perfil.faixaRenda} layout="vertical" margin={{ top: 4, right: 20, left: 8, bottom: 4 }} barCategoryGap={8}>
+                  <CartesianGrid stroke={GRID} horizontal={false} />
+                  <XAxis type="number" tick={{ fill: MUTED, fontSize: 12 }} axisLine={{ stroke: GRID }} tickLine={false} allowDecimals={false} />
+                  <YAxis type="category" dataKey="faixa" tick={{ fill: MUTED, fontSize: 11 }} axisLine={false} tickLine={false} width={110} />
+                  <Tooltip content={<ChartTooltip countLabel="clientes" />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
+                  <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={18} fill={COLOR.primary} animationDuration={600} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function KpiPrimary({
+/* ---------- Blocos ---------- */
+
+function Kpi({
   icon,
-  iconBg,
+  color,
   label,
   value,
-  trend,
+  sub,
+  delta,
+  deltaKind,
+  spark,
 }: {
   icon: React.ReactNode;
-  iconBg: string;
+  color: string;
   label: string;
-  value: string | number;
-  trend: React.ReactNode;
+  value: string;
+  sub: string;
+  delta: Delta;
+  deltaKind: "pct" | "abs";
+  spark: number[];
 }) {
   return (
-    <div className="kpi-card-primary kpi-animate">
-      <div className="kpi-icon" style={{ background: iconBg }}>
-        {icon}
+    <div className="pd-kpi kpi-animate">
+      <div className="pd-kpi-top">
+        <span className="pd-kpi-icon" style={{ color, background: `${color}22` }}>
+          {icon}
+        </span>
+        <span className="pd-kpi-label">{label}</span>
+        <DeltaChip delta={delta} kind={deltaKind} />
       </div>
-      <div>
-        <div className="kpi-value">{value}</div>
-        <div className="kpi-label">{label}</div>
+      <div className="pd-kpi-body">
+        <div>
+          <div className="pd-kpi-value">{value}</div>
+          <div className="pd-kpi-sub">{sub}</div>
+        </div>
+        <Sparkline values={spark} color={color} />
       </div>
-      <div className="kpi-trend">{trend}</div>
     </div>
   );
 }
 
-function KpiSecondary({ label, value, sub }: { label: string; value: string | number; sub?: string }) {
+function DeltaChip({ delta, kind }: { delta: Delta; kind: "pct" | "abs" }) {
+  if (!delta || (kind === "pct" && delta.pct === null) || delta.abs === 0) {
+    return <span className="pd-delta flat">{delta && delta.abs === 0 ? "estável" : "—"}</span>;
+  }
+  const up = delta.abs > 0;
+  const text = kind === "pct" ? pct(Math.abs(delta.pct as number)) : intFmt.format(Math.abs(delta.abs));
   return (
-    <div className="kpi-card-secondary kpi-animate">
-      <div className="kpi-value">{value}</div>
-      <div className="kpi-label">{label}</div>
-      {sub && <div className="kpi-trend" style={{ marginTop: 4 }}>{sub}</div>}
+    <span className={`pd-delta ${up ? "up" : "down"}`}>
+      {up ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />}
+      {text}
+    </span>
+  );
+}
+
+/** Mini-gráfico de tendência; sem pelo menos 2 pontos reais não desenha nada (nada inventado). */
+function Sparkline({ values, color }: { values: number[]; color: string }) {
+  if (values.length < 2) return <span className="pd-spark-empty">sem histórico</span>;
+  const w = 112;
+  const h = 40;
+  const mn = Math.min(...values);
+  const mx = Math.max(...values);
+  const rng = mx - mn || 1;
+  const pts = values.map((v, i) => [(i / (values.length - 1)) * w, h - 4 - ((v - mn) / rng) * (h - 10)]);
+  const line = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(" ");
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
+      <path d={`${line} L${w} ${h} L0 ${h} Z`} fill={color} fillOpacity={0.14} />
+      <path d={line} stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ChartCard({ data, tab, setTab, temFiltro }: { data: Overview; tab: ChartTab; setTab: (t: ChartTab) => void; temFiltro: boolean }) {
+  const cfg: Record<ChartTab, { title: string; sub: string; key: keyof Overview["series"][number]; suffix: string; color: string; countKey?: keyof Overview["series"][number]; countLabel?: string }> = {
+    uso: { title: "Uso do limite", sub: "% do limite liberado que está em uso, dia a dia", key: "usoLimitePct", suffix: "%", color: COLOR.primary },
+    ativos: { title: "Clientes ativos", sub: "% da base com conta ativa, dia a dia", key: "ativosPct", suffix: "%", color: COLOR.success, countKey: "ativos", countLabel: "ativos" },
+    encerramentos: { title: "Encerramentos", sub: "Contas encerradas por dia", key: "encerradosNoDia", suffix: "", color: COLOR.danger },
+    saude: { title: "Nota de saúde", sub: "Evolução da nota de 0 a 100", key: "score", suffix: "", color: COLOR.warning },
+  };
+  const c = cfg[tab];
+  const points = data.series.map((s) => ({ ...s, label: dayLabel(s.day) }));
+  const hasHistory = data.historicoDisponivel && points.length >= 2;
+
+  return (
+    <div className="card pd-card pd-grow-2">
+      <div className="pd-card-head">
+        <div>
+          <h3>{c.title}</h3>
+          <p className="pd-card-sub" style={{ marginBottom: 0 }}>
+            {c.sub}
+          </p>
+        </div>
+        <div className="pd-seg" role="tablist" aria-label="Métrica do gráfico">
+          {CHART_TABS.map((t) => (
+            <button key={t.key} type="button" role="tab" aria-selected={tab === t.key} className={tab === t.key ? "on" : ""} onClick={() => setTab(t.key)}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {!hasHistory ? (
+        <div className="chart-empty-state" style={{ height: 240 }}>
+          <strong>{temFiltro ? "Histórico indisponível com filtro" : "O histórico está começando"}</strong>
+          <span>
+            {temFiltro
+              ? "As fotos diárias guardam a base inteira. Remova o filtro de cidade/convênio para ver a evolução."
+              : `Uma foto dos números é gravada todo dia. ${points.length === 1 ? `A primeira é de ${dayLabel(points[0].day)}. ` : ""}A evolução aparece a partir do segundo dia, sem dados inventados.`}
+          </span>
+        </div>
+      ) : (
+        <ResponsiveContainer width="100%" height={250}>
+          <AreaChart data={points} margin={{ top: 10, right: 12, left: -14, bottom: 0 }}>
+            <defs>
+              <linearGradient id="pdArea" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={c.color} stopOpacity={0.35} />
+                <stop offset="100%" stopColor={c.color} stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid stroke={GRID} vertical={false} />
+            <XAxis dataKey="label" tick={{ fill: MUTED, fontSize: 12 }} axisLine={{ stroke: GRID }} tickLine={false} minTickGap={24} />
+            <YAxis tick={{ fill: MUTED, fontSize: 12 }} axisLine={false} tickLine={false} width={44} unit={c.suffix} domain={tab === "saude" ? [0, 100] : [0, "auto"]} />
+            <Tooltip content={<ChartTooltip suffix={c.suffix} countKey={c.countKey as string | undefined} countLabel={c.countLabel} />} />
+            <Area type="monotone" dataKey={c.key as string} stroke={c.color} strokeWidth={2.5} fill="url(#pdArea)" dot={{ r: 3, fill: c.color, strokeWidth: 0 }} activeDot={{ r: 5, fill: c.color, stroke: "#0b0f19", strokeWidth: 2 }} animationDuration={700} connectNulls />
+          </AreaChart>
+        </ResponsiveContainer>
+      )}
     </div>
   );
 }
 
-/** Tooltip minimalista compartilhado pelos gráficos, no mesmo tom visual dos cards do app. */
+function HealthCard({ saude }: { saude: Overview["saude"] }) {
+  if (!saude) {
+    return (
+      <div className="card pd-card pd-grow-1">
+        <h3>Saúde da base</h3>
+        <div className="pd-empty">
+          <strong>Sem clientes para calcular</strong>
+          <span>A nota aparece assim que houver clientes neste recorte.</span>
+        </div>
+      </div>
+    );
+  }
+  const color = saude.band === "SAUDAVEL" ? COLOR.success : saude.band === "ATENCAO" ? COLOR.warning : COLOR.danger;
+  const C = 2 * Math.PI * 54;
+  return (
+    <div className="card pd-card pd-grow-1">
+      <h3>Saúde da base</h3>
+      <div className="pd-health">
+        <div className="pd-ring">
+          <svg viewBox="0 0 132 132" width="132" height="132" fill="none" role="img" aria-label={`Nota de saúde da base: ${saude.score} de 100, ${saude.bandLabel}`}>
+            <circle cx="66" cy="66" r="54" stroke="#232b3d" strokeWidth="12" />
+            <circle cx="66" cy="66" r="54" stroke={color} strokeWidth="12" strokeLinecap="round" strokeDasharray={`${(C * saude.score) / 100} ${C}`} transform="rotate(-90 66 66)" style={{ transition: "stroke-dasharray 0.6s ease" }} />
+          </svg>
+          <div className="pd-ring-center">
+            <strong>{saude.score}</strong>
+            <span>de 100</span>
+          </div>
+        </div>
+        <div>
+          <div className="pd-band" style={{ color }}>
+            {saude.bandLabel}
+          </div>
+          <DeltaChip delta={saude.delta} kind="abs" />
+          <p className="pd-card-sub" style={{ margin: "6px 0 0" }}>
+            {saude.modelo === "USO_REAL"
+              ? "Nota por uso real do cartão (extrato de compras): alcance, uso recente, recorrência, retenção e regularidade."
+              : "Nota estimada pelo saldo: ativação, alcance, uso do limite e regularidade."}
+          </p>
+          {saude.aviso && (
+            <p className="pd-hint" style={{ color: COLOR.warning }}>
+              {saude.aviso} <Link to="/imports">Importações</Link>
+            </p>
+          )}
+        </div>
+      </div>
+      <div className="pd-label" style={{ marginTop: 14 }}>
+        Como a nota é composta
+      </div>
+      {saude.components.map((c) => (
+        <div key={c.key} className="pd-bar-row">
+          <div className="pd-bar-head">
+            <span>
+              {c.label} <span className="pd-hint" style={{ display: "inline" }}>({c.peso}%)</span>
+            </span>
+            <span>
+              {pct(c.valor)}
+              {c.meta !== null ? ` · meta ${c.meta}%` : ""}
+            </span>
+          </div>
+          <div className="pd-track">
+            <div className="pd-fill" style={{ width: `${c.nota}%`, background: c.nota >= 70 ? COLOR.success : c.nota >= 40 ? COLOR.warning : COLOR.danger }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RankingCard({ titulo, colunaNome, linhas, vazio }: { titulo: string; colunaNome: string; linhas: { nome: string; count: number; ativos: number; valor: number; link: string }[]; vazio: string }) {
+  return (
+    <div className="card pd-card pd-grow-1">
+      <h3>{titulo}</h3>
+      {linhas.length === 0 ? (
+        <div className="pd-empty">
+          <strong>Ainda sem dados</strong>
+          <span>{vazio}</span>
+          <Link to="/imports" className="btn secondary" style={{ textDecoration: "none" }}>
+            Importar planilha
+          </Link>
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table>
+            <thead>
+              <tr>
+                <th>{colunaNome}</th>
+                <th>Clientes</th>
+                <th>Ativos</th>
+                <th>Taxa</th>
+                <th>Valor utilizado</th>
+              </tr>
+            </thead>
+            <tbody>
+              {linhas.map((l) => (
+                <tr key={l.nome}>
+                  <td>
+                    <Link to={l.link}>{l.nome}</Link>
+                  </td>
+                  <td>{intFmt.format(l.count)}</td>
+                  <td>{intFmt.format(l.ativos)}</td>
+                  <td>{l.count ? pct((l.ativos / l.count) * 100) : "—"}</td>
+                  <td>{currency.format(l.valor)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Mini({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="pd-mini">
+      <strong>{value}</strong>
+      <span>{label}</span>
+      {sub && <em>{sub}</em>}
+    </div>
+  );
+}
+
+function DashboardSkeleton() {
+  return (
+    <div className="pd" aria-busy="true" aria-label="Carregando dashboard">
+      <div className="pd-skel" style={{ height: 40, width: 320, marginBottom: 20 }} />
+      <div className="pd-kpis">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="pd-skel" style={{ height: 110 }} />
+        ))}
+      </div>
+      <div className="pd-row" style={{ marginTop: 16 }}>
+        <div className="pd-skel pd-grow-2" style={{ height: 330 }} />
+        <div className="pd-skel pd-grow-1" style={{ height: 330 }} />
+      </div>
+    </div>
+  );
+}
+
+/** Tooltip minimalista compartilhado pelos gráficos, no tom visual dos cards do app. */
 function ChartTooltip({
   active,
   payload,
@@ -687,7 +788,7 @@ function ChartTooltip({
   const sub = countKey && point[countKey] !== undefined ? `${point[countKey]} ${countLabel ?? ""}`.trim() : null;
   return (
     <div className="chart-tooltip">
-      <div className="chart-tooltip-label">{label}</div>
+      <div className="chart-tooltip-label">{label ?? point.label}</div>
       <div className="chart-tooltip-value">
         {value}
         {suffix ? ` ${suffix}` : countLabel && !countKey ? ` ${countLabel}` : ""}

@@ -1,6 +1,8 @@
+import FrescorExtrato from "../../components/FrescorExtrato";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../../api/client";
+import { FAIXA_OPTIONS } from "../../utils/faixas";
 
 const STEPS = ["Nome/objetivo", "Público", "Canal & mensagem", "Agenda & throttling", "Confirmação"];
 
@@ -21,6 +23,10 @@ interface Segment {
 interface PresetAudienceState {
   presetClientIds?: string[];
   presetLabel?: string;
+  // Texto e canal sugeridos pela tela de origem (ex.: oportunidade do Dashboard, campanha por
+  // categoria de comércio) — o operador ainda pode editar tudo no assistente.
+  presetMessage?: string;
+  presetChannel?: "WHATSAPP" | "SMS";
 }
 
 export default function CampaignWizard() {
@@ -41,16 +47,22 @@ export default function CampaignWizard() {
   const [cidade, setCidade] = useState("");
   const [faixaUso, setFaixaUso] = useState("");
   const [statusConta, setStatusConta] = useState("");
+  const [perfilRenda, setPerfilRenda] = useState("");
+  const [etapaUso, setEtapaUso] = useState("");
+  const [limiteCheio, setLimiteCheio] = useState<number | null>(null);
   const [semUsoDiasMin, setSemUsoDiasMin] = useState("");
   const [usadoNosUltimosDias, setUsadoNosUltimosDias] = useState("");
+  const [categoriaCompra, setCategoriaCompra] = useState("");
+  const [compraNosUltimosDias, setCompraNosUltimosDias] = useState("");
+  const [categoriasDisponiveis, setCategoriasDisponiveis] = useState<{ key: string; label: string }[]>([]);
   const [audiencePreview, setAudiencePreview] = useState<number | null>(
     usePreset ? preset!.presetClientIds!.length : null
   );
-  const [channel, setChannel] = useState<"WHATSAPP" | "SMS">("WHATSAPP");
+  const [channel, setChannel] = useState<"WHATSAPP" | "SMS">(preset?.presetChannel ?? "WHATSAPP");
 
   const [templates, setTemplates] = useState<Template[]>([]);
   const [templateId, setTemplateId] = useState("");
-  const [messageTemplate, setMessageTemplate] = useState("Olá {{nome}}, você já utilizou {{percentual}}% do seu limite!");
+  const [messageTemplate, setMessageTemplate] = useState(preset?.presetMessage ?? "Olá {{nome}}, você já utilizou {{percentual}}% do seu limite!");
 
   const [abEnabled, setAbEnabled] = useState(false);
   const [messageTemplateB, setMessageTemplateB] = useState("");
@@ -61,6 +73,8 @@ export default function CampaignWizard() {
   const [throttlePerMin, setThrottlePerMin] = useState(60);
   const [dedupeWindowHrs, setDedupeWindowHrs] = useState(72);
   const [attributionDays, setAttributionDays] = useState(7);
+  const [controlEnabled, setControlEnabled] = useState(false);
+  const [controlGroupPercent, setControlGroupPercent] = useState(10);
   const [scheduledAt, setScheduledAt] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -72,6 +86,7 @@ export default function CampaignWizard() {
 
   useEffect(() => {
     api<Segment[]>("/segments").then(setSegments);
+    api<{ todasCategorias: { key: string; label: string }[] }>("/purchases/categories").then((r) => setCategoriasDisponiveis(r.todasCategorias)).catch(() => {});
   }, []);
 
   function adHocFilters() {
@@ -82,8 +97,12 @@ export default function CampaignWizard() {
       cidade: cidade ? [cidade] : undefined,
       faixaUso: faixaUso ? [faixaUso] : undefined,
       statusConta: statusConta ? [statusConta] : undefined,
+      perfilRenda: perfilRenda ? [perfilRenda] : undefined,
+      etapaUso: etapaUso ? [etapaUso] : undefined,
       semUsoDiasMin: semUsoDiasMin ? Number(semUsoDiasMin) : undefined,
       usadoNosUltimosDias: usadoNosUltimosDias ? Number(usadoNosUltimosDias) : undefined,
+      categoriasCompra: categoriaCompra ? [categoriaCompra] : undefined,
+      compraNosUltimosDias: compraNosUltimosDias ? Number(compraNosUltimosDias) : undefined,
     };
   }
 
@@ -96,6 +115,16 @@ export default function CampaignWizard() {
     }
     const resp = await api<{ count: number }>("/segments/preview", { method: "POST", body: adHocFilters() });
     setAudiencePreview(resp.count);
+    // Quem já usou 100% do limite não tem crédito para oferecer: avisa quantos estão no público.
+    if (!faixaUso || faixaUso === "USO_100") {
+      const cheio = await api<{ count: number }>("/segments/preview", {
+        method: "POST",
+        body: { ...adHocFilters(), faixaUso: ["USO_100"] },
+      });
+      setLimiteCheio(cheio.count);
+    } else {
+      setLimiteCheio(0);
+    }
   }
 
   function selectSegment(id: string) {
@@ -131,6 +160,7 @@ export default function CampaignWizard() {
           throttlePerMin,
           dedupeWindowHrs,
           attributionDays,
+          controlGroupPercent: controlEnabled ? controlGroupPercent : undefined,
           scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : undefined,
         },
       });
@@ -211,17 +241,29 @@ export default function CampaignWizard() {
 
             {!usePreset && !segmentId && (
               <>
+                {etapaUso && <FrescorExtrato />}
                 <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                   <input placeholder="Cidade" value={cidade} onChange={(e) => setCidade(e.target.value)} />
                   <select value={faixaUso} onChange={(e) => setFaixaUso(e.target.value)}>
                     <option value="">Qualquer faixa</option>
-                    <option value="NAO_UTILIZOU">Não utilizou</option>
-                    <option value="BAIXO_USO">Baixo uso</option>
-                    <option value="USO_INICIAL">Uso inicial</option>
-                    <option value="USO_INTERMEDIARIO">Uso intermediário</option>
-                    <option value="USO_ALTO">Uso alto</option>
-                    <option value="QUASE_COMPLETO">Quase completo</option>
-                    <option value="LIMITE_COMPLETO">Limite completo</option>
+                    {FAIXA_OPTIONS.map((f) => (
+                      <option key={f.value} value={f.value}>{f.label}</option>
+                    ))}
+                  </select>
+                  <select value={perfilRenda} onChange={(e) => setPerfilRenda(e.target.value)}>
+                    <option value="">Qualquer perfil de renda</option>
+                    <option value="PF1">PF1 (até R$ 4.000)</option>
+                    <option value="PF2">PF2 (4.001 a 8.000)</option>
+                    <option value="PF3">PF3 (8.001 a 12.000)</option>
+                    <option value="PF4">PF4 (12.001 a 100.000)</option>
+                  </select>
+                  <select value={etapaUso} onChange={(e) => setEtapaUso(e.target.value)}>
+                    <option value="">Qualquer etapa de uso</option>
+                    <option value="NUNCA_USOU">Nunca usou</option>
+                    <option value="RECORRENTE">Recorrente</option>
+                    <option value="OCASIONAL">Ocasional</option>
+                    <option value="EM_RISCO">Em risco (31–90 dias)</option>
+                    <option value="INATIVO">Inativo (+90 dias)</option>
                   </select>
                   <select value={statusConta} onChange={(e) => setStatusConta(e.target.value)}>
                     <option value="">Qualquer status</option>
@@ -244,6 +286,22 @@ export default function CampaignWizard() {
                     value={usadoNosUltimosDias}
                     onChange={(e) => setUsadoNosUltimosDias(e.target.value)}
                   />
+                  <select value={categoriaCompra} onChange={(e) => setCategoriaCompra(e.target.value)} aria-label="Comprou em (categoria de comércio)">
+                    <option value="">Qualquer comércio</option>
+                    {categoriasDisponiveis.map((c) => (
+                      <option key={c.key} value={c.key}>
+                        Comprou em: {c.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    min={0}
+                    placeholder="Comprou nos últimos (dias)"
+                    style={{ width: 170 }}
+                    value={compraNosUltimosDias}
+                    onChange={(e) => setCompraNosUltimosDias(e.target.value)}
+                  />
                   <button type="button" className="btn secondary" onClick={previewAudience}>
                     Contar público
                   </button>
@@ -257,7 +315,13 @@ export default function CampaignWizard() {
 
             {audiencePreview !== null && (
               <p>
-                <strong>{audiencePreview}</strong> clientes elegíveis (opt-outs já excluídos automaticamente)
+                <strong>{audiencePreview}</strong> clientes elegíveis (opt-outs e clientes sem limite já excluídos automaticamente)
+              </p>
+            )}
+            {!!limiteCheio && (
+              <p style={{ color: "#b45309", fontSize: 13 }}>
+                Atenção: {limiteCheio} desses clientes já usaram 100% do limite — não há crédito novo para
+                oferecer a eles. Prefira uma mensagem de relacionamento ou exclua a faixa "100% usado".
               </p>
             )}
           </div>
@@ -335,6 +399,20 @@ export default function CampaignWizard() {
             </div>
             <div className="form-row">
               <label>
+                <input type="checkbox" checked={controlEnabled} onChange={(e) => setControlEnabled(e.target.checked)} /> Reservar um grupo de controle (não recebe a mensagem)
+              </label>
+              {controlEnabled && (
+                <>
+                  <input type="number" min={1} max={50} value={controlGroupPercent} onChange={(e) => setControlGroupPercent(Math.min(50, Math.max(1, Number(e.target.value) || 1)))} />
+                  <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                    {controlGroupPercent}% do público fica de fora do envio. É a única forma de saber quanto do uso
+                    foi causado pelo disparo e quanto aconteceria de qualquer jeito (o relatório compara os dois grupos).
+                  </p>
+                </>
+              )}
+            </div>
+            <div className="form-row">
+              <label>
                 <input type="checkbox" checked={isSandbox} onChange={(e) => setIsSandbox(e.target.checked)} /> Campanha de teste/sandbox (não conta para relatórios agregados)
               </label>
             </div>
@@ -358,6 +436,7 @@ export default function CampaignWizard() {
             <p><strong>Mensagem (A):</strong> {effectiveMessage}</p>
             {abEnabled && <p><strong>Mensagem (B):</strong> {messageTemplateB} — {variantSplitPercent}% do público</p>}
             <p><strong>Throttle:</strong> {throttlePerMin} msgs/min · Dedupe: {dedupeWindowHrs}h · Atribuição: {attributionDays} dias</p>
+            {controlEnabled && <p><strong>Grupo de controle:</strong> {controlGroupPercent}% do público não recebe a mensagem</p>}
             {isSandbox && <p><span className="badge warn">Sandbox</span> esta campanha é de teste</p>}
             <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
               Após criar, você pode enviar uma amostra de teste (QA) antes de agendar para a base completa, na tela de relatório da campanha.

@@ -35,13 +35,14 @@ enum ClientStatus {
 }
 
 enum UsageFaixa {
-  NAO_UTILIZOU
-  BAIXO_USO
-  USO_INICIAL
-  USO_INTERMEDIARIO
-  USO_ALTO
-  QUASE_COMPLETO
-  LIMITE_COMPLETO
+  SEM_USO // 0%
+  USO_1_10
+  USO_11_20
+  USO_21_30
+  USO_31_50
+  USO_51_70
+  USO_71_99
+  USO_100
   INDEFINIDO // limite_total inválido/zero
 }
 
@@ -67,6 +68,7 @@ enum MessageStatus {
   RESPONDIDO
   FALHA
   BLOQUEADO
+  CONTROLE // grupo de controle: fazia parte do público, mas NÃO recebeu a mensagem (mede o lift real)
 }
 
 enum ImportStatus {
@@ -109,6 +111,10 @@ model Tenant {
   channelConfigs     ChannelConfig[]
   messageTemplates   MessageTemplate[]
   notifications      Notification[]
+  accountSnapshots   AccountSnapshot[]
+  dashboardSnapshots DashboardSnapshot[]
+  merchants          Merchant[]
+  purchases          Purchase[]
 }
 
 model User {
@@ -165,9 +171,13 @@ model Client {
   saldoDisponivel        Decimal      @default(0) @db.Decimal(14, 2)
   valorAntecipado        Decimal      @default(0) @db.Decimal(14, 2)
   dataUltimaUtilizacao   DateTime?
+  // Uso REAL pelo extrato (antecipação/compra), refeito por services/usageRefresh.ts
+  ultimoUsoReal          DateTime?
+  usosUltimos90d         Int          @default(0)
+  usosTotal              Int          @default(0)
 
   percentualUtilizado    Decimal      @default(0) @db.Decimal(6, 2)
-  faixaUso               UsageFaixa   @default(NAO_UTILIZOU)
+  faixaUso               UsageFaixa   @default(SEM_USO)
 
   statusConta            ClientStatus @default(ATIVO)
   origemCliente          String?
@@ -202,6 +212,7 @@ model Client {
   saldoLiquidoSaque       Decimal?     @db.Decimal(14, 2)
 
   tags                   String[]     @default([])
+  purchases              Purchase[]
 
   createdAt              DateTime     @default(now())
   updatedAt               DateTime     @updatedAt
@@ -210,11 +221,13 @@ model Client {
 
   movements              Movement[]
   messageEvents          MessageEvent[]
+  accountSnapshots       AccountSnapshot[]
 
   @@unique([tenantId, cpfHash])
   @@index([tenantId, telefone])
   @@index([tenantId, cidade])
   @@index([tenantId, faixaUso])
+  @@index([tenantId, ultimoUsoReal])
   @@index([tenantId, statusConta])
 }
 
@@ -245,6 +258,33 @@ model Movement {
   createdAt DateTime @default(now())
 
   @@index([clientId, data])
+}
+
+// Histórico de saldo/limite/status da conta. Client guarda só o estado atual (sobrescrito a cada
+// importação), e o saldo oscila com o ciclo da folha (usa -> fatura descontada -> limite renova);
+// sem histórico não dá para saber QUANDO o limite voltou nem quem tinha saldo na data de um
+// disparo. Gravado por services/accountSnapshot.ts durante a importação de "Cartões e contas".
+//
+// É um registro de MUDANÇAS, não uma foto diária de toda a base: só entra linha quando saldo,
+// limite ou status mudam (ou na primeira vez que o cliente é visto) — a base inteira todo dia
+// seriam milhões de linhas por ano para guardar "nada mudou". Estado numa data D = a última
+// linha com recordedAt <= D. saldoAnterior (nulo na 1ª linha) dá o delta sem precisar de join.
+model AccountSnapshot {
+  id              String       @id @default(uuid())
+  tenantId        String
+  tenant          Tenant       @relation(fields: [tenantId], references: [id])
+  clientId        String
+  client          Client       @relation(fields: [clientId], references: [id])
+  recordedAt      DateTime     @default(now())
+  limiteTotal     Decimal      @db.Decimal(14, 2)
+  saldoDisponivel Decimal      @db.Decimal(14, 2)
+  saldoAnterior   Decimal?     @db.Decimal(14, 2)
+  valorUtilizado  Decimal      @db.Decimal(14, 2)
+  statusConta     ClientStatus
+  importJobId     String?
+
+  @@index([tenantId, clientId, recordedAt])
+  @@index([tenantId, recordedAt])
 }
 
 model SegmentDefinition {
@@ -294,6 +334,9 @@ model Campaign {
   throttlePerMin  Int            @default(60)
   dedupeWindowHrs Int            @default(72) // janela mínima entre envios da mesma msg ao mesmo cliente
   attributionDays Int            @default(7)
+  // Grupo de controle (opcional): % do público reservado que NÃO recebe a mensagem, só para
+  // comparar o uso de quem recebeu com o de quem não recebeu. Nulo/0 = desligado.
+  controlGroupPercent Int?
   costPerMessage  Decimal        @default(0) @db.Decimal(10, 4)
 
   audienceCount   Int?
@@ -430,4 +473,80 @@ model Notification {
   createdAt   DateTime              @default(now())
 
   @@index([tenantId, read, createdAt])
+}
+
+// Foto diária dos KPIs da base — é o que permite tendência real, variação vs. período anterior
+// e comparação entre períodos no dashboard (sem isso só existe o "agora"). Uma linha por tenant
+// por dia (`day` = data civil em Brasília); regravada (upsert) se o snapshot do dia for recalculado.
+// O histórico começa no dia em que o job foi ligado — não dá para reconstruir o passado.
+model DashboardSnapshot {
+  id              String   @id @default(uuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+  day             DateTime @db.Date
+  totalClientes   Int
+  ativos          Int
+  inativos        Int
+  bloqueados      Int
+  semUso          Int
+  limiteTotal     Decimal  @db.Decimal(16, 2)
+  valorUtilizado  Decimal  @db.Decimal(16, 2)
+  saldoDisponivel Decimal  @db.Decimal(16, 2)
+  usaramNoDia     Int      @default(0) // clientes com dataUltimaUtilizacao naquele dia
+  encerradosNoDia Int      @default(0) // clientes com encerradoEm naquele dia
+  faixas          Json     // { FAIXA_USO: contagem }
+  healthScore     Int?     // nota por uso real do dia (null = sem extrato em dia; ver healthData.ts)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([tenantId, day])
+  @@index([tenantId, day])
+}
+
+// Lojista do comércio credenciado (NomeFantasia na aba "Todas as Compras"). A categoria (supermercado,
+// posto, farmácia...) não vem na planilha: é deduzida do nome (services/merchantCategories.ts) e fica
+// editável (categorySource = MANUAL passa a ter prioridade sobre a dedução automática).
+model Merchant {
+  id             String   @id @default(uuid())
+  tenantId       String
+  tenant         Tenant   @relation(fields: [tenantId], references: [id])
+  name           String
+  nameKey        String   // nome normalizado (minúsculas, sem acento) — chave de dedupe por tenant
+  category       String   @default("OUTROS")
+  categorySource String   @default("AUTO") // AUTO | MANUAL
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  purchases Purchase[]
+
+  @@unique([tenantId, nameKey])
+  @@index([tenantId, category])
+}
+
+// Transação do cartão (aba "Todas as Compras"). Só compras no comércio credenciado têm lojista;
+// saque, Pix, assinatura e débito de fatura entram com merchantId nulo. externalId = idTransacaoCartao
+// (reimportar a mesma planilha não duplica).
+model Purchase {
+  id            String    @id @default(uuid())
+  tenantId      String
+  tenant        Tenant    @relation(fields: [tenantId], references: [id])
+  clientId      String
+  client        Client    @relation(fields: [clientId], references: [id])
+  merchantId    String?
+  merchant      Merchant? @relation(fields: [merchantId], references: [id])
+  externalId    String
+  occurredAt    DateTime
+  tipo          String    // Descricao da planilha (ex.: "Compra à Vista Cartão Top Convênio")
+  merchantName  String?
+  valorPrincipal Decimal  @db.Decimal(14, 2)
+  valorParcela  Decimal?  @db.Decimal(14, 2)
+  juros         Decimal?  @db.Decimal(14, 2)
+  razaoSocial   String?
+  importJobId   String?
+  createdAt     DateTime  @default(now())
+
+  @@unique([tenantId, externalId])
+  @@index([tenantId, occurredAt])
+  @@index([clientId, occurredAt])
+  @@index([merchantId, occurredAt])
 }
