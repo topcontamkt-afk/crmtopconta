@@ -87,6 +87,7 @@ interface Report {
   roiIncremental: string | null;
   controleEnviados: number;
   resultados: Resultados;
+  porCiclo?: { faixa: string; label: string; enviados: number; convertidos: number; taxaConversao: string; lucro: number; controle: number; taxaControle: number | null; liftPontos: number | null; significativo95: boolean | null }[];
   porPerfil?: { perfil: string; enviados: number; convertidos: number; taxaConversao: string; lucro: number; controle: number; taxaControle: number | null; liftPontos: number | null; significativo95: boolean | null }[];
   usuarios: UsuarioQueUsou[];
   janelaAtribuicaoDias: number;
@@ -221,6 +222,47 @@ function PerfilBreakdown({ porPerfil, janelaDias }: { porPerfil: NonNullable<Rep
       <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
         O perfil usa o limite atual do cliente (limite ÷ 0,40). Perfis com poucos envios oscilam muito: leia a
         taxa junto com o número de envios.
+      </p>
+    </div>
+  );
+}
+
+/** Resultado pelo dia do ciclo da cidade em que o cliente estava ao receber: mensagem no começo do ciclo (limite renovado) x no fim. */
+function CicloBreakdown({ porCiclo, janelaDias }: { porCiclo: NonNullable<Report["porCiclo"]>; janelaDias: number }) {
+  // Só vale mostrar se houver ao menos um envio em cidade com ciclo cadastrado
+  if (!porCiclo.some((p) => p.faixa !== "SEM_CICLO" && p.enviados > 0)) return null;
+  const temControle = porCiclo.some((p) => p.controle > 0);
+  const brl = (n: number) => n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <h3>Resultado por dia do ciclo no envio</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Momento do envio</th><th>Envios</th><th>Usaram até D{janelaDias}</th><th>Taxa</th><th>Lucro (juros)</th>
+            {temControle && <><th>Controle</th><th>Lift (p.p.)</th></>}
+          </tr>
+        </thead>
+        <tbody>
+          {porCiclo.map((p) => (
+            <tr key={p.faixa}>
+              <td>{p.label}</td>
+              <td>{p.enviados}</td>
+              <td>{p.convertidos}</td>
+              <td>{p.taxaConversao}%</td>
+              <td>{brl(p.lucro)}</td>
+              {temControle && (
+                <>
+                  <td>{p.controle > 0 ? `${p.controle} (${((p.taxaControle ?? 0) * 100).toFixed(1)}%)` : "—"}</td>
+                  <td>{p.liftPontos === null ? "dados insuficientes" : `${p.liftPontos > 0 ? "+" : ""}${p.liftPontos}${p.significativo95 ? " ✓" : ""}`}</td>
+                </>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
+        O dia do ciclo vem da cidade do cliente (cadastro em “Ciclos das cidades”) e do dia em que a mensagem saiu, em horário de Brasília. Grupos pequenos oscilam: leia a taxa junto com o número de envios.
       </p>
     </div>
   );
@@ -471,6 +513,7 @@ export default function CampaignReport() {
       <UsageCurve resultados={report.resultados} janelaDias={report.janelaAtribuicaoDias} />
       <SaldoBreakdown resultados={report.resultados} />
       <PerfilBreakdown porPerfil={report.porPerfil ?? []} janelaDias={report.janelaAtribuicaoDias} />
+      <CicloBreakdown porCiclo={report.porCiclo ?? []} janelaDias={report.janelaAtribuicaoDias} />
       {report.cliques && <CliquesCard c={report.cliques} janela={report.janelaAtribuicaoDias} />}
       <WhoUsed usuarios={report.usuarios} />
       {report.manual && id && <Destinatarios id={id} />}

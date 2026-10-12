@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import UsoPorDiaCiclo from "../components/UsoPorDiaCiclo";
 
 interface CicloRow {
   cidadeKey: string;
@@ -183,6 +184,8 @@ export default function Ciclos() {
           <p style={{ fontSize: 12, color: "var(--text-muted)" }}>Depois de adicionar, clique em “Salvar ciclos” na tabela acima.</p>
         </div>
       )}
+
+      <UsoPorDiaCiclo />
     </div>
   );
 }

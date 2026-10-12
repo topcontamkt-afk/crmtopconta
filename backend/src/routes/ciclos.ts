@@ -1,9 +1,11 @@
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../config/db";
+import { prisma, tenantRaw } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
-import { cidadeKey, SEM_CIDADE } from "../services/cidades";
+import { cidadeKey, cidadeKeySql, SEM_CIDADE } from "../services/cidades";
+import { buildUsoPorDiaCiclo, periodoAnalise } from "../services/cicloReport";
+import { USO_TIPO_SQL } from "../services/usageRefresh";
 import { cicloInfo, diaFechamentoPadrao, formatDiaCivil, hojeBrasilia, validDiaAbertura } from "../services/ciclos";
 import { refreshCicloColumns } from "../services/cicloRefresh";
 import { ENVIAVEL_WHERE } from "../services/segments";
@@ -148,6 +150,53 @@ router.get("/audiencia", async (req, res) => {
   const clientes = await prisma.client.findMany({ where: { tenantId, diaCicloAbertura: cfg.diaAbertura, ...PODE_RECEBER }, select: { id: true, cidade: true } });
   const clientIds = clientes.filter((c) => cidadeKey(c.cidade) === key).map((c) => c.id);
   res.json({ cidade: cfg.cidade, total: clientIds.length, clientIds, mensagem: MENSAGEM_CICLO_ABERTO });
+});
+
+/**
+ * GET /api/ciclos/uso-por-dia?dias=90 — em que dia do ciclo as pessoas usam o cartão (antecipação e compra à vista, pelo extrato),
+ * por cidade e no total, com diagnóstico da data de abertura cadastrada. O período termina no último dia do extrato.
+ */
+router.get("/uso-por-dia", async (req, res) => {
+  const { tenantId } = req.user!;
+  const dias = Math.min(365, Math.max(7, Number(req.query.dias) || 90));
+
+  const [cobertura] = await tenantRaw.query<{ primeiro: string | null; ultimo: string | null }[]>(
+    `SELECT to_char(min(("occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date), 'YYYY-MM-DD') AS primeiro,
+            to_char(max(("occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date), 'YYYY-MM-DD') AS ultimo
+     FROM "Purchase" WHERE "tenantId" = $1`,
+    tenantId
+  );
+  const periodo = periodoAnalise(cobertura?.primeiro ?? null, cobertura?.ultimo ?? null, dias);
+  const configs = await prisma.cicloCidade.findMany({ where: { tenantId }, orderBy: { cidade: "asc" } });
+  if (!periodo || configs.length === 0) return res.json({ periodo, configurado: configs.length > 0, cidades: [] });
+
+  const tipo = USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"');
+  const uso = await tenantRaw.query<{ cidadeKey: string; data: string; usos: number; antecipacoes: number }[]>(
+    `SELECT ${cidadeKeySql('c."cidade"')} AS "cidadeKey",
+            to_char((p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS data,
+            COUNT(*)::int AS usos,
+            COUNT(*) FILTER (WHERE p."tipo" ~* '^\\s*d[eé]bito\\s+pix')::int AS antecipacoes
+     FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
+     WHERE p."tenantId" = $1 AND ${tipo}
+       AND (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date BETWEEN $2::date AND $3::date
+     GROUP BY 1, 2`,
+    tenantId,
+    periodo.de,
+    periodo.ate
+  );
+  const clientes = await tenantRaw.query<{ cidadeKey: string; n: number }[]>(
+    `SELECT ${cidadeKeySql('"cidade"')} AS "cidadeKey", COUNT(*)::int AS n FROM "Client" WHERE "tenantId" = $1 AND "limiteTotal" > 0 GROUP BY 1`,
+    tenantId
+  );
+  const nClientes = new Map(clientes.map((c) => [c.cidadeKey, c.n]));
+
+  const cidades = buildUsoPorDiaCiclo({
+    cidades: configs.map((c) => ({ cidadeKey: c.cidadeKey, cidade: c.cidade, diaAbertura: c.diaAbertura, clientes: nClientes.get(c.cidadeKey) ?? 0 })),
+    uso,
+    de: periodo.de,
+    ate: periodo.ate,
+  });
+  res.json({ periodo, configurado: true, cidades });
 });
 
 export default router;

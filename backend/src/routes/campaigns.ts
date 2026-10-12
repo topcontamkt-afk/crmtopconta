@@ -7,6 +7,7 @@ import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { buildSegmentWhere, ENVIAVEL_WHERE } from "../services/segments";
+import { breakdownByCiclo } from "../services/cicloReport";
 import { PERFIS_RENDA } from "../services/rendaPerfil";
 import {
   buildAudience,
@@ -560,24 +561,32 @@ router.get("/:id/report", async (req, res) => {
 
   // Quebra por perfil de renda (PF1–PF4) pelo limite atual dos clientes do envio.
   const limites = new Map<string, number>();
+  const aberturas = new Map<string, number | null>();
   const idsAvaliados = [...new Set(evals.map((e) => e.clientId))];
   for (let i = 0; i < idsAvaliados.length; i += 5000) {
     const rows = await prisma.client.findMany({
       where: { tenantId, id: { in: idsAvaliados.slice(i, i + 5000) } },
-      select: { id: true, limiteTotal: true },
+      select: { id: true, limiteTotal: true, diaCicloAbertura: true },
     });
-    for (const r of rows) limites.set(r.id, Number(r.limiteTotal));
+    for (const r of rows) {
+      limites.set(r.id, Number(r.limiteTotal));
+      aberturas.set(r.id, r.diaCicloAbertura);
+    }
   }
   const porPerfil = breakdownByPerfil(treated, control, (id) => classificarPerfil(limites.get(id)), janelaDias).map((p) => ({
     ...p,
     taxaConversao: (p.taxa * 100).toFixed(2),
   }));
 
+  // Quebra pelo dia do ciclo da cidade em que o cliente estava ao receber (ver services/cicloReport.ts).
+  const porCiclo = breakdownByCiclo(treated, control, (id) => aberturas.get(id), janelaDias).map((p) => ({ ...p, taxaConversao: (p.taxa * 100).toFixed(2) }));
+
   res.json({
     campaignId: campaign.id,
     manual: campaign.manual,
     cliques,
     porPerfil,
+    porCiclo,
     isSandbox: campaign.isSandbox,
     audienceCount: campaign.audienceCount,
     porStatus: grouped.map((g) => ({ status: g.status, count: g._count })),

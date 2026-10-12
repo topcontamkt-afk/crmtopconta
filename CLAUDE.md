@@ -345,7 +345,11 @@ de cada importação de clientes e no job diário de snapshot) — assim os filt
 refletir a renovação). `matchClients` devolve **um grupo por cidade** e `runRule` executa a ação por grupo: uma campanha por cidade (`Automação: <regra> · <cidade> (<data>)`, resultado separado e
 sem repetir no mesmo dia). `POST /api/automations/:id/run` (`simular: true` só conta por cidade) alimenta "Simular"/"Rodar agora" na tela. Limite do plano Hobby: o motor roda 1x/dia (~07h BRT) e a
 ação de campanha envia só `throttlePerMin` (default 60) mensagens por execução; o resto depende do "Disparar lote"/cron de disparo — para públicos grandes (Natal) o caminho mais completo é o botão
-"Criar campanha" do card (o navegador drena em lotes). Fase seguinte: relatórios por dia do ciclo. SQL: `backend/prisma/sql/2026-10-ciclos-cidade.sql` (rodar antes do deploy).
+"Criar campanha" do card (o navegador drena em lotes). **Fase 3** (`services/cicloReport.ts`, puro e testado): (a) `GET /api/ciclos/uso-por-dia?dias=90` — curva de uso (antecipação + compra à vista do extrato) por dia do ciclo, por cidade e no
+total, normalizada em "usos por 100 clientes por dia observado" (o extrato cobre período parcial; o período termina no último dia do extrato, não em hoje). Diagnóstico da data cadastrada:
+pico nos dias 1–3 = ok, pico depois = "revisar data" (ou o limite renova mais tarde), <30 usos = poucos dados. Componente `UsoPorDiaCiclo` na tela `/ciclos`. (b) `porCiclo` em
+`GET /api/campaigns/:id/report` — resultado e lift pelo dia do ciclo da cidade do cliente no momento do envio (faixas 1–3, 4–7, 8–15, 16+, sem ciclo), card "Resultado por dia do ciclo no
+envio". Não usa `AccountSnapshot` para validar a abertura (hoje só há uma foto; quando houver histórico dá para checar o salto do saldo). SQL: `backend/prisma/sql/2026-10-ciclos-cidade.sql` (rodar antes do deploy).
 
 ### Cron jobs: local vs. Vercel
 
