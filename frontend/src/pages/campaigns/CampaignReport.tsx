@@ -57,8 +57,22 @@ const SALDO_LABEL: Record<SaldoGroup, string> = {
   DESCONHECIDO: "Saldo desconhecido",
 };
 
+interface Cliques {
+  enviados: number;
+  clicaram: number;
+  taxaClique: number;
+  cliquesTotal: number;
+  mesmoDia: number;
+  mediaDiasAteClique: number | null;
+  usaramEntreQuemClicou: number;
+  clicouMedidos: number;
+  taxaUsoQuemClicou: number | null;
+  taxaUsoQuemNaoClicou: number | null;
+}
+
 interface Report {
   manual?: boolean;
+  cliques?: Cliques | null;
   campaignId: string;
   isSandbox: boolean;
   audienceCount: number | null;
@@ -257,6 +271,9 @@ interface Destinatario {
   diasAteUso: number | null;
   primeiroUsoEm: string | null;
   valorMovimentado: number | null;
+  clicouEm?: string | null;
+  cliques?: number;
+  diasAteClique?: number | null;
 }
 
 /** Lista da campanha manual: quem recebeu e, para clientes da base, se usou o limite e em quantos dias. */
@@ -286,7 +303,7 @@ function Destinatarios({ id }: { id: string }) {
       <div style={{ overflowX: "auto" }}>
         <table>
           <thead>
-            <tr><th>Nome</th><th>Telefone</th><th>Limite (lista)</th><th>Envio</th><th>Na base</th><th>Usou?</th><th>Dias até o uso</th><th>Valor</th></tr>
+            <tr><th>Nome</th><th>Telefone</th><th>Limite (lista)</th><th>Envio</th><th>Na base</th><th>Clicou?</th><th>Usou?</th><th>Dias até o uso</th><th>Valor</th></tr>
           </thead>
           <tbody>
             {lista.slice(0, 300).map((r) => (
@@ -296,6 +313,7 @@ function Destinatarios({ id }: { id: string }) {
                 <td>{brl(r.limiteDisponivel)}</td>
                 <td>{r.status ?? "—"}{r.erro ? <span title={r.erro}> ⚠</span> : null}</td>
                 <td>{r.naBase ? "Sim" : "Não"}</td>
+                <td>{r.clicouEm ? (r.diasAteClique === 0 ? "Sim, no dia" : `Sim, ${r.diasAteClique} dia(s) depois`) : "—"}</td>
                 <td>{!r.naBase ? "—" : r.usou === null ? "aguardando envio" : r.usou ? "Sim" : "Não"}</td>
                 <td>{r.diasAteUso === null ? "—" : r.diasAteUso === 0 ? "No dia" : `${r.diasAteUso} dia(s)`}</td>
                 <td>{brl(r.valorMovimentado)}</td>
@@ -305,6 +323,31 @@ function Destinatarios({ id }: { id: string }) {
         </table>
       </div>
       {lista.length > 300 && <p style={{ fontSize: 12 }}>Mostrando 300 de {lista.length}. O CSV do relatório traz a lista completa.</p>}
+    </div>
+  );
+}
+
+/** Botão de link rastreado: quem clicou, quando e se quem clica usa mais o limite. */
+function CliquesCard({ c, janela }: { c: Cliques; janela: number }) {
+  const pct = (n: number | null) => (n === null ? "—" : `${n.toLocaleString("pt-BR", { maximumFractionDigits: 2 })}%`);
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <h3>Cliques no botão de link</h3>
+      <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
+        O link de cada cliente é único e passa por um endereço nosso. Prévia de link do WhatsApp e robôs não contam.
+      </p>
+      <div className="grid-kpi">
+        <div className="card"><div className="kpi-value">{c.clicaram}</div><div className="kpi-label">Clicaram ({pct(c.taxaClique)} dos {c.enviados} enviados)</div></div>
+        <div className="card"><div className="kpi-value">{c.cliquesTotal}</div><div className="kpi-label">Cliques no total</div></div>
+        <div className="card"><div className="kpi-value">{c.mesmoDia}</div><div className="kpi-label">Clicaram no mesmo dia do envio</div></div>
+        <div className="card"><div className="kpi-value">{c.mediaDiasAteClique === null ? "—" : c.mediaDiasAteClique.toLocaleString("pt-BR")}</div><div className="kpi-label">Dias até o clique (média)</div></div>
+      </div>
+      {c.clicouMedidos > 0 && (
+        <p style={{ fontSize: 13, marginTop: 10 }}>
+          Uso do limite em até {janela} dias: <strong>{pct(c.taxaUsoQuemClicou)}</strong> de quem clicou ({c.usaramEntreQuemClicou} de {c.clicouMedidos}) contra{" "}
+          <strong>{pct(c.taxaUsoQuemNaoClicou)}</strong> de quem não clicou.
+        </p>
+      )}
     </div>
   );
 }
@@ -428,6 +471,7 @@ export default function CampaignReport() {
       <UsageCurve resultados={report.resultados} janelaDias={report.janelaAtribuicaoDias} />
       <SaldoBreakdown resultados={report.resultados} />
       <PerfilBreakdown porPerfil={report.porPerfil ?? []} janelaDias={report.janelaAtribuicaoDias} />
+      {report.cliques && <CliquesCard c={report.cliques} janela={report.janelaAtribuicaoDias} />}
       <WhoUsed usuarios={report.usuarios} />
       {report.manual && id && <Destinatarios id={id} />}
 

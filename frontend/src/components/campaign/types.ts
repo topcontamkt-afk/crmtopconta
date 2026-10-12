@@ -11,7 +11,7 @@ export interface WaTemplate {
   category: string | null;
   footer: string | null;
   quickReplies: string[] | null;
-  buttons?: { type: string; text: string; url?: string; phone?: string }[] | null;
+  buttons?: { type: string; text: string; url?: string; phone?: string; tracked?: boolean }[] | null;
   headerFormat?: string | null;
   imagem?: { mime: string; size: number; filename: string } | null;
   origin?: string;

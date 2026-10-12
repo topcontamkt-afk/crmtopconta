@@ -196,8 +196,21 @@ tenta baixar o exemplo do cabeçalho na importação, senão envie uma em Templa
 Botões, com preview em WhatsApp; template SMS fica num formulário simples na lista). Botões (`whatsappTemplates.ts`): resposta rápida (`quickReplies`, até 10), **Visitar site**
 (`buttons` tipo URL, até 2, `https://`, link fixo sem variável) e **Ligar** (`PHONE_NUMBER`, até 1, vira +DDI), até 10 no total, textos únicos de até 25 caracteres; no payload da
 Meta as respostas rápidas vêm antes dos botões de ação. `validateTemplate` valida tudo no servidor; criar/editar/enviar usam `buttons`/`language` em `routes/templates.ts` (mudar
-botões de um template já enviado gera nova versão). Link rastreado por cliente (redirecionador próprio com clique no relatório) é a fase 2; copiar código e cabeçalho de
+botões de um template já enviado gera nova versão). Link rastreado por cliente: ver abaixo (fase 2); copiar código e cabeçalho de
 vídeo/documento, a fase 3. Importados da Meta continuam só leitura (texto muda na Meta).
+
+### Link rastreado nos botões de template (fase 2)
+
+Botão "Visitar site" com **Rastrear cliques** (`CtaButton.tracked`, padrão ligado no editor): a Meta aprova `https://<LINK_BASE_URL>/r/{{1}}` (exemplo com código de mentira) e o DESTINO REAL fica
+só em `MessageTemplate.buttons[].url`, editável sem nova aprovação (`buttonsSignature` em `routes/templates.ts` ignora o destino ao decidir se é nova versão). `services/trackedLinks.ts`:
+código de 45 caracteres = tipo (`e` mensagem de campanha / `n` teste e Inbox) + id (32 hex) + índice do botão + assinatura HMAC (chave derivada de `JWT_SECRET`); `trackedButtons` calcula o índice
+como a Meta conta (respostas rápidas antes dos botões de ação). No envio (`processQueueBatch`, `sendTemplateMessage`) o código entra como `button`/`sub_type: url` do template.
+`GET /r/:token` (`routes/trackedLinks.ts`, **público**, 120/min por IP, cross-tenant de propósito) valida a assinatura, acha o destino pelo template, soma `MessageEvent.clickCount` e grava
+`clickedAt` no 1º clique, e redireciona (302). Não é redirecionador aberto (destino só do template cadastrado); código inválido vai para `LINK_FALLBACK_URL` (https) ou dá 404. Prévia de link
+do WhatsApp, HEAD e robôs (`isBotUserAgent`) redirecionam sem contar. Relatório: `cliques` em `GET /campaigns/:id/report` (clicaram, taxa, dias até o clique, uso do limite de quem clicou x quem não),
+"Clicou?" em `/destinatarios` e `clicou_em`/`cliques` no CSV. Env: `LINK_BASE_URL` (domínio dos links; padrão `PUBLIC_BACKEND_URL` ou o da Vercel — o domínio vai dentro do template aprovado, então
+mudá-lo exige nova versão do template) e `LINK_FALLBACK_URL`. SQL: `backend/prisma/sql/2026-10-link-rastreado.sql` (rodar antes do deploy). Ainda não testado contra a Meta (aprovação de template com
+link dinâmico é decisão deles).
 
 ### Fila de oportunidades e campanhas por categoria
 

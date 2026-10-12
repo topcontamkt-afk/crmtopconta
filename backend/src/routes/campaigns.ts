@@ -17,9 +17,11 @@ import {
 import { computeABSignificance } from "../services/statistics";
 import { linkRecipients, prepareManual } from "../services/manualCampaign";
 import { validateWizard } from "../services/campaignWizard";
+import { trackedButtons } from "../services/trackedLinks";
 import { costConfigFrom, DEFAULT_COSTS } from "../services/messageCost";
 import { maskPhone } from "../services/masking";
 import {
+  brasiliaDay,
   buildCampaignResults,
   liftAtDay,
   loadCampaignEvaluations,
@@ -161,7 +163,7 @@ router.get("/:id/destinatarios", async (req, res) => {
   const [recipients, evals] = await Promise.all([
     prisma.campaignRecipient.findMany({
       where: { tenantId, campaignId: campaign.id },
-      include: { messageEvents: { select: { id: true, status: true, sentAt: true, error: true } } },
+      include: { messageEvents: { select: { id: true, status: true, sentAt: true, error: true, clickedAt: true, clickCount: true } } },
       orderBy: { nome: "asc" },
     }),
     loadCampaignEvaluations(prisma, tenantId, campaign.id),
@@ -181,6 +183,9 @@ router.get("/:id/destinatarios", async (req, res) => {
       status: evt?.status ?? null,
       erro: evt?.error ?? null,
       enviadoEm: evt?.sentAt?.toISOString() ?? null,
+      clicouEm: evt?.clickedAt?.toISOString() ?? null,
+      cliques: evt?.clickCount ?? 0,
+      diasAteClique: evt?.clickedAt && evt.sentAt ? brasiliaDay(evt.clickedAt) - brasiliaDay(evt.sentAt) : null,
       // null com naBase=true e enviado = ainda não usou (na janela de 30 dias)
       usou: ev ? ev.usos.length > 0 : null,
       diasAteUso: first ? first.dayOffset : null,
@@ -195,6 +200,7 @@ router.get("/:id/destinatarios", async (req, res) => {
     foraDaBase: rows.filter((r) => !r.naBase).length,
     medidos: medidos.length,
     usaram: medidos.filter((r) => r.usou).length,
+    clicaram: rows.filter((r) => r.clicouEm).length,
     destinatarios: rows,
   });
 });
@@ -522,6 +528,34 @@ router.get("/:id/report", async (req, res) => {
     valorMovimentado: Number(e.usos.reduce((acc, u) => acc + u.valorPrincipal, 0).toFixed(2)),
   }));
 
+  // Cliques no botão de link rastreado (só quando o template tem um). O cruzamento com o uso real mostra
+  // se quem clica de fato usa mais o limite (taxa de uso de quem clicou x de quem não clicou).
+  let cliques: null | Record<string, unknown> = null;
+  const tpl = campaign.templateId ? await prisma.messageTemplate.findFirst({ where: { id: campaign.templateId, tenantId }, select: { quickReplies: true, buttons: true } }) : null;
+  if (tpl && trackedButtons(tpl).length > 0) {
+    const clicados = await prisma.messageEvent.findMany({
+      where: { campaignId: campaign.id, clickedAt: { not: null } },
+      select: { id: true, clickCount: true, clickedAt: true, sentAt: true },
+    });
+    const enviados = grouped.filter((g) => ["ENVIADO", "ENTREGUE", "LIDO", "RESPONDIDO"].includes(g.status)).reduce((a, g) => a + g._count, 0);
+    const clicouIds = new Set(clicados.map((c) => c.id));
+    const dias = clicados.filter((c) => c.sentAt && c.clickedAt).map((c) => brasiliaDay(c.clickedAt!) - brasiliaDay(c.sentAt!));
+    const quemClicou = treated.filter((e) => clicouIds.has(e.id));
+    const quemNaoClicou = treated.filter((e) => !clicouIds.has(e.id));
+    cliques = {
+      enviados,
+      clicaram: clicados.length,
+      taxaClique: enviados > 0 ? Number(((clicados.length / enviados) * 100).toFixed(2)) : 0,
+      cliquesTotal: clicados.reduce((a, c) => a + c.clickCount, 0),
+      mesmoDia: dias.filter((d) => d === 0).length,
+      mediaDiasAteClique: dias.length ? Number((dias.reduce((a, d) => a + d, 0) / dias.length).toFixed(1)) : null,
+      usaramEntreQuemClicou: statsAtDay(quemClicou, janelaDias).convertidos,
+      clicouMedidos: quemClicou.length,
+      taxaUsoQuemClicou: quemClicou.length ? Number((statsAtDay(quemClicou, janelaDias).taxa * 100).toFixed(2)) : null,
+      taxaUsoQuemNaoClicou: quemNaoClicou.length ? Number((statsAtDay(quemNaoClicou, janelaDias).taxa * 100).toFixed(2)) : null,
+    };
+  }
+
   // Quebra por perfil de renda (PF1–PF4) pelo limite atual dos clientes do envio.
   const limites = new Map<string, number>();
   const idsAvaliados = [...new Set(evals.map((e) => e.clientId))];
@@ -540,6 +574,7 @@ router.get("/:id/report", async (req, res) => {
   res.json({
     campaignId: campaign.id,
     manual: campaign.manual,
+    cliques,
     porPerfil,
     isSandbox: campaign.isSandbox,
     audienceCount: campaign.audienceCount,
@@ -588,6 +623,7 @@ router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST")
   const header =
     [
       "cliente", "telefone", "cidade", "grupo", "variante", "status", "provedor", "custo", "enviado_em",
+      "clicou_em", "cliques",
       "saldo_no_envio", "situacao_saldo", "primeiro_uso_em", "dia_do_primeiro_uso",
       ...horizons.map((h) => `usou_ate_d${h}`),
       "qtd_usos_30d", "valor_movimentado_30d", "lucro_30d",
@@ -607,6 +643,8 @@ router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST")
         e.provider || "",
         Number(e.cost),
         e.sentAt?.toISOString() || "",
+        e.clickedAt?.toISOString() || "",
+        e.clickCount,
         ev?.saldoNoEnvio ?? "",
         ev?.grupoSaldo ?? "",
         usos[0]?.confirmedAt.toISOString() ?? "",

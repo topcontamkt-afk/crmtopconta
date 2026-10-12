@@ -13,6 +13,7 @@ import helmet from "helmet";
 // timeout (300s), em vez de retornar um 500 imediato. Precisa ser importado antes das rotas.
 import "express-async-errors";
 
+import trackedLinkRoutes from "./routes/trackedLinks";
 import authRoutes from "./routes/auth";
 import clientRoutes from "./routes/clients";
 import dashboardRoutes from "./routes/dashboard";
@@ -70,6 +71,7 @@ app.use(
 
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
+app.use("/r", trackedLinkRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/clients", clientRoutes);
 app.use("/api/dashboard", dashboardRoutes);

@@ -16,6 +16,7 @@ interface Botao {
   tipo: BotaoTipo;
   text: string;
   url: string;
+  tracked: boolean;
   phone: string;
 }
 
@@ -90,8 +91,8 @@ export default function TemplateEditor() {
         setFooter(t.footer || null);
         setCabecalho(t.headerFormat === "IMAGE" ? "IMAGE" : "NONE");
         setBotoes([
-          ...(t.quickReplies ?? []).map((text) => ({ key: nextKey++, tipo: "QUICK_REPLY" as const, text, url: "", phone: "" })),
-          ...(t.buttons ?? []).map((b) => ({ key: nextKey++, tipo: b.type as BotaoTipo, text: b.text, url: b.url ?? "", phone: b.phone ?? "" })),
+          ...(t.quickReplies ?? []).map((text) => ({ key: nextKey++, tipo: "QUICK_REPLY" as const, text, url: "", tracked: false, phone: "" })),
+          ...(t.buttons ?? []).map((b) => ({ key: nextKey++, tipo: b.type as BotaoTipo, text: b.text, url: b.url ?? "", tracked: !!b.tracked, phone: b.phone ?? "" })),
         ]);
       })
       .catch((e) => setErro(textoErro(e)))
@@ -135,7 +136,7 @@ export default function TemplateEditor() {
   const contagem = (t: BotaoTipo) => botoes.filter((b) => b.tipo === t).length;
   const totalBotoes = botoes.length;
   function adicionar(tipo: BotaoTipo) {
-    setBotoes([...botoes, { key: nextKey++, tipo, text: "", url: tipo === "URL" ? "https://" : "", phone: "" }]);
+    setBotoes([...botoes, { key: nextKey++, tipo, text: "", url: tipo === "URL" ? "https://" : "", tracked: tipo === "URL", phone: "" }]);
     setMenuBotao(false);
   }
   const atualizar = (key: number, patch: Partial<Botao>) => setBotoes(botoes.map((b) => (b.key === key ? { ...b, ...patch } : b)));
@@ -181,7 +182,7 @@ export default function TemplateEditor() {
       category,
       footer: footer?.trim() || null,
       quickReplies: botoes.filter((b) => b.tipo === "QUICK_REPLY").map((b) => b.text),
-      buttons: botoes.filter((b) => b.tipo !== "QUICK_REPLY").map((b) => ({ type: b.tipo, text: b.text, url: b.url, phone: b.phone })),
+      buttons: botoes.filter((b) => b.tipo !== "QUICK_REPLY").map((b) => ({ type: b.tipo, text: b.text, url: b.url, tracked: b.tracked, phone: b.phone })),
       headerFormat: cabecalho === "IMAGE" ? "IMAGE" : null,
       imagem: cabecalho === "IMAGE" ? existente?.imagem ?? (imagem ? { mime: imagem.type, size: imagem.size, filename: imagem.name } : null) : null,
       qualityScore: null,
@@ -198,7 +199,7 @@ export default function TemplateEditor() {
       language,
       footer: footer?.trim() ? footer.trim() : undefined,
       quickReplies: botoes.filter((b) => b.tipo === "QUICK_REPLY").map((b) => b.text.trim()),
-      buttons: botoes.filter((b) => b.tipo !== "QUICK_REPLY").map((b) => ({ type: b.tipo, text: b.text.trim(), url: b.tipo === "URL" ? b.url.trim() : undefined, phone: b.tipo === "PHONE_NUMBER" ? b.phone.trim() : undefined })),
+      buttons: botoes.filter((b) => b.tipo !== "QUICK_REPLY").map((b) => ({ type: b.tipo, text: b.text.trim(), url: b.tipo === "URL" ? b.url.trim() : undefined, tracked: b.tipo === "URL" ? b.tracked : undefined, phone: b.tipo === "PHONE_NUMBER" ? b.phone.trim() : undefined })),
     };
     let tid = id ?? "";
     if (id) {
@@ -417,9 +418,19 @@ export default function TemplateEditor() {
                       </div>
                       {b.tipo === "URL" && (
                         <div className="form-row">
-                          <label>Link do site (destino)</label>
+                          <label>Destino do link</label>
                           <input value={b.url} onChange={(e) => atualizar(b.key, { url: e.target.value })} placeholder="https://" inputMode="url" />
-                          <span className="pd-hint">Link fixo: todos recebem o mesmo destino.</span>
+                          <label className="cw-consent" style={{ marginTop: 6 }}>
+                            <input type="checkbox" checked={b.tracked} onChange={(e) => atualizar(b.key, { tracked: e.target.checked })} />
+                            <span>
+                              Rastrear cliques (recomendado)
+                              <span className="pd-hint">
+                                {b.tracked
+                                  ? "O cliente recebe um link único nosso, que registra o clique e leva a este destino. Você pode trocar o destino depois sem pedir nova aprovação à Meta."
+                                  : "Link fixo: todos recebem o mesmo endereço e não sabemos quem clicou."}
+                              </span>
+                            </span>
+                          </label>
                         </div>
                       )}
                       {b.tipo === "PHONE_NUMBER" && (

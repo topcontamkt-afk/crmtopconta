@@ -48,9 +48,9 @@ export class WhatsAppCloudAdapter implements ChannelAdapter {
     return uploadMedia(this.phoneNumberId, this.accessToken, data, mime, filename);
   }
 
-  async sendTemplate(to: string, tpl: { name: string; language: string; params: string[]; headerImageId?: string }): Promise<SendResult> {
+  async sendTemplate(to: string, tpl: { name: string; language: string; params: string[]; headerImageId?: string; buttonTokens?: { index: number; token: string }[] }): Promise<SendResult> {
     try {
-      const id = await sendTemplateMessage(this.phoneNumberId, this.accessToken, to.replace(/\D/g, ""), tpl.name, tpl.language, tpl.params, undefined, tpl.headerImageId);
+      const id = await sendTemplateMessage(this.phoneNumberId, this.accessToken, to.replace(/\D/g, ""), tpl.name, tpl.language, tpl.params, undefined, tpl.headerImageId, tpl.buttonTokens);
       return { providerMessageId: id, status: "SENT" };
     } catch (e: any) {
       return { providerMessageId: "", status: "FAILED", error: e.message };

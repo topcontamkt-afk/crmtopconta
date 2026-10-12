@@ -6,6 +6,7 @@ import { ManualRowInput, prepareManual } from "./manualCampaign";
 import { costConfigFrom, estimateCost } from "./messageCost";
 import { buildSegmentWhere, ENVIAVEL_WHERE, SegmentFilters, SegmentGroup } from "./segments";
 import { unmappedPositions } from "./templateImport";
+import { linkBase, trackedButtons } from "./trackedLinks";
 
 /**
  * Passo "Validação" do assistente de campanhas: confere template, conexão com a Meta, público, dedupe,
@@ -83,6 +84,10 @@ export async function validateWizard(
     add({ id: "template", nivel: "erro", titulo: "Falta a imagem do cabeçalho", detalhe: "Envie a imagem do template em Templates." });
   } else {
     add({ id: "template", nivel: "ok", titulo: "Template aprovado pela Meta", detalhe: template.name });
+  }
+
+  if (template && trackedButtons(template).length > 0) {
+    add({ id: "link", nivel: "ok", titulo: "Link rastreado no botão", detalhe: `Cada cliente recebe um link único (${linkBase()}/r/…); o clique aparece no relatório.` });
   }
 
   // 2) conexão

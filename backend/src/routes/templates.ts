@@ -25,6 +25,7 @@ import {
 } from "../services/whatsappTemplates";
 import { applyVariableMap, positionsIn, unmappedPositions, validateVariableMap } from "../services/templateImport";
 import { OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
+import { linkBase } from "../services/trackedLinks";
 
 const router = Router();
 router.use(requireAuth);
@@ -85,6 +86,7 @@ const ctaSchema = z.object({
   type: z.enum(["URL", "PHONE_NUMBER"]),
   text: z.string().max(60),
   url: z.string().max(2100).optional(),
+  tracked: z.boolean().optional(),
   phone: z.string().max(40).optional(),
 });
 
@@ -92,9 +94,17 @@ const ctaSchema = z.object({
 function cleanCtas(list: z.infer<typeof ctaSchema>[] | undefined): CtaButton[] {
   return (list ?? []).map((b) =>
     b.type === "URL"
-      ? { type: "URL", text: b.text.trim(), url: (b.url ?? "").trim() }
+      ? { type: "URL", text: b.text.trim(), url: (b.url ?? "").trim(), ...(b.tracked ? { tracked: true } : {}) }
       : { type: "PHONE_NUMBER", text: b.text.trim(), phone: normalizeButtonPhone(b.phone ?? "") ?? (b.phone ?? "").trim() }
   );
+}
+
+/**
+ * O que exige nova aprovação na Meta: no link rastreado o DESTINO fica só aqui (a Meta recebe o nosso
+ * endereço /r/{{1}}), então trocar o destino não muda a assinatura; trocar o texto, o tipo ou o rastreio muda.
+ */
+function buttonsSignature(list: CtaButton[] | null | undefined): string {
+  return JSON.stringify((list ?? []).map((b) => ({ type: b.type, text: b.text, tracked: !!b.tracked, url: b.type === "URL" && !b.tracked ? b.url : "", phone: b.phone ?? "" })));
 }
 
 const createSchema = z.object({
@@ -201,7 +211,7 @@ router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
       merged.body !== template.body ||
       (merged.footer ?? null) !== (template.footer ?? null) ||
       JSON.stringify(merged.quickReplies) !== JSON.stringify(template.quickReplies ?? []) ||
-      JSON.stringify(merged.buttons) !== JSON.stringify(template.buttons ?? []) ||
+      buttonsSignature(merged.buttons) !== buttonsSignature((template.buttons as CtaButton[] | null) ?? []) ||
       (parsed.data.language !== undefined && parsed.data.language !== template.language) ||
       merged.category !== template.category;
     if (mudouConteudo && template.metaName) {
@@ -238,7 +248,7 @@ router.post("/:id/submit", requireRole("ADMIN", "OPERATOR"), async (req, res) =>
       headerHandle = await uploadTemplateExample(ctx.account.appId, ctx.token, Buffer.from(media.data), media.mime, media.filename);
       await prisma.messageTemplate.update({ where: { id: template.id }, data: { headerHandle } });
     }
-    const payload = buildCreatePayload({ ...template, quickReplies: (template.quickReplies as string[] | null) ?? [], buttons: (template.buttons as CtaButton[] | null) ?? [], category: template.category, headerHandle });
+    const payload = buildCreatePayload({ ...template, quickReplies: (template.quickReplies as string[] | null) ?? [], buttons: (template.buttons as CtaButton[] | null) ?? [], category: template.category, headerHandle, linkBase: linkBase() });
     const created = await createMetaTemplate(ctx.wabaId!, ctx.token, payload);
     const updated = await prisma.messageTemplate.update({
       where: { id: template.id },

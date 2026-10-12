@@ -385,6 +385,8 @@ model MessageEvent {
   respondedAt    DateTime?
   convertedAt    DateTime? // primeira movimentação dentro da janela de atribuição
   convertedValue Decimal?           @db.Decimal(14, 2) // valor da movimentação que gerou a conversão (ROI)
+  clickedAt      DateTime? // 1º clique no botão de link rastreado (services/trackedLinks.ts, rota /r/:token)
+  clickCount     Int                @default(0)
 
   @@index([campaignId, status])
   @@index([clientId])

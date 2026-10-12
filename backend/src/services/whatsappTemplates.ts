@@ -1,6 +1,7 @@
 import { TEMPLATE_VARIABLES, variablesIn } from "./templateVariables";
 import { WHATSAPP_API_VERSION } from "./whatsappMedia";
 import { SendError, explainMetaError } from "./whatsappSend";
+import { trackedUrlExample, trackedUrlPattern } from "./trackedLinks";
 
 /**
  * Templates do WhatsApp (Meta). Fora da janela de 24 horas só vale template APROVADO pela Meta.
@@ -27,7 +28,10 @@ export const LANGUAGES = ["pt_BR", "en_US", "es"] as const;
 export interface CtaButton {
   type: "URL" | "PHONE_NUMBER";
   text: string;
+  /** destino do link (com `tracked`, é o destino REAL: a Meta recebe só o nosso endereço de redirecionamento) */
   url?: string;
+  /** link rastreado: passa por /r/<código> no nosso domínio, que registra o clique (services/trackedLinks.ts) */
+  tracked?: boolean;
   phone?: string;
 }
 
@@ -138,7 +142,7 @@ export function metaTemplateName(localName: string, version: number): string {
   return `${slug || "template"}_v${version}`;
 }
 
-export function buildCreatePayload(t: TemplateDraft & { name: string; language: string; version: number; headerHandle?: string | null }) {
+export function buildCreatePayload(t: TemplateDraft & { name: string; language: string; version: number; headerHandle?: string | null; linkBase?: string }) {
   const order = variableOrder(t.body);
   const components: any[] = [
     ...(t.headerHandle ? [{ type: "HEADER", format: "IMAGE", example: { header_handle: [t.headerHandle] } }] : []),
@@ -151,9 +155,14 @@ export function buildCreatePayload(t: TemplateDraft & { name: string; language: 
   if (t.footer?.trim()) components.push({ type: "FOOTER", text: t.footer.trim() });
   const botoes = (t.quickReplies ?? []).map((b) => b.trim()).filter(Boolean);
   const ctaButtons = (t.buttons ?? []).map((b) =>
-    b.type === "URL"
-      ? { type: "URL", text: b.text.trim(), url: (b.url ?? "").trim() }
-      : { type: "PHONE_NUMBER", text: b.text.trim(), phone_number: normalizeButtonPhone(b.phone ?? "") ?? "" }
+    b.type === "URL" && b.tracked
+      ? (() => {
+          if (!t.linkBase) throw new Error("Falta o domínio dos links rastreados (LINK_BASE_URL).");
+          return { type: "URL", text: b.text.trim(), url: trackedUrlPattern(t.linkBase), example: [trackedUrlExample(t.linkBase)] };
+        })()
+      : b.type === "URL"
+        ? { type: "URL", text: b.text.trim(), url: (b.url ?? "").trim() }
+        : { type: "PHONE_NUMBER", text: b.text.trim(), phone_number: normalizeButtonPhone(b.phone ?? "") ?? "" }
   );
   const allButtons = [...botoes.map((text) => ({ type: "QUICK_REPLY", text })), ...ctaButtons];
   if (allButtons.length) components.push({ type: "BUTTONS", buttons: allButtons });
@@ -301,12 +310,15 @@ export async function sendTemplateMessage(
   language: string,
   bodyParams: string[],
   fetchImpl: FetchLike = fetch as any,
-  headerImageId?: string
+  headerImageId?: string,
+  buttonTokens?: { index: number; token: string }[]
 ): Promise<string> {
   const template: any = { name, language: { code: language } };
   const components: any[] = [];
   if (headerImageId) components.push({ type: "header", parameters: [{ type: "image", image: { id: headerImageId } }] });
   if (bodyParams.length) components.push({ type: "body", parameters: bodyParams.map((text) => ({ type: "text", text })) });
+  // Botão de link rastreado: o parâmetro é o código assinado que completa o endereço aprovado (/r/{{1}}).
+  for (const b of buttonTokens ?? []) components.push({ type: "button", sub_type: "url", index: String(b.index), parameters: [{ type: "text", text: b.token }] });
   if (components.length) template.components = components;
   const j = await call(
     `${root(phoneNumberId)}/messages`,

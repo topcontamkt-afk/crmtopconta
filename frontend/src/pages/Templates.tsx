@@ -186,6 +186,7 @@ export default function Templates() {
                       {(t.version ?? 1) > 1 ? ` · versão ${t.version}` : ""}
                       {t.origin === "META" ? " · veio da Meta" : ""}
                       {t.imagem ? " · com imagem" : t.headerFormat === "IMAGE" ? " · falta a imagem" : ""}
+                      {t.buttons?.some((b) => b.tracked) ? " · link rastreado" : ""}
                       {(t.buttons?.length ?? 0) + (t.quickReplies?.length ?? 0) > 0 ? ` · ${(t.buttons?.length ?? 0) + (t.quickReplies?.length ?? 0)} botão(ões)` : ""}
                     </div>
                   </td>
