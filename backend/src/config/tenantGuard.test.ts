@@ -179,6 +179,7 @@ describe("TENANT_SCOPED_MODELS", () => {
         "WaMediaBlob",
         "TemplateMedia",
         "ImportChange",
+        "CicloCidade",
       ].sort()
     );
   });

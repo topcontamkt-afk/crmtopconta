@@ -281,6 +281,8 @@ const adHocFiltersSchema = z
     usosMax: z.number().int().min(0).optional(),
     diasSemUsoRealMin: z.number().int().min(0).optional(),
     diasSemUsoRealMax: z.number().int().min(0).optional(),
+    cicloAbriuHaDias: z.object({ min: z.number().int().min(0).max(31).optional(), max: z.number().int().min(0).max(31).optional() }).optional(),
+    cicloAbreEmDias: z.object({ min: z.number().int().min(0).max(31).optional(), max: z.number().int().min(0).max(31).optional() }).optional(),
     categoriasCompra: z.array(z.string()).optional(),
     lojistaIds: z.array(z.string()).optional(),
     compraNosUltimosDias: z.number().optional(),

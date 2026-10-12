@@ -19,11 +19,13 @@ import {
   LogOut,
   Search,
   Store,
+  CalendarClock,
 } from "lucide-react";
 import { useAuth, type AuthUser } from "./context/AuthContext";
 import Login from "./pages/Login";
 import Clients from "./pages/Clients";
 import ClientProfile from "./pages/ClientProfile";
+import Ciclos from "./pages/Ciclos";
 import Segments from "./pages/Segments";
 import CampaignList from "./pages/campaigns/CampaignList";
 import CampaignWizard from "./pages/campaigns/CampaignWizard";
@@ -107,6 +109,7 @@ function Layout({ children }: { children: JSX.Element }) {
         { id: "clients", title: "Base de clientes", icon: UsersIcon, path: "/clients" },
         { id: "segments", title: "Segmentos", icon: Layers, path: "/segments" },
         { id: "commerce", title: "Comércio credenciado", icon: Store, path: "/commerce" },
+        { id: "ciclos", title: "Ciclos das cidades", icon: CalendarClock, path: "/ciclos" },
       ],
     },
     {
@@ -227,6 +230,7 @@ export default function App() {
                 <Route path="/clients" element={<Clients />} />
                 <Route path="/clients/:id" element={<ClientProfile />} />
                 <Route path="/segments" element={<Segments />} />
+                <Route path="/ciclos" element={<Ciclos />} />
                 <Route path="/inbox" element={<Inbox />} />
                 <Route path="/perfis-renda/:perfil?" element={<PerfisRenda />} />
                 <Route

@@ -113,3 +113,16 @@ describe("perfil de renda e público enviável", () => {
     }
   });
 });
+
+describe("filtros de ciclo da cidade", () => {
+  it("cicloAbriuHaDias vira diaCicloAbertura in [...] e não pega cliente sem ciclo", () => {
+    const where: any = buildSegmentWhere("t1", { cicloAbriuHaDias: { min: 0, max: 31 } });
+    expect(where.AND[0].diaCicloAbertura.in).toHaveLength(31);
+    const hoje: any = buildSegmentWhere("t1", { cicloAbriuHaDias: { min: 0, max: 0 } });
+    expect(hoje.AND[0].diaCicloAbertura.in).toHaveLength(1);
+  });
+  it("cicloAbreEmDias com faixa de 3 dias devolve 3 dias de abertura", () => {
+    const where: any = buildSegmentWhere("t1", { cicloAbreEmDias: { min: 1, max: 3 } });
+    expect(where.AND[0].diaCicloAbertura.in).toHaveLength(3);
+  });
+});

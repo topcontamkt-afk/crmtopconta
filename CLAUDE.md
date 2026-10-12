@@ -332,6 +332,17 @@ guardado 30 dias; `POST /imports/lotes/:loteId/desfazer` (ADMIN, só a ÚLTIMA i
 seus snapshots/movimentos. Compras não têm preview nem desfazer. (5) `ImportJob.formato/loteId/nomeArquivo`: o arquivo (vários jobs de 400 linhas) é um `loteId`; o histórico
 vem de `GET /imports/lotes` (`groupLotes`). SQL: `backend/prisma/sql/2026-10-protecao-importacao.sql` (rodar antes do deploy). O servidor confia nos cabeçalhos enviados pela tela.
 
+### Ciclo de cobrança por cidade (fase 1)
+
+Cada cidade tem um dia de **abertura** do ciclo, quando o limite renova (fechamento = dia anterior; fatura descontada em folha). Dados do extrato confirmam: o uso dispara na abertura
+e decai nos dias seguintes. `CicloCidade` (por tenant, `cidadeKey` = `cidades.ts`) guarda o cadastro; `services/ciclos.ts` é o cálculo puro em dias civis de Brasília (`cicloInfo`: dias desde a
+abertura, dias para abrir, dia do ciclo; mês curto usa o último dia). A abertura da cidade fica em `Client.diaCicloAbertura`, refeita por `services/cicloRefresh.ts` (ao salvar o cadastro, ao fim
+de cada importação de clientes e no job diário de snapshot) — assim os filtros seguem síncronos: `cicloAbriuHaDias {min,max}` e `cicloAbreEmDias {min,max}` viram `diaCicloAbertura in [...]`
+(`diasAberturaNaFaixa`); cidade sem ciclo não entra em nenhum. `routes/ciclos.ts`: `GET /api/ciclos` (cadastro + cidades da base sem ciclo), `PUT /api/ciclos` (ADMIN, tabela inteira),
+`GET /api/ciclos/proximos` (card do Dashboard: abriu há ≤2 dias ou abre em ≤7), `GET /api/ciclos/audiencia?cidadeKey=` (ids aptos + mensagem para "Criar campanha"). Telas: `/ciclos`
+(preenche a tabela da TopConta: Natal 6, Carmópolis 7, Itaporanga e N. S. da Glória 10, Lagarto/Itabaianinha/Boquim/Luziânia 15), card no Dashboard e seção em Segmentos. Fases seguintes:
+gatilho de automação "ciclo abriu", disparo escalonado por cidade e relatórios por dia do ciclo. SQL: `backend/prisma/sql/2026-10-ciclos-cidade.sql` (rodar antes do deploy).
+
 ### Cron jobs: local vs. Vercel
 
 Locally, `services/scheduler.ts` runs everything via `node-cron` in-process.

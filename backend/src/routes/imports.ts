@@ -1,3 +1,4 @@
+import { refreshCicloColumns } from "../services/cicloRefresh";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
@@ -12,6 +13,11 @@ import { notify } from "../services/notifications";
 import { importLimiter } from "../middleware/rateLimit";
 
 const router = Router();
+
+/** Cidade nova na planilha pode já ter ciclo cadastrado: refaz o dia de abertura dos clientes (nunca derruba a importação). */
+async function refreshCiclos(tenantId: string) {
+  await refreshCicloColumns(tenantId).catch((e) => console.error("[imports] ciclos:", e));
+}
 router.use(requireAuth);
 
 router.get("/", async (req, res) => {
@@ -169,6 +175,7 @@ router.post("/google-sheets", importLimiter, requireRole("ADMIN", "OPERATOR"), a
     const rows = await fetchSheetRows(sheetId, range, columnMapping || DEFAULT_COLUMN_MAPPING);
     const { importJobId, result } = await runImport(prisma, tenantId, rows, userId, "google_sheets", sheetId);
     await logAudit({ tenantId, userId, action: "IMPORT_GOOGLE_SHEETS", target: "ImportJob", targetId: importJobId, details: result });
+    await refreshCiclos(tenantId);
     res.json({ importJobId, ...result });
   } catch (e: any) {
     // Detalhe completo do erro só vai para o log do servidor e para a notificação interna do
@@ -219,6 +226,7 @@ router.post("/:id/fix-errors", importLimiter, requireRole("ADMIN", "OPERATOR"), 
     targetId: importJobId,
     details: { originalImportJobId: originalJob.id, ...result },
   });
+  await refreshCiclos(tenantId);
   res.json({ importJobId, correctedFrom: originalJob.id, ...result });
 });
 
@@ -245,6 +253,7 @@ router.post("/csv", importLimiter, requireRole("ADMIN", "OPERATOR"), async (req,
     { camposPresentes: parsed.data.camposPresentes, loteId: parsed.data.loteId, nomeArquivo: parsed.data.nomeArquivo }
   );
   await logAudit({ tenantId, userId, action: "IMPORT_CSV", target: "ImportJob", targetId: importJobId, details: result });
+  await refreshCiclos(tenantId);
   res.json({ importJobId, ...result });
 });
 
@@ -274,6 +283,7 @@ router.post("/cartoes", importLimiter, requireRole("ADMIN", "OPERATOR"), async (
     nomeArquivo: parsed.data.nomeArquivo,
   });
   await logAudit({ tenantId, userId, action: "IMPORT_CARTOES_CONTAS", target: "ImportJob", targetId: importJobId, details: result });
+  await refreshCiclos(tenantId);
   res.json({ importJobId, ...result });
 });
 

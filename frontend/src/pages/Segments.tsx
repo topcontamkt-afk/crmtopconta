@@ -78,6 +78,8 @@ export default function Segments() {
   const [diasSemUsoRealMin, setDiasSemUsoRealMin] = useState("");
   const [categoriasCompra, setCategoriasCompra] = useState<string[]>([]);
   const [compraNosUltimosDias, setCompraNosUltimosDias] = useState("");
+  const [cicloAbriuMax, setCicloAbriuMax] = useState("");
+  const [cicloAbreMax, setCicloAbreMax] = useState("");
   const [categoriasDisponiveis, setCategoriasDisponiveis] = useState<{ key: string; label: string }[]>([]);
   const [preview, setPreview] = useState<number | null>(null);
   const [msg, setMsg] = useState<{ tipo: "ok" | "erro"; texto: string } | null>(null);
@@ -107,15 +109,18 @@ export default function Segments() {
       tags: tags.trim() ? tags.split(",").map((t) => t.trim()).filter(Boolean) : undefined,
       categoriasCompra: categoriasCompra.length ? categoriasCompra : undefined,
       compraNosUltimosDias: compraNosUltimosDias ? Number(compraNosUltimosDias) : undefined,
+      cicloAbriuHaDias: cicloAbriuMax ? { min: 0, max: Number(cicloAbriuMax) } : undefined,
+      cicloAbreEmDias: cicloAbreMax ? { min: 1, max: Number(cicloAbreMax) } : undefined,
     }),
-    [cidade, faixaUso, statusConta, perfilRenda, etapaUso, usosMin, diasSemUsoRealMin, semUsoDiasMin, usadoNosUltimosDias, tags, categoriasCompra, compraNosUltimosDias]
+    [cidade, faixaUso, statusConta, perfilRenda, etapaUso, usosMin, diasSemUsoRealMin, semUsoDiasMin, usadoNosUltimosDias, tags, categoriasCompra, compraNosUltimosDias, cicloAbriuMax, cicloAbreMax]
   );
   const ativos = (...v: unknown[]) => v.filter((x) => x !== undefined).length;
   const nCliente = ativos(filters.cidade, filters.perfilRenda, filters.statusConta, filters.tags);
   const nUso = ativos(filters.faixaUso, filters.semUsoDiasMin, filters.usadoNosUltimosDias);
   const nExtrato = ativos(filters.etapaUso, filters.usosMin, filters.diasSemUsoRealMin);
   const nCompras = ativos(filters.categoriasCompra, filters.compraNosUltimosDias);
-  const total = nCliente + nUso + nExtrato + nCompras;
+  const nCiclo = ativos(filters.cicloAbriuHaDias, filters.cicloAbreEmDias);
+  const total = nCliente + nUso + nExtrato + nCompras + nCiclo;
 
   function mudou() {
     setPreview(null);
@@ -314,6 +319,20 @@ export default function Segments() {
             <div className="seg-field">
               <label>Sem uso real há pelo menos (dias)</label>
               <input type="number" min={0} style={{ width: "100%" }} placeholder="Ex: 30" value={diasSemUsoRealMin} onChange={(e) => wrap(setDiasSemUsoRealMin)(e.target.value)} />
+            </div>
+          </div>
+        </Section>
+
+        <Section title="Ciclo da cidade (renovação do limite)" count={nCiclo}>
+          <p className="seg-hint">Usa o dia de abertura cadastrado em “Ciclos das cidades”: no dia de abertura o limite renova. Cidades sem ciclo cadastrado não entram.</p>
+          <div className="seg-row">
+            <div className="seg-field">
+              <label>Ciclo abriu há até (dias)</label>
+              <input type="number" min={0} max={31} style={{ width: "100%" }} placeholder="Ex: 3 (0 = só quem abriu hoje)" value={cicloAbriuMax} onChange={(e) => wrap(setCicloAbriuMax)(e.target.value)} />
+            </div>
+            <div className="seg-field">
+              <label>Ciclo abre em até (dias)</label>
+              <input type="number" min={1} max={31} style={{ width: "100%" }} placeholder="Ex: 5" value={cicloAbreMax} onChange={(e) => wrap(setCicloAbreMax)(e.target.value)} />
             </div>
           </div>
         </Section>

@@ -1,6 +1,7 @@
 import { etapaWhere, EtapaUso } from "./etapaUso";
 import { Prisma } from "@prisma/client";
 import { limiteRange, LIMITE_TETO, PerfilRenda } from "./rendaPerfil";
+import { diasAberturaNaFaixa, FaixaDias } from "./ciclos";
 
 /**
  * Definição de filtros de segmento (UI: filtros + preview count).
@@ -37,6 +38,10 @@ export interface SegmentFilters {
   usosMax?: number; // máximo de usos reais nos últimos 90 dias
   diasSemUsoRealMin?: number; // último uso real há pelo menos N dias (ou nunca usou)
   diasSemUsoRealMax?: number; // último uso real há no máximo N dias
+  // Ciclo da cidade (limite renova na abertura; ver ciclos.ts): "abriu há 0–3 dias" / "abre em 1–5 dias".
+  // Clientes de cidade sem ciclo cadastrado não entram em nenhum dos dois.
+  cicloAbriuHaDias?: FaixaDias;
+  cicloAbreEmDias?: FaixaDias;
 }
 
 /**
@@ -105,6 +110,8 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
   if (filters.diasSemUsoRealMax !== undefined) {
     and.push({ ultimoUsoReal: { gte: new Date(Date.now() - filters.diasSemUsoRealMax * 86400000) } });
   }
+  if (filters.cicloAbriuHaDias) and.push({ diaCicloAbertura: { in: diasAberturaNaFaixa(filters.cicloAbriuHaDias, "abriuHa") } });
+  if (filters.cicloAbreEmDias) and.push({ diaCicloAbertura: { in: diasAberturaNaFaixa(filters.cicloAbreEmDias, "abreEm") } });
   if (filters.search) {
     and.push({
       OR: [

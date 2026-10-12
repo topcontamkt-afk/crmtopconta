@@ -127,6 +127,7 @@ model Tenant {
   waMediaBlobs       WaMediaBlob[]
   templateMedias     TemplateMedia[]
   importChanges      ImportChange[]
+  ciclosCidade       CicloCidade[]
 }
 
 model User {
@@ -187,6 +188,7 @@ model Client {
   ultimoUsoReal        DateTime?
   usosUltimos90d       Int       @default(0)
   usosTotal            Int       @default(0)
+  diaCicloAbertura     Int? // dia do mês em que o limite renova (da cidade; ver services/ciclos.ts)
 
   percentualUtilizado Decimal    @default(0) @db.Decimal(6, 2)
   faixaUso            UsageFaixa @default(SEM_USO)
@@ -240,6 +242,7 @@ model Client {
   @@unique([tenantId, cpfHash])
   @@index([tenantId, telefone])
   @@index([tenantId, cidade])
+  @@index([tenantId, diaCicloAbertura])
   @@index([tenantId, faixaUso])
   @@index([tenantId, ultimoUsoReal])
   @@index([tenantId, statusConta])
@@ -776,4 +779,19 @@ model WaMediaBlob {
   createdAt DateTime @default(now())
 
   @@index([tenantId])
+}
+
+/// Ciclo de cobrança por cidade: dia em que o limite renova (abertura) e dia de fechamento (o anterior).
+model CicloCidade {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  cidadeKey     String // chave de comparação (cidades.ts: minúscula, sem espaços nas pontas)
+  cidade        String // nome para exibição
+  diaAbertura   Int
+  diaFechamento Int?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([tenantId, cidadeKey])
 }
