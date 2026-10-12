@@ -458,7 +458,7 @@ model AutomationRule {
   tenantId  String
   tenant    Tenant    @relation(fields: [tenantId], references: [id])
   name      String
-  trigger   String // NOVO_CLIENTE_SEM_USO | INATIVO_30_DIAS | LIMITE_RENOVADO | ESTIMULO_FAIXA | OPT_OUT_TELEFONE_INVALIDO
+  trigger   String // NOVO_CLIENTE_SEM_USO | INATIVO_30_DIAS | LIMITE_RENOVADO | ESTIMULO_FAIXA | OPT_OUT_TELEFONE_INVALIDO | ETAPA_PERFIL | CICLO_ABERTO
   condition Json?
   action    Json // { type: 'campaign' | 'notification' | 'block', ... }
   enabled   Boolean   @default(false)

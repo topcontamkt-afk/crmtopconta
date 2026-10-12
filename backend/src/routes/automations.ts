@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
+import { runRule } from "../services/automationEngine";
 
 const router = Router();
 router.use(requireAuth);
@@ -15,6 +16,7 @@ export const AUTOMATION_TRIGGERS = [
   "ESTIMULO_FAIXA",
   "OPT_OUT_TELEFONE_INVALIDO",
   "ETAPA_PERFIL",
+  "CICLO_ABERTO",
 ] as const;
 
 router.get("/", async (req, res) => {
@@ -63,6 +65,22 @@ router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
     details: { name: updated.name, enabled: updated.enabled },
   });
   res.json(updated);
+});
+
+/**
+ * POST /api/automations/:id/run — roda a regra agora (a Vercel Hobby só avalia 1x/dia). Com `simular: true`
+ * só mostra quantos clientes (e por cidade, no ciclo) casariam, sem enviar nada.
+ */
+const runSchema = z.object({ simular: z.boolean().default(false) });
+router.post("/:id/run", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const parsed = runSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { tenantId, id: userId } = req.user!;
+  const rule = await prisma.automationRule.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!rule) return res.status(404).json({ error: "Regra não encontrada" });
+  const result = await runRule(prisma, rule, { simular: parsed.data.simular });
+  await logAudit({ tenantId, userId, action: parsed.data.simular ? "SIMULATE_AUTOMATION" : "RUN_AUTOMATION", target: "AutomationRule", targetId: rule.id, details: { matched: result.matched } });
+  res.json(result);
 });
 
 export default router;

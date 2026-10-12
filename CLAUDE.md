@@ -340,8 +340,12 @@ abertura, dias para abrir, dia do ciclo; mês curto usa o último dia). A abertu
 de cada importação de clientes e no job diário de snapshot) — assim os filtros seguem síncronos: `cicloAbriuHaDias {min,max}` e `cicloAbreEmDias {min,max}` viram `diaCicloAbertura in [...]`
 (`diasAberturaNaFaixa`); cidade sem ciclo não entra em nenhum. `routes/ciclos.ts`: `GET /api/ciclos` (cadastro + cidades da base sem ciclo), `PUT /api/ciclos` (ADMIN, tabela inteira),
 `GET /api/ciclos/proximos` (card do Dashboard: abriu há ≤2 dias ou abre em ≤7), `GET /api/ciclos/audiencia?cidadeKey=` (ids aptos + mensagem para "Criar campanha"). Telas: `/ciclos`
-(preenche a tabela da TopConta: Natal 6, Carmópolis 7, Itaporanga e N. S. da Glória 10, Lagarto/Itabaianinha/Boquim/Luziânia 15), card no Dashboard e seção em Segmentos. Fases seguintes:
-gatilho de automação "ciclo abriu", disparo escalonado por cidade e relatórios por dia do ciclo. SQL: `backend/prisma/sql/2026-10-ciclos-cidade.sql` (rodar antes do deploy).
+(preenche a tabela da TopConta: Natal 6, Carmópolis 7, Itaporanga e N. S. da Glória 10, Lagarto/Itabaianinha/Boquim/Luziânia 15), card no Dashboard e seção em Segmentos. **Fase 2:** gatilho de automação `CICLO_ABERTO` (`automationEngine.ts`): casa quem tem `diaCicloAbertura` igual ao de uma cidade que abriu há `diasAposAbertura` dias
+(default 0 = no dia), opcionalmente só `cidades` escolhidas (chaves de `CicloCidade`), `perfilRenda`, `etapaUso` (exige extrato em dia) e `comSaldo` (o saldo vem da última planilha, pode não
+refletir a renovação). `matchClients` devolve **um grupo por cidade** e `runRule` executa a ação por grupo: uma campanha por cidade (`Automação: <regra> · <cidade> (<data>)`, resultado separado e
+sem repetir no mesmo dia). `POST /api/automations/:id/run` (`simular: true` só conta por cidade) alimenta "Simular"/"Rodar agora" na tela. Limite do plano Hobby: o motor roda 1x/dia (~07h BRT) e a
+ação de campanha envia só `throttlePerMin` (default 60) mensagens por execução; o resto depende do "Disparar lote"/cron de disparo — para públicos grandes (Natal) o caminho mais completo é o botão
+"Criar campanha" do card (o navegador drena em lotes). Fase seguinte: relatórios por dia do ciclo. SQL: `backend/prisma/sql/2026-10-ciclos-cidade.sql` (rodar antes do deploy).
 
 ### Cron jobs: local vs. Vercel
 
