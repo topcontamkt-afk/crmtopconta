@@ -126,6 +126,7 @@ model Tenant {
   waMessages         WaMessage[]
   waMediaBlobs       WaMediaBlob[]
   templateMedias     TemplateMedia[]
+  importChanges      ImportChange[]
 }
 
 model User {
@@ -259,6 +260,35 @@ model ImportJob {
   startedAt    DateTime     @default(now())
   finishedAt   DateTime?
   triggeredBy  String? // userId ou "scheduler"
+  // Proteção da importação: formato usado (cartoes | generico | compras | google_sheets), lote (todas as
+  // requisições de UM arquivo compartilham o loteId) e nome do arquivo; `desfeitaEm` marca lote desfeito.
+  formato      String?
+  loteId       String?
+  nomeArquivo  String?
+  desfeitaEm   DateTime?
+  desfeitaPor  String?
+
+  changes ImportChange[]
+
+  @@index([tenantId, loteId])
+}
+
+/// Estado ANTERIOR dos clientes que uma importação alterou/criou: é o que permite desfazer o lote
+/// (services/importUndo.ts). `before` guarda só as colunas que a importação gravou. Expira em 30 dias.
+model ImportChange {
+  id          String    @id @default(uuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id])
+  importJobId String
+  importJob   ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  loteId      String?
+  clientId    String
+  kind        String // ATUALIZADO | CRIADO
+  before      Json?
+  createdAt   DateTime  @default(now())
+
+  @@index([tenantId, loteId])
+  @@index([importJobId])
 }
 
 model Movement {

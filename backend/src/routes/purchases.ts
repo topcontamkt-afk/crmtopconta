@@ -7,12 +7,19 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { importLimiter } from "../middleware/rateLimit";
 import { runPurchaseImport, PurchaseRow } from "../services/purchaseImport";
+import { formatMismatch } from "../services/importFormat";
 import { CATEGORY_MESSAGES, isMerchantCategory, MERCHANT_CATEGORIES, messageForCategories, MULTI_CATEGORY_MESSAGE } from "../services/merchantCategories";
 
 const router = Router();
 router.use(requireAuth);
 
-const importSchema = z.object({ rows: z.array(z.record(z.any())).min(1).max(2000) });
+const importSchema = z.object({
+  rows: z.array(z.record(z.any())).min(1).max(2000),
+  cabecalhos: z.array(z.string()).max(300).optional(),
+  loteId: z.string().uuid().optional(),
+  nomeArquivo: z.string().max(200).optional(),
+  forcarFormato: z.boolean().optional(),
+});
 
 /**
  * POST /api/purchases/import — aba "Todas as Compras" (linhas já mapeadas no frontend). Idempotente
@@ -23,7 +30,15 @@ router.post("/import", importLimiter, requireRole("ADMIN", "OPERATOR"), async (r
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { tenantId, id: userId } = req.user!;
 
-  const { importJobId, result } = await runPurchaseImport(prisma, tenantId, parsed.data.rows as PurchaseRow[], userId);
+  // Mesma trava das importações de clientes: arquivo de outro formato não entra como compras.
+  if (parsed.data.cabecalhos?.length) {
+    const erro = formatMismatch("compras", parsed.data.cabecalhos);
+    if (erro && !(parsed.data.forcarFormato && req.user!.role === "ADMIN")) {
+      return res.status(422).json({ error: erro.mensagem, codigo: "FORMATO_INCOMPATIVEL", detectado: erro.detectado, escolhido: "compras" });
+    }
+  }
+
+  const { importJobId, result } = await runPurchaseImport(prisma, tenantId, parsed.data.rows as PurchaseRow[], userId, { loteId: parsed.data.loteId, nomeArquivo: parsed.data.nomeArquivo });
   await logAudit({
     tenantId,
     userId,

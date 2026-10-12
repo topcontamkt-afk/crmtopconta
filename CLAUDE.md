@@ -319,6 +319,19 @@ separador decimal. Segmentos e campanhas filtram por `categoriasCompra`/`lojista
 enxerga nenhuma linha. Use sempre `tenantRaw.query/execute` (`config/db.ts`), que abre a transaction com
 `app.tenant_id`.
 
+### Proteção da importação (formato, não zerar, impacto, desfazer)
+
+Nasceu de um incidente: um CSV de compras importado como "Cartões e contas" zerou limite/saldo/status de ~2.900 clientes. Camadas:
+(1) `services/importFormat.ts` (e cópia em `frontend/src/utils/importFormat.ts`, pacotes independentes) reconhece o formato pelos cabeçalhos; a tela bloqueia
+e oferece "Usar o formato X", e o servidor devolve `422 FORMATO_INCOMPATIVEL` (ADMIN pode `forcarFormato`) com base nos `cabecalhos` enviados.
+(2) **Coluna ausente nunca zera**: `FieldPresence` (limite/saldo/utilizado/status) é calculada sobre o ARQUIVO INTEIRO na tela (`camposPresentes`) e `planUpdate`
+(cartões) / `PROTEGIDOS` (genérico) tiram esses campos do update; célula vazia em coluna que TEM dados continua valendo zero (comércio credenciado).
+(3) `POST /imports/cartoes/preview` simula sem gravar (novos, atualizados, limites alterados/zerados, status, autorização revogada, campos ignorados); a tela soma os
+lotes e exige confirmação extra se zera ≥20 clientes ou ≥2%. (4) Desfazer: cada import de clientes grava `ImportChange` (estado anterior das colunas tocadas, ou CRIADO),
+guardado 30 dias; `POST /imports/lotes/:loteId/desfazer` (ADMIN, só a ÚLTIMA importação de clientes, em partes de 300 até `concluido`; a tela repete) restaura, apaga criados e
+seus snapshots/movimentos. Compras não têm preview nem desfazer. (5) `ImportJob.formato/loteId/nomeArquivo`: o arquivo (vários jobs de 400 linhas) é um `loteId`; o histórico
+vem de `GET /imports/lotes` (`groupLotes`). SQL: `backend/prisma/sql/2026-10-protecao-importacao.sql` (rodar antes do deploy). O servidor confia nos cabeçalhos enviados pela tela.
+
 ### Cron jobs: local vs. Vercel
 
 Locally, `services/scheduler.ts` runs everything via `node-cron` in-process.

@@ -119,7 +119,7 @@ function parseDate(v?: string): Date | undefined {
 }
 
 export function parseNumber(v?: string | number): number | undefined {
-  if (v === undefined || v === null || v === "") return undefined;
+  if (v === undefined || v === null || (typeof v === "string" && v.trim() === "")) return undefined;
   if (typeof v === "number") return v;
   // Aceita "R$ 500,00" (BR), "2,000.00" / "10.50" (EUA, comum em CSV exportado do Sheets) e
   // "R$ -" (zero): parseMoney deduz o separador decimal de cada valor em vez de assumir BR.
@@ -145,7 +145,7 @@ function validateRow(row: CardAccountRow, rowNumber: number): RowError | null {
   return null;
 }
 
-interface PreparedRow {
+export interface PreparedRow {
   rowNumber: number;
   cpfHash: string;
   limiteTotal: number;
@@ -261,24 +261,268 @@ function prepareRow(rawIn: CardAccountRow, rowNumber: number, tenantCpfSalt: str
   return { rowNumber, cpfHash, limiteTotal, saldoDisponivel, valorUtilizado, statusConta, data };
 }
 
+/* ───────────────────────── proteção: o que a planilha realmente traz ───────────────────────── */
+
+/**
+ * Quais grupos de informação o ARQUIVO traz de verdade (ao menos uma célula preenchida). Uma coluna que
+ * não existe, ou que está vazia em todas as linhas, NÃO altera clientes que já estão na base: foi assim
+ * que uma planilha de compras importada como "Cartões e contas" zerou limite e saldo de milhares de
+ * clientes. Coluna presente com célula vazia numa linha continua valendo zero (é como o comércio
+ * credenciado, sem limite, aparece na planilha).
+ */
+export interface FieldPresence {
+  limite: boolean;
+  saldo: boolean;
+  utilizado: boolean;
+  status: boolean;
+}
+
+export const ALL_PRESENT: FieldPresence = { limite: true, saldo: true, utilizado: true, status: true };
+
+const filled = (v: unknown) => v !== undefined && v !== null && String(v).trim() !== "";
+
+export function detectPresence(rows: CardAccountRow[]): FieldPresence {
+  return {
+    limite: rows.some((r) => parseNumber(r.limite) !== undefined),
+    saldo: rows.some((r) => parseNumber(r.saldo_disponivel) !== undefined),
+    utilizado: rows.some((r) => parseNumber(r.valor_utilizado) !== undefined),
+    status: rows.some((r) => [r.status_cartao, r.status_cadastro, r.bloqueado, r.cartao_bloqueado, r.conta_bloqueada, r.encerrado].some(filled)),
+  };
+}
+
+/** Nomes legíveis do que o arquivo NÃO traz (e portanto não será alterado nos clientes existentes). */
+export function ignoredFields(p: FieldPresence): string[] {
+  const out: string[] = [];
+  if (!p.limite) out.push("limite");
+  if (!p.saldo) out.push("saldo disponível");
+  if (!p.utilizado && !(p.limite && p.saldo)) out.push("valor utilizado");
+  if (!p.status) out.push("status e autorização de comunicação");
+  return out;
+}
+
+type ClientRow = Prisma.ClientGetPayload<Record<string, never>>;
+
+export interface PlannedUpdate {
+  /** só o que muda no cliente existente */
+  update: Prisma.ClientUpdateInput;
+  /** estado da conta DEPOIS da importação (para histórico e relatórios) */
+  final: AccountStateLike;
+}
+interface AccountStateLike {
+  limiteTotal: number;
+  saldoDisponivel: number;
+  valorUtilizado: number;
+  statusConta: "ATIVO" | "INATIVO" | "BLOQUEADO";
+}
+
+/**
+ * Atualização de um cliente que já existe, respeitando o que o arquivo traz (ver FieldPresence). O que o
+ * arquivo não informa fica como está; `valorAntecipado` nunca é tocado (não vem desta planilha).
+ */
+export function planUpdate(p: PreparedRow, existing: ClientRow, presence: FieldPresence): PlannedUpdate {
+  const update: Prisma.ClientUpdateInput = { ...p.data };
+  delete (update as any).tenant;
+  delete (update as any).valorAntecipado;
+
+  const exLimite = Number(existing.limiteTotal);
+  const exSaldo = Number(existing.saldoDisponivel);
+  const exUtil = Number(existing.valorUtilizado);
+
+  const temUtilizado = presence.utilizado || (presence.limite && presence.saldo);
+  if (!presence.limite) delete update.limiteTotal;
+  if (!presence.saldo) delete update.saldoDisponivel;
+  if (!temUtilizado) delete update.valorUtilizado;
+
+  const limite = presence.limite ? p.limiteTotal : exLimite;
+  const saldo = presence.saldo ? p.saldoDisponivel : exSaldo;
+  const util = temUtilizado ? p.valorUtilizado : exUtil;
+  if (presence.limite || temUtilizado) {
+    const { percentual, faixa } = computeUsage(limite, util);
+    update.percentualUtilizado = percentual;
+    update.faixaUso = faixa;
+  } else {
+    delete update.percentualUtilizado;
+    delete update.faixaUso;
+  }
+
+  let status = existing.statusConta as AccountStateLike["statusConta"];
+  if (presence.status) {
+    status = p.statusConta;
+  } else {
+    delete update.statusConta;
+    delete update.autorizacaoComunicacao;
+    delete update.origemCliente;
+    delete update.encerradoEm;
+    delete update.motivoEncerramento;
+    delete update.obsEncerramento;
+    delete update.statusValidacaoCadastro;
+  }
+  // opt-out é sticky: nunca reativa a autorização sozinho
+  if (existing.optOutAt && "autorizacaoComunicacao" in update) update.autorizacaoComunicacao = false;
+
+  return { update, final: { limiteTotal: limite, saldoDisponivel: saldo, valorUtilizado: util, statusConta: status } };
+}
+
+/** Colunas que a importação vai gravar no cliente, com o valor de ANTES (para desfazer). */
+export function snapshotBefore(existing: ClientRow, update: Prisma.ClientUpdateInput): Record<string, unknown> {
+  const before: Record<string, unknown> = {};
+  for (const key of Object.keys(update)) {
+    if (key in existing) before[key] = (existing as any)[key];
+  }
+  return JSON.parse(JSON.stringify(before));
+}
+
+export interface ChangeSummary {
+  limiteAlterado: boolean;
+  limiteZerado: boolean;
+  limiteAumentou: boolean;
+  limiteDiminuiu: boolean;
+  saldoAlterado: boolean;
+  statusAlterado: boolean;
+  statusPara?: "ATIVO" | "INATIVO" | "BLOQUEADO";
+  autorizacaoRevogada: boolean;
+  autorizacaoConcedida: boolean;
+  cadastroAlterado: boolean;
+}
+
+const cents = (n: number) => Math.round(n * 100);
+
+/** O que muda de fato num cliente existente (para a prévia de impacto). */
+export function summarizeChange(existing: ClientRow, planned: PlannedUpdate): ChangeSummary {
+  const exLimite = Number(existing.limiteTotal);
+  const novoAut = (planned.update as any).autorizacaoComunicacao as boolean | undefined;
+  const nome = (planned.update as any).nome as string | undefined;
+  const tel = (planned.update as any).telefone as string | undefined;
+  return {
+    limiteAlterado: cents(planned.final.limiteTotal) !== cents(exLimite),
+    limiteZerado: exLimite > 0 && planned.final.limiteTotal === 0,
+    limiteAumentou: planned.final.limiteTotal > exLimite,
+    limiteDiminuiu: planned.final.limiteTotal < exLimite,
+    saldoAlterado: cents(planned.final.saldoDisponivel) !== cents(Number(existing.saldoDisponivel)),
+    statusAlterado: planned.final.statusConta !== existing.statusConta,
+    statusPara: planned.final.statusConta !== existing.statusConta ? planned.final.statusConta : undefined,
+    autorizacaoRevogada: novoAut === false && existing.autorizacaoComunicacao === true,
+    autorizacaoConcedida: novoAut === true && existing.autorizacaoComunicacao === false,
+    cadastroAlterado: (nome !== undefined && nome !== existing.nome) || (tel !== undefined && tel !== existing.telefone),
+  };
+}
+
+export interface ImportPreview {
+  total: number;
+  invalidos: number;
+  novos: number;
+  atualizados: number;
+  semAlteracao: number;
+  limite: { alterados: number; zerados: number; aumentaram: number; diminuiram: number };
+  saldoAlterados: number;
+  status: { alterados: number; paraInativo: number; paraBloqueado: number; paraAtivo: number };
+  autorizacao: { revogadas: number; concedidas: number };
+  cadastroAlterados: number;
+  /** o que o arquivo não traz e, por isso, não será alterado nos clientes existentes */
+  ignorados: string[];
+  /** até 5 clientes que perdem o limite, para conferir a olho */
+  exemplosZerados: { nome: string; limiteAntes: number }[];
+}
+
+export const EMPTY_PREVIEW: ImportPreview = {
+  total: 0, invalidos: 0, novos: 0, atualizados: 0, semAlteracao: 0,
+  limite: { alterados: 0, zerados: 0, aumentaram: 0, diminuiram: 0 }, saldoAlterados: 0,
+  status: { alterados: 0, paraInativo: 0, paraBloqueado: 0, paraAtivo: 0 }, autorizacao: { revogadas: 0, concedidas: 0 },
+  cadastroAlterados: 0, ignorados: [], exemplosZerados: [],
+};
+
+async function fetchExisting(prisma: AppPrismaClient, tenantId: string, prepared: PreparedRow[]): Promise<Map<string, ClientRow>> {
+  const map = new Map<string, ClientRow>();
+  if (prepared.length === 0) return map;
+  const existing = await prisma.client.findMany({ where: { tenantId, cpfHash: { in: [...new Set(prepared.map((p) => p.cpfHash))] } } });
+  for (const c of existing) map.set(c.cpfHash, c);
+  return map;
+}
+
+/**
+ * Simula o lote SEM gravar nada: quantos clientes são novos/atualizados e o que muda neles (limite,
+ * saldo, status, autorização). Alimenta a tela de confirmação antes de importar.
+ */
+export async function previewCardAccountImport(prisma: AppPrismaClient, tenantId: string, rows: CardAccountRow[], presence: FieldPresence = detectPresence(rows)): Promise<ImportPreview> {
+  const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { cpfSalt: true } });
+  const errors: RowError[] = [];
+  const prepared: PreparedRow[] = [];
+  rows.forEach((raw, i) => {
+    const p = prepareRow(raw, i + 2, tenant.cpfSalt, "preview", tenantId, errors);
+    if (p) prepared.push(p);
+  });
+  const existingByHash = await fetchExisting(prisma, tenantId, prepared);
+
+  const out: ImportPreview = JSON.parse(JSON.stringify(EMPTY_PREVIEW));
+  out.total = rows.length;
+  out.invalidos = errors.filter((e) => !e.motivo.startsWith("Aviso:")).length;
+  out.ignorados = ignoredFields(presence);
+  for (const p of prepared) {
+    const existing = existingByHash.get(p.cpfHash);
+    if (!existing) {
+      out.novos++;
+      continue;
+    }
+    out.atualizados++;
+    const c = summarizeChange(existing, planUpdate(p, existing, presence));
+    if (c.limiteAlterado) out.limite.alterados++;
+    if (c.limiteZerado) {
+      out.limite.zerados++;
+      if (out.exemplosZerados.length < 5) out.exemplosZerados.push({ nome: existing.nome, limiteAntes: Number(existing.limiteTotal) });
+    }
+    if (c.limiteAumentou) out.limite.aumentaram++;
+    if (c.limiteDiminuiu) out.limite.diminuiram++;
+    if (c.saldoAlterado) out.saldoAlterados++;
+    if (c.statusAlterado) {
+      out.status.alterados++;
+      if (c.statusPara === "INATIVO") out.status.paraInativo++;
+      if (c.statusPara === "BLOQUEADO") out.status.paraBloqueado++;
+      if (c.statusPara === "ATIVO") out.status.paraAtivo++;
+    }
+    if (c.autorizacaoRevogada) out.autorizacao.revogadas++;
+    if (c.autorizacaoConcedida) out.autorizacao.concedidas++;
+    if (c.cadastroAlterado) out.cadastroAlterados++;
+    if (!c.limiteAlterado && !c.saldoAlterado && !c.statusAlterado && !c.autorizacaoRevogada && !c.autorizacaoConcedida && !c.cadastroAlterado) out.semAlteracao++;
+  }
+  return out;
+}
+
+export interface CardImportOptions {
+  /** o que o ARQUIVO INTEIRO traz (a tela calcula no arquivo todo; sem isso vale o que este lote traz) */
+  presence?: FieldPresence;
+  loteId?: string;
+  nomeArquivo?: string;
+}
+
+const CHANGE_TTL_DAYS = 30;
+
 /**
  * Importa o lote já mapeado para o vocabulário canônico (ver CardAccountRow). Aplica: validação
  * de CPF/CNPJ, normalização de telefone, determinação de status/autorização a partir do sinal
  * disponível (STATUS explícito OU StatusCadastro + uso do saldo), Bloqueado/Encerramento
  * sobrepondo o status com prioridade máxima, e autorização de comunicação por padrão (base
  * legal: aceite no contrato de abertura de conta) exceto para cadastros reprovados.
+ *
+ * Proteções: o que o arquivo não traz não altera clientes existentes (planUpdate); o estado anterior
+ * de cada cliente tocado vai para ImportChange, o que permite desfazer o lote (services/importUndo.ts).
  */
 export async function runCardAccountImport(
   prisma: AppPrismaClient,
   tenantId: string,
   rows: CardAccountRow[],
-  triggeredBy: string
+  triggeredBy: string,
+  opts: CardImportOptions = {}
 ): Promise<{ importJobId: string; result: ImportRunResult }> {
   const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+  const presence = opts.presence ?? detectPresence(rows);
 
   const job = await prisma.importJob.create({
-    data: { tenantId, source: "csv", status: "EM_EXECUCAO", totalRows: rows.length, triggeredBy },
+    data: { tenantId, source: "csv", formato: "cartoes", loteId: opts.loteId, nomeArquivo: opts.nomeArquivo, status: "EM_EXECUCAO", totalRows: rows.length, triggeredBy },
   });
+  // Estados anteriores só servem para desfazer: depois de 30 dias não valem mais.
+  await prisma.importChange
+    .deleteMany({ where: { tenantId, createdAt: { lt: new Date(Date.now() - CHANGE_TTL_DAYS * 86_400_000) } } })
+    .catch(() => undefined);
 
   const errors: RowError[] = [];
 
@@ -292,17 +536,7 @@ export async function runCardAccountImport(
   // Fase 2: uma única consulta pra descobrir quem já existe no lote inteiro (em vez de uma
   // consulta por linha) — dá pra saber criado-vs-atualizado e aplicar o opt-out sticky e o
   // registro de renovação de limite sem precisar reconsultar linha a linha.
-  const existingByCpfHash = new Map<
-    string,
-    { id: string; limiteTotal: Prisma.Decimal; saldoDisponivel: Prisma.Decimal; statusConta: "ATIVO" | "INATIVO" | "BLOQUEADO"; optOutAt: Date | null }
-  >();
-  if (prepared.length > 0) {
-    const existing = await prisma.client.findMany({
-      where: { tenantId, cpfHash: { in: prepared.map((p) => p.cpfHash) } },
-      select: { id: true, cpfHash: true, limiteTotal: true, saldoDisponivel: true, statusConta: true, optOutAt: true },
-    });
-    for (const c of existing) existingByCpfHash.set(c.cpfHash, c);
-  }
+  const existingByCpfHash = await fetchExisting(prisma, tenantId, prepared);
 
   // Fase 3: grava em paralelo (upsert — INSERT ... ON CONFLICT no Postgres, atômico mesmo com
   // documentos duplicados dentro do mesmo lote rodando ao mesmo tempo).
@@ -310,46 +544,55 @@ export async function runCardAccountImport(
   let updated = 0;
   const movementsToCreate: { clientId: string; valor: number }[] = [];
   const snapshotCandidates: SnapshotCandidate[] = [];
+  const changes = new Map<string, { clientId: string; kind: "ATUALIZADO" | "CRIADO"; before: Record<string, unknown> | null }>();
 
   await mapWithConcurrency(prepared, CONCURRENCY, async (p) => {
     const existing = existingByCpfHash.get(p.cpfHash);
-    const data = { ...p.data, autorizacaoComunicacao: existing?.optOutAt ? false : p.data.autorizacaoComunicacao };
+    const createData = { ...p.data, autorizacaoComunicacao: existing?.optOutAt ? false : p.data.autorizacaoComunicacao };
+    const planned = existing ? planUpdate(p, existing, presence) : null;
     try {
       const saved = await prisma.client.upsert({
         where: { tenantId_cpfHash: { tenantId, cpfHash: p.cpfHash } },
-        create: data,
-        update: data,
+        create: createData,
+        update: planned ? planned.update : (createData as Prisma.ClientUpdateInput),
         select: { id: true },
       });
+      const final = planned ? planned.final : { limiteTotal: p.limiteTotal, saldoDisponivel: p.saldoDisponivel, valorUtilizado: p.valorUtilizado, statusConta: p.statusConta };
       snapshotCandidates.push({
         clientId: saved.id,
         // estado de ANTES desta importação (lido na Fase 2) — undefined para cliente novo
         previous: existing
-          ? {
-              limiteTotal: Number(existing.limiteTotal),
-              saldoDisponivel: Number(existing.saldoDisponivel),
-              statusConta: existing.statusConta,
-            }
+          ? { limiteTotal: Number(existing.limiteTotal), saldoDisponivel: Number(existing.saldoDisponivel), statusConta: existing.statusConta }
           : undefined,
-        current: {
-          limiteTotal: p.limiteTotal,
-          saldoDisponivel: p.saldoDisponivel,
-          valorUtilizado: p.valorUtilizado,
-          statusConta: p.statusConta,
-        },
+        current: final,
       });
-      if (existing) {
+      if (existing && planned) {
         updated++;
-        if (p.limiteTotal > Number(existing.limiteTotal)) {
-          movementsToCreate.push({ clientId: existing.id, valor: p.limiteTotal - Number(existing.limiteTotal) });
+        if (!changes.has(saved.id)) changes.set(saved.id, { clientId: saved.id, kind: "ATUALIZADO", before: snapshotBefore(existing, planned.update) });
+        if (final.limiteTotal > Number(existing.limiteTotal)) {
+          movementsToCreate.push({ clientId: existing.id, valor: final.limiteTotal - Number(existing.limiteTotal) });
         }
       } else {
         added++;
+        if (!changes.has(saved.id)) changes.set(saved.id, { clientId: saved.id, kind: "CRIADO", before: null });
       }
     } catch (e: any) {
       errors.push({ row: p.rowNumber, motivo: `Erro ao gravar registro: ${e.message}` });
     }
   });
+
+  // Estado anterior dos clientes tocados (para desfazer). Falha aqui não derruba a importação: só deixa de
+  // haver "Desfazer" para este lote.
+  try {
+    const list = [...changes.values()];
+    for (let i = 0; i < list.length; i += 500) {
+      await prisma.importChange.createMany({
+        data: list.slice(i, i + 500).map((c) => ({ tenantId, importJobId: job.id, loteId: opts.loteId ?? null, clientId: c.clientId, kind: c.kind, before: (c.before ?? undefined) as any })),
+      });
+    }
+  } catch (e) {
+    console.error("[cardAccountImport] não guardei o estado anterior (sem 'Desfazer' neste lote):", (e as Error).message);
+  }
 
   // Renovações de limite (Movement) — não bloqueiam a resposta principal; erro aqui não deve
   // derrubar a importação em si, só fica sem o registro de automação LIMITE_RENOVADO.
