@@ -126,6 +126,8 @@ model Tenant {
   waMessages         WaMessage[]
   waMediaBlobs       WaMediaBlob[]
   templateMedias     TemplateMedia[]
+  importChanges      ImportChange[]
+  ciclosCidade       CicloCidade[]
 }
 
 model User {
@@ -186,6 +188,7 @@ model Client {
   ultimoUsoReal        DateTime?
   usosUltimos90d       Int       @default(0)
   usosTotal            Int       @default(0)
+  diaCicloAbertura     Int? // dia do mês em que o limite renova (da cidade; ver services/ciclos.ts)
 
   percentualUtilizado Decimal    @default(0) @db.Decimal(6, 2)
   faixaUso            UsageFaixa @default(SEM_USO)
@@ -239,6 +242,7 @@ model Client {
   @@unique([tenantId, cpfHash])
   @@index([tenantId, telefone])
   @@index([tenantId, cidade])
+  @@index([tenantId, diaCicloAbertura])
   @@index([tenantId, faixaUso])
   @@index([tenantId, ultimoUsoReal])
   @@index([tenantId, statusConta])
@@ -259,6 +263,35 @@ model ImportJob {
   startedAt    DateTime     @default(now())
   finishedAt   DateTime?
   triggeredBy  String? // userId ou "scheduler"
+  // Proteção da importação: formato usado (cartoes | generico | compras | google_sheets), lote (todas as
+  // requisições de UM arquivo compartilham o loteId) e nome do arquivo; `desfeitaEm` marca lote desfeito.
+  formato      String?
+  loteId       String?
+  nomeArquivo  String?
+  desfeitaEm   DateTime?
+  desfeitaPor  String?
+
+  changes ImportChange[]
+
+  @@index([tenantId, loteId])
+}
+
+/// Estado ANTERIOR dos clientes que uma importação alterou/criou: é o que permite desfazer o lote
+/// (services/importUndo.ts). `before` guarda só as colunas que a importação gravou. Expira em 30 dias.
+model ImportChange {
+  id          String    @id @default(uuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id])
+  importJobId String
+  importJob   ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  loteId      String?
+  clientId    String
+  kind        String // ATUALIZADO | CRIADO
+  before      Json?
+  createdAt   DateTime  @default(now())
+
+  @@index([tenantId, loteId])
+  @@index([importJobId])
 }
 
 model Movement {
@@ -385,6 +418,8 @@ model MessageEvent {
   respondedAt    DateTime?
   convertedAt    DateTime? // primeira movimentação dentro da janela de atribuição
   convertedValue Decimal?           @db.Decimal(14, 2) // valor da movimentação que gerou a conversão (ROI)
+  clickedAt      DateTime? // 1º clique no botão de link rastreado (services/trackedLinks.ts, rota /r/:token)
+  clickCount     Int                @default(0)
 
   @@index([campaignId, status])
   @@index([clientId])
@@ -423,7 +458,7 @@ model AutomationRule {
   tenantId  String
   tenant    Tenant    @relation(fields: [tenantId], references: [id])
   name      String
-  trigger   String // NOVO_CLIENTE_SEM_USO | INATIVO_30_DIAS | LIMITE_RENOVADO | ESTIMULO_FAIXA | OPT_OUT_TELEFONE_INVALIDO
+  trigger   String // NOVO_CLIENTE_SEM_USO | INATIVO_30_DIAS | LIMITE_RENOVADO | ESTIMULO_FAIXA | OPT_OUT_TELEFONE_INVALIDO | ETAPA_PERFIL | CICLO_ABERTO
   condition Json?
   action    Json // { type: 'campaign' | 'notification' | 'block', ... }
   enabled   Boolean   @default(false)
@@ -744,4 +779,19 @@ model WaMediaBlob {
   createdAt DateTime @default(now())
 
   @@index([tenantId])
+}
+
+/// Ciclo de cobrança por cidade: dia em que o limite renova (abertura) e dia de fechamento (o anterior).
+model CicloCidade {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  cidadeKey     String // chave de comparação (cidades.ts: minúscula, sem espaços nas pontas)
+  cidade        String // nome para exibição
+  diaAbertura   Int
+  diaFechamento Int?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([tenantId, cidadeKey])
 }

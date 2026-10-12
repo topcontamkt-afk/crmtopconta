@@ -29,6 +29,7 @@ import { api } from "../api/client";
 import OpportunityQueue from "../components/OpportunityQueue";
 import FrescorExtrato from "../components/FrescorExtrato";
 import PerfisRendaCard from "../components/PerfisRendaCard";
+import CiclosCard from "../components/CiclosCard";
 import { FAIXA_LABELS, FAIXA_OPTIONS } from "../utils/faixas";
 
 type Delta = { abs: number; pct: number | null } | null;
@@ -288,6 +289,10 @@ export default function Dashboard() {
 
       <div className="pd-row">
         <OpportunityQueue cidade={cidade} convenio={convenio} />
+      </div>
+
+      <div className="pd-row">
+        <CiclosCard />
       </div>
 
       <div className="pd-row">

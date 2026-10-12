@@ -28,6 +28,7 @@ interface CampaignLite {
 interface PresetState {
   presetClientIds?: string[];
   presetLabel?: string;
+  presetTemplateId?: string; // vindo da tela de Templates ("Usar em campanha")
 }
 
 const PUBLICO_LABEL: Record<Publico, string> = {
@@ -69,7 +70,7 @@ export default function CampaignWizard() {
   const [metaConectada, setMetaConectada] = useState(true);
   const [sincronizando, setSincronizando] = useState(true);
   const [recentes, setRecentes] = useState<string[]>([]);
-  const [templateId, setTemplateId] = useState("");
+  const [templateId, setTemplateId] = useState(preset?.presetTemplateId ?? "");
   const [busca, setBusca] = useState("");
   const [verTodos, setVerTodos] = useState(false);
 

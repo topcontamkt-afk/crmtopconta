@@ -2,6 +2,7 @@ import { AppPrismaClient } from "../config/db";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 import { loadRealHealth } from "./healthData";
 import { refreshUsageColumns } from "./usageRefresh";
+import { refreshCicloColumns } from "./cicloRefresh";
 import { addDays, computeKpis, todayBrt } from "./dashboardMetrics";
 
 /**
@@ -68,6 +69,7 @@ export async function runSnapshotJob(prisma: AppPrismaClient) {
     try {
       await runWithTenantContextAsync(t.id, async () => {
         await refreshUsageColumns(t.id).catch((e) => console.error(`[snapshots] uso real do tenant ${t.id}:`, e));
+        await refreshCicloColumns(t.id).catch((e) => console.error(`[snapshots] ciclos do tenant ${t.id}:`, e));
         await captureSnapshot(prisma, t.id);
       });
       results.push({ tenantId: t.id, ok: true });

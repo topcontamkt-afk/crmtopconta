@@ -3,6 +3,7 @@ import { computeUsage } from "./usage";
 import { digitsOnly, hashCPF, isValidCPF, maskCPF, normalizePhone } from "./masking";
 import { findExistingClient, IncomingClientRow } from "./dedupe";
 import { notify } from "./notifications";
+import { snapshotBefore } from "./cardAccountImport";
 
 /**
  * Campos mínimos obrigatórios (PRD): id_cliente, nome, telefone, cpf, cidade,
@@ -90,6 +91,23 @@ export interface ImportRunResult {
   errors: RowError[];
 }
 
+export interface ImportOptions {
+  /** campos (chaves de RawSheetRow) que o ARQUIVO INTEIRO traz com algum valor; sem isso vale o que este lote traz */
+  camposPresentes?: string[];
+  loteId?: string;
+  nomeArquivo?: string;
+}
+
+/** Campos que, quando o arquivo não os traz, NÃO podem ser zerados em clientes que já existem. */
+const PROTEGIDOS: Record<string, (keyof RawSheetRow)[]> = {
+  limiteTotal: ["limite_total"],
+  valorUtilizado: ["valor_utilizado"],
+  saldoDisponivel: ["saldo_disponivel"],
+  valorAntecipado: ["valor_antecipado"],
+  statusConta: ["status_conta"],
+  autorizacaoComunicacao: ["autorizacao_comunicacao"],
+};
+
 /**
  * Executa a importação de um lote de linhas já lidas da planilha (ou CSV).
  * Aplica: validação de campos obrigatórios + checksum de CPF, normalização de
@@ -102,13 +120,30 @@ export async function runImport(
   rows: RawSheetRow[],
   triggeredBy: string,
   source: "google_sheets" | "csv" = "google_sheets",
-  sheetId?: string
+  sheetId?: string,
+  opts: ImportOptions = {}
 ): Promise<{ importJobId: string; result: ImportRunResult }> {
   const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } });
 
   const job = await prisma.importJob.create({
-    data: { tenantId, source, sheetId, status: "EM_EXECUCAO", totalRows: rows.length, triggeredBy },
+    data: {
+      tenantId,
+      source,
+      sheetId,
+      formato: source === "google_sheets" ? "google_sheets" : "generico",
+      loteId: opts.loteId,
+      nomeArquivo: opts.nomeArquivo,
+      status: "EM_EXECUCAO",
+      totalRows: rows.length,
+      triggeredBy,
+    },
   });
+
+  // Proteção: uma coluna que o arquivo não traz (ou vazia em todas as linhas) não zera clientes existentes.
+  const presentes = new Set<string>(
+    opts.camposPresentes ?? (Object.values(PROTEGIDOS).flat() as string[]).filter((k) => rows.some((r) => (r as any)[k] !== undefined && (r as any)[k] !== null && String((r as any)[k]).trim() !== ""))
+  );
+  const changes: { clientId: string; kind: "ATUALIZADO" | "CRIADO"; before: Record<string, unknown> | null }[] = [];
 
   const errors: RowError[] = [];
   let added = 0;
@@ -182,11 +217,29 @@ export async function runImport(
       };
 
       if (existing) {
-        await prisma.client.update({ where: { id: existing.id }, data });
+        const update: Record<string, unknown> = { ...data };
+        delete update.tenantId;
+        for (const [coluna, campos] of Object.entries(PROTEGIDOS)) {
+          if (!campos.some((c) => presentes.has(c))) delete update[coluna];
+        }
+        // percentual/faixa: recalcula com o que o arquivo traz e o que já estava, ou deixa como está
+        if (presentes.has("limite_total") || presentes.has("valor_utilizado")) {
+          const lim = presentes.has("limite_total") ? incoming.limiteTotal : Number(existing.limiteTotal);
+          const util = presentes.has("valor_utilizado") ? incoming.valorUtilizado : Number(existing.valorUtilizado);
+          const u = computeUsage(lim, util);
+          update.percentualUtilizado = u.percentual;
+          update.faixaUso = u.faixa;
+        } else {
+          delete update.percentualUtilizado;
+          delete update.faixaUso;
+        }
+        if (existing.optOutAt && "autorizacaoComunicacao" in update) update.autorizacaoComunicacao = false;
+        changes.push({ clientId: existing.id, kind: "ATUALIZADO", before: snapshotBefore(existing as any, update as any) });
+        await prisma.client.update({ where: { id: existing.id }, data: update });
         // Detecta renovação de limite (aumento de limiteTotal) para alimentar a automação
         // LIMITE_RENOVADO — não há campo de histórico de limite dedicado, então o próprio
         // aumento observado entre importações é registrado como Movement.
-        if (incoming.limiteTotal > Number(existing.limiteTotal)) {
+        if (presentes.has("limite_total") && incoming.limiteTotal > Number(existing.limiteTotal)) {
           await prisma.movement.create({
             data: {
               clientId: existing.id,
@@ -198,12 +251,24 @@ export async function runImport(
         }
         updated++;
       } else {
-        await prisma.client.create({ data });
+        const created = await prisma.client.create({ data, select: { id: true } });
+        changes.push({ clientId: created.id, kind: "CRIADO", before: null });
         added++;
       }
     } catch (e: any) {
       errors.push({ row: rowNumber, motivo: `Erro ao gravar registro: ${e.message}` });
     }
+  }
+
+  // Estado anterior dos clientes tocados, para poder desfazer o lote (falha aqui não derruba a importação).
+  try {
+    for (let i = 0; i < changes.length; i += 500) {
+      await prisma.importChange.createMany({
+        data: changes.slice(i, i + 500).map((c) => ({ tenantId, importJobId: job.id, loteId: opts.loteId ?? null, clientId: c.clientId, kind: c.kind, before: (c.before ?? undefined) as any })),
+      });
+    }
+  } catch (e) {
+    console.error("[importService] não guardei o estado anterior (sem 'Desfazer' neste lote):", (e as Error).message);
   }
 
   const status = errors.length === 0 ? "CONCLUIDO" : errors.length === rows.length ? "FALHOU" : "CONCLUIDO_COM_ERROS";

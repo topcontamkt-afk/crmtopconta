@@ -6,6 +6,7 @@ import {
   listMetaTemplates,
   mapMetaStatus,
   metaTemplateName,
+  normalizeButtonPhone,
   renderMetaPreview,
   sendTemplateMessage,
   toMetaBody,
@@ -48,9 +49,32 @@ describe("validateTemplate", () => {
     expect(validateTemplate({ ...base, body: "a".repeat(1025) }).join(" ")).toContain("1024");
     expect(validateTemplate({ ...base, footer: "x".repeat(61) }).join(" ")).toContain("rodapé");
     expect(validateTemplate({ ...base, footer: "Oi {{nome}}" }).join(" ")).toContain("variáveis");
-    expect(validateTemplate({ ...base, quickReplies: ["a", "b", "c", "d"] }).join(" ")).toContain("No máximo 3");
+    expect(validateTemplate({ ...base, quickReplies: ["a", "b", "c", "d"] })).toEqual([]);
+    expect(validateTemplate({ ...base, quickReplies: Array.from({ length: 11 }, (_, i) => `b${i}`) }).join(" ")).toContain("No máximo 10");
     expect(validateTemplate({ ...base, quickReplies: ["x".repeat(26)] }).join(" ")).toContain("25");
     expect(validateTemplate({ ...base, quickReplies: ["Sim", "sim"] }).join(" ")).toContain("mesmo texto");
+  });
+  it("botões de link e de ligar", () => {
+    const ok = validateTemplate({ ...base, buttons: [{ type: "URL", text: "Abrir o app", url: "https://topconta.com.br/app" }, { type: "PHONE_NUMBER", text: "Ligar", phone: "(84) 99999-8888" }] });
+    expect(ok).toEqual([]);
+    const v = (buttons: any[], quickReplies: string[] = []) => validateTemplate({ ...base, buttons, quickReplies }).join(" ");
+    expect(v([{ type: "URL", text: "Site", url: "http://x.com" }])).toContain("https://");
+    expect(v([{ type: "URL", text: "Site", url: "https://x.com/{{1}}" }])).toContain("variável");
+    expect(v([{ type: "URL", text: "Site", url: "" }])).toContain("Informe o link");
+    expect(v([{ type: "URL", text: "", url: "https://x.com" }])).toContain("texto do botão");
+    expect(v([{ type: "URL", text: "x".repeat(26), url: "https://x.com" }])).toContain("25");
+    expect(v([{ type: "PHONE_NUMBER", text: "Ligar", phone: "123" }])).toContain("telefone válido");
+    const tres = [1, 2, 3].map((i) => ({ type: "URL", text: `L${i}`, url: `https://x.com/${i}` }));
+    expect(v(tres)).toContain("No máximo 2 botões de link");
+    const doisFones = [1, 2].map((i) => ({ type: "PHONE_NUMBER", text: `T${i}`, phone: "84999998888" }));
+    expect(v(doisFones)).toContain("No máximo 1 botão de ligar");
+    expect(v([{ type: "URL", text: "Sim", url: "https://x.com" }], ["sim"])).toContain("mesmo texto");
+    expect(v([{ type: "URL", text: "Site", url: "https://x.com" }], Array.from({ length: 10 }, (_, i) => `q${i}`))).toContain("No máximo 10 botões no total");
+  });
+  it("telefone do botão vira +DDI", () => {
+    expect(normalizeButtonPhone("(84) 99999-8888")).toBe("+5584999998888");
+    expect(normalizeButtonPhone("+55 84 99999-8888")).toBe("+5584999998888");
+    expect(normalizeButtonPhone("0800")).toBeNull();
   });
   it("exige a categoria", () => {
     expect(validateTemplate({ ...base, category: null }).join(" ")).toContain("categoria");
@@ -69,6 +93,24 @@ describe("nome e payload de criação", () => {
     expect(p.components[0]).toMatchObject({ type: "BODY", text: "Olá {{1}}, seu limite é {{2}}. Responda se quiser usar.", example: { body_text: [["Maria", "R$ 1.500,00"]] } });
     expect(p.components[1]).toEqual({ type: "FOOTER", text: "Responda SAIR para parar" });
     expect(p.components[2].buttons).toEqual([{ type: "QUICK_REPLY", text: "Quero saber mais" }, { type: "QUICK_REPLY", text: "SAIR" }]);
+  });
+  it("botões: respostas rápidas primeiro, depois link e telefone", () => {
+    const p: any = buildCreatePayload({
+      name: "Oferta",
+      language: "pt_BR",
+      version: 1,
+      ...base,
+      quickReplies: ["SAIR"],
+      buttons: [
+        { type: "URL", text: "Abrir o app", url: "https://topconta.com.br/app" },
+        { type: "PHONE_NUMBER", text: "Ligar", phone: "(84) 99999-8888" },
+      ],
+    });
+    expect(p.components[p.components.length - 1].buttons).toEqual([
+      { type: "QUICK_REPLY", text: "SAIR" },
+      { type: "URL", text: "Abrir o app", url: "https://topconta.com.br/app" },
+      { type: "PHONE_NUMBER", text: "Ligar", phone_number: "+5584999998888" },
+    ]);
   });
   it("sem variáveis não manda exemplo", () => {
     const p: any = buildCreatePayload({ name: "Aviso", language: "pt_BR", version: 1, body: "Olá, temos novidades para você.", category: "UTILITY" });

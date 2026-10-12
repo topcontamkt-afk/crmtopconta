@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { parseCsv } from "../utils/csv";
 import { autoMapColumns, CARD_ACCOUNT_FIELDS, IMPORT_FIELDS, ImportFieldDef, PURCHASE_FIELDS } from "../utils/importFields";
+import { detectFormat, FORMAT_LABEL, hasValue } from "../utils/importFormat";
 
 type UploadFormat = "cartoes" | "generico" | "compras";
 
@@ -20,22 +21,85 @@ interface Quality {
   motivosDeErroMaisComuns: { motivo: string; count: number }[];
 }
 
-interface ImportJob {
-  id: string;
+interface Lote {
+  loteId: string;
+  formato: string | null;
+  formatoNome: string | null;
+  nomeArquivo: string | null;
   source: string;
   status: string;
+  startedAt: string;
   totalRows: number;
   addedCount: number;
   updatedCount: number;
   errorCount: number;
-  startedAt: string;
-  errors: { row: number; motivo: string }[] | null;
+  desfeita: boolean;
+  podeDesfazer: boolean;
 }
+
+interface Preview {
+  total: number;
+  invalidos: number;
+  novos: number;
+  atualizados: number;
+  semAlteracao: number;
+  limite: { alterados: number; zerados: number; aumentaram: number; diminuiram: number };
+  saldoAlterados: number;
+  status: { alterados: number; paraInativo: number; paraBloqueado: number; paraAtivo: number };
+  autorizacao: { revogadas: number; concedidas: number };
+  cadastroAlterados: number;
+  ignorados: string[];
+  exemplosZerados: { nome: string; limiteAntes: number }[];
+}
+
+/** Acima disto, zerar limites exige uma confirmação a mais (20 clientes ou 2% dos atualizados). */
+function muitosZerados(p: Preview): boolean {
+  return p.limite.zerados >= 20 || (p.atualizados > 0 && p.limite.zerados / p.atualizados >= 0.02);
+}
+
+function sumPreview(a: Preview, b: Preview): Preview {
+  return {
+    total: a.total + b.total,
+    invalidos: a.invalidos + b.invalidos,
+    novos: a.novos + b.novos,
+    atualizados: a.atualizados + b.atualizados,
+    semAlteracao: a.semAlteracao + b.semAlteracao,
+    limite: {
+      alterados: a.limite.alterados + b.limite.alterados,
+      zerados: a.limite.zerados + b.limite.zerados,
+      aumentaram: a.limite.aumentaram + b.limite.aumentaram,
+      diminuiram: a.limite.diminuiram + b.limite.diminuiram,
+    },
+    saldoAlterados: a.saldoAlterados + b.saldoAlterados,
+    status: {
+      alterados: a.status.alterados + b.status.alterados,
+      paraInativo: a.status.paraInativo + b.status.paraInativo,
+      paraBloqueado: a.status.paraBloqueado + b.status.paraBloqueado,
+      paraAtivo: a.status.paraAtivo + b.status.paraAtivo,
+    },
+    autorizacao: { revogadas: a.autorizacao.revogadas + b.autorizacao.revogadas, concedidas: a.autorizacao.concedidas + b.autorizacao.concedidas },
+    cadastroAlterados: a.cadastroAlterados + b.cadastroAlterados,
+    ignorados: [...new Set([...a.ignorados, ...b.ignorados])],
+    exemplosZerados: [...a.exemplosZerados, ...b.exemplosZerados].slice(0, 5),
+  };
+}
+
+const EMPTY: Preview = {
+  total: 0, invalidos: 0, novos: 0, atualizados: 0, semAlteracao: 0,
+  limite: { alterados: 0, zerados: 0, aumentaram: 0, diminuiram: 0 }, saldoAlterados: 0,
+  status: { alterados: 0, paraInativo: 0, paraBloqueado: 0, paraAtivo: 0 }, autorizacao: { revogadas: 0, concedidas: 0 },
+  cadastroAlterados: 0, ignorados: [], exemplosZerados: [],
+};
+
+const fmtBRL = (n: number) => n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 
 export default function Imports() {
   const [quality, setQuality] = useState<Quality | null>(null);
-  const [jobs, setJobs] = useState<ImportJob[]>([]);
+  const [lotes, setLotes] = useState<Lote[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [loteErrors, setLoteErrors] = useState<Record<string, { row: number; motivo: string }[]>>({});
+  const [undoing, setUndoing] = useState<string | null>(null);
+  const [undoMsg, setUndoMsg] = useState<string | null>(null);
 
   const { user } = useAuth();
   const [purgeText, setPurgeText] = useState("");
@@ -61,18 +125,31 @@ export default function Imports() {
   const [importing, setImporting] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [confirmZerar, setConfirmZerar] = useState(false);
+  const [forcarFormato, setForcarFormato] = useState(false);
 
   const activeFields = FORMAT_CONFIG[format].fields;
 
   function load() {
     api<Quality>("/imports/quality").then(setQuality);
-    api<ImportJob[]>("/imports").then(setJobs);
+    api<Lote[]>("/imports/lotes").then(setLotes);
   }
   useEffect(load, []);
 
   function changeFormat(next: UploadFormat) {
     setFormat(next);
     resetUpload();
+  }
+
+  // Troca o formato mantendo o arquivo já lido (usado pelo aviso de formato errado)
+  function useDetectedFormat(next: UploadFormat) {
+    setFormat(next);
+    setMapping(autoMapColumns(headers, FORMAT_CONFIG[next].fields));
+    setPreview(null);
+    setConfirmZerar(false);
+    setForcarFormato(false);
   }
 
   async function handleFile(e: ChangeEvent<HTMLInputElement>) {
@@ -106,7 +183,24 @@ export default function Imports() {
     setMapping({});
     setUploadStatus(null);
     setUploadError(null);
+    setPreview(null);
+    setConfirmZerar(false);
+    setForcarFormato(false);
   }
+
+  const detected = headers.length > 0 ? detectFormat(headers) : "desconhecido";
+  const formatWrong = detected !== "desconhecido" && detected !== format;
+  const isAdmin = user?.role === "ADMIN";
+  const blocked = formatWrong && !(forcarFormato && isAdmin);
+
+  // O que o ARQUIVO INTEIRO traz (não só o lote): coluna presente = ao menos uma célula com valor.
+  const presence = {
+    limite: hasValue(dataRows, mapping.limite),
+    saldo: hasValue(dataRows, mapping.saldo_disponivel),
+    utilizado: hasValue(dataRows, mapping.valor_utilizado),
+    status: ["status_cartao", "status_cadastro", "bloqueado", "cartao_bloqueado", "conta_bloqueada", "encerrado"].some((k) => hasValue(dataRows, mapping[k])),
+  };
+  const semColunasSensiveis = format === "cartoes" && !presence.limite && !presence.saldo && !presence.status;
 
   const requiredMissing = activeFields.filter((f) => f.required && mapping[f.key] === undefined);
 
@@ -116,12 +210,8 @@ export default function Imports() {
   // valor subiu de 150 pra 400 porque cada linha ficou bem mais barata de processar.
   const BATCH_SIZE = 400;
 
-  async function handleImport() {
-    setImporting(true);
-    setUploadStatus(null);
-    setUploadError(null);
-
-    const rows = dataRows.map((row) => {
+  function buildRows() {
+    return dataRows.map((row) => {
       const obj: Record<string, string> = {};
       for (const field of activeFields) {
         const idx = mapping[field.key];
@@ -129,6 +219,58 @@ export default function Imports() {
       }
       return obj;
     });
+  }
+
+  // Campos genéricos que o arquivo inteiro traz (protege limite/saldo/status quando a coluna não existe)
+  function camposPresentesGenerico(): string[] {
+    return ["limite_total", "valor_utilizado", "saldo_disponivel", "valor_antecipado", "status_conta", "autorizacao_comunicacao"].filter((k) => hasValue(dataRows, mapping[k]));
+  }
+
+  function extraBody() {
+    return {
+      cabecalhos: headers,
+      nomeArquivo: fileName ?? undefined,
+      ...(forcarFormato && isAdmin ? { forcarFormato: true } : {}),
+    };
+  }
+
+  // Passo "Conferir impacto" (só Cartões e contas): simula o arquivo inteiro sem gravar nada
+  async function handlePreview() {
+    setPreviewing(true);
+    setUploadStatus(null);
+    setUploadError(null);
+    setConfirmZerar(false);
+    try {
+      const rows = buildRows();
+      const batches = Math.ceil(rows.length / BATCH_SIZE) || 1;
+      let total = EMPTY;
+      for (let i = 0; i < batches; i++) {
+        setUploadStatus(`Conferindo lote ${i + 1} de ${batches}...`);
+        const r = await api<Preview>("/imports/cartoes/preview", {
+          method: "POST",
+          body: { rows: rows.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE), camposPresentes: presence, ...extraBody() },
+        });
+        total = sumPreview(total, r);
+      }
+      setPreview(total);
+      setUploadStatus(null);
+    } catch (e) {
+      setUploadError(e instanceof Error ? e.message : "Não consegui conferir o impacto");
+      setUploadStatus(null);
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  async function handleImport() {
+    setImporting(true);
+    setUploadStatus(null);
+    setUploadError(null);
+
+    const rows = buildRows();
+    const loteId = crypto.randomUUID(); // todos os lotes do arquivo compartilham: vira UMA linha no histórico
+    const protecao: Record<string, unknown> =
+      format === "cartoes" ? { camposPresentes: presence } : format === "generico" ? { camposPresentes: camposPresentesGenerico() } : {};
 
     const totalBatches = Math.ceil(rows.length / BATCH_SIZE) || 1;
     let added = 0;
@@ -143,7 +285,7 @@ export default function Imports() {
         setUploadStatus(`Importando lote ${i + 1} de ${totalBatches} (${added + updated} de ${rows.length} processados até agora)...`);
         const resp = await api<{ addedCount: number; updatedCount: number; errorCount: number; unmatchedRows?: number; merchantsCreated?: number }>(
           FORMAT_CONFIG[format].endpoint,
-          { method: "POST", body: { rows: batch } }
+          { method: "POST", body: { rows: batch, loteId, ...protecao, ...extraBody() } }
         );
         added += resp.addedCount;
         updated += resp.updatedCount;
@@ -171,6 +313,42 @@ export default function Imports() {
       load();
     } finally {
       setImporting(false);
+    }
+  }
+
+  async function toggleErrors(loteId: string) {
+    if (expanded === loteId) return setExpanded(null);
+    setExpanded(loteId);
+    if (!loteErrors[loteId]) {
+      try {
+        const r = await api<{ errors: { row: number; motivo: string }[] }>(`/imports/lotes/${loteId}`);
+        setLoteErrors((m) => ({ ...m, [loteId]: r.errors }));
+      } catch {
+        setLoteErrors((m) => ({ ...m, [loteId]: [] }));
+      }
+    }
+  }
+
+  // Desfaz em partes (a função serverless tem tempo limitado): repete até o servidor dizer que acabou
+  async function handleUndo(l: Lote) {
+    const nome = l.nomeArquivo ?? "esta importação";
+    if (!window.confirm(`Desfazer a importação de “${nome}”?\n\nOs clientes voltam ao estado de antes (os criados por ela serão removidos). Alterações feitas depois nesses clientes serão perdidas.`)) return;
+    setUndoing(l.loteId);
+    setUndoMsg(null);
+    let restaurados = 0, removidos = 0, mantidos = 0;
+    try {
+      for (let guard = 0; guard < 500; guard++) {
+        const r = await api<{ restaurados: number; removidos: number; mantidos: number; restantes: number; concluido: boolean }>(`/imports/lotes/${l.loteId}/desfazer`, { method: "POST" });
+        restaurados += r.restaurados; removidos += r.removidos; mantidos += r.mantidos;
+        setUndoMsg(`Desfazendo... ${restaurados + removidos + mantidos} cliente(s) processado(s), faltam ${r.restantes}.`);
+        if (r.concluido) break;
+      }
+      setUndoMsg(`Importação desfeita: ${restaurados} cliente(s) restaurado(s), ${removidos} removido(s)` + (mantidos > 0 ? `, ${mantidos} mantido(s) por terem mudado depois.` : "."));
+    } catch (e) {
+      setUndoMsg(e instanceof Error ? e.message : "Não consegui desfazer");
+    } finally {
+      setUndoing(null);
+      load();
     }
   }
 
@@ -251,21 +429,90 @@ export default function Imports() {
               </div>
             )}
 
+            {formatWrong && (
+              <div className="card" style={{ marginTop: 10, borderColor: "var(--danger, #d9534f)" }}>
+                <p style={{ margin: 0 }}>
+                  <strong>Este arquivo parece ser do formato “{FORMAT_LABEL[detected as keyof typeof FORMAT_LABEL]}”</strong>, mas o formato escolhido é
+                  “{FORMAT_LABEL[format]}”. Importar assim pode gravar dados errados nos clientes.
+                </p>
+                <div style={{ marginTop: 8 }}>
+                  <button className="btn" onClick={() => useDetectedFormat(detected as UploadFormat)}>
+                    Usar o formato {FORMAT_LABEL[detected as keyof typeof FORMAT_LABEL]}
+                  </button>
+                  {isAdmin && (
+                    <label style={{ marginLeft: 12, fontSize: 13 }}>
+                      <input type="checkbox" checked={forcarFormato} onChange={(e) => setForcarFormato(e.target.checked)} /> Sei o que estou fazendo, importar assim mesmo
+                    </label>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {!formatWrong && semColunasSensiveis && (
+              <p style={{ marginTop: 10, fontSize: 13, color: "var(--warning, #b8860b)" }}>
+                Este arquivo não traz limite, saldo nem status. Para os clientes que já existem, esses dados <strong>serão mantidos como estão</strong>
+                (só cadastro e demais campos são atualizados).
+              </p>
+            )}
+
             {requiredMissing.length > 0 && (
               <p className="error-text" style={{ marginTop: 10 }}>
                 Mapeie as colunas obrigatórias: {requiredMissing.map((f) => f.label).join(", ")}.
               </p>
             )}
 
+            {preview && (
+              <div className="card" style={{ marginTop: 12 }}>
+                <h4 style={{ marginTop: 0 }}>Conferir impacto (nada foi gravado ainda)</h4>
+                <ul style={{ fontSize: 13, lineHeight: 1.7 }}>
+                  <li><strong>{preview.novos}</strong> cliente(s) novo(s) e <strong>{preview.atualizados}</strong> existente(s) atualizado(s) ({preview.semAlteracao} sem nenhuma mudança){preview.invalidos > 0 && <>; <strong>{preview.invalidos}</strong> linha(s) inválida(s) ficam de fora</>}.</li>
+                  <li>
+                    Limite: <strong>{preview.limite.alterados}</strong> alterado(s) ({preview.limite.aumentaram} sobem, {preview.limite.diminuiram} descem,{" "}
+                    <strong style={{ color: preview.limite.zerados > 0 ? "var(--danger, #d9534f)" : undefined }}>{preview.limite.zerados} ficam zerados</strong>).
+                  </li>
+                  <li>Saldo disponível alterado em <strong>{preview.saldoAlterados}</strong> cliente(s).</li>
+                  <li>
+                    Status alterado em <strong>{preview.status.alterados}</strong> ({preview.status.paraInativo} inativos, {preview.status.paraBloqueado} bloqueados, {preview.status.paraAtivo} ativos).
+                  </li>
+                  <li>
+                    Autorização de comunicação: <strong style={{ color: preview.autorizacao.revogadas > 0 ? "var(--danger, #d9534f)" : undefined }}>{preview.autorizacao.revogadas} revogada(s)</strong>, {preview.autorizacao.concedidas} concedida(s).
+                  </li>
+                  {preview.ignorados.length > 0 && (
+                    <li>O arquivo não traz <strong>{preview.ignorados.join(", ")}</strong>: isso <strong>não será alterado</strong> nos clientes existentes.</li>
+                  )}
+                </ul>
+                {preview.exemplosZerados.length > 0 && (
+                  <p style={{ fontSize: 13 }}>
+                    Exemplos de quem perde o limite: {preview.exemplosZerados.map((e) => `${e.nome} (era ${fmtBRL(e.limiteAntes)})`).join("; ")}.
+                  </p>
+                )}
+                {muitosZerados(preview) && (
+                  <label style={{ fontSize: 13, color: "var(--danger, #d9534f)" }}>
+                    <input type="checkbox" checked={confirmZerar} onChange={(e) => setConfirmZerar(e.target.checked)} /> Conferi: {preview.limite.zerados} clientes
+                    vão ficar com limite zero e é isso mesmo que quero.
+                  </label>
+                )}
+                <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 0 }}>
+                  Depois de importar, o botão “Desfazer” aparece no histórico (só para o administrador e só na última importação de clientes).
+                </p>
+              </div>
+            )}
+
             <div style={{ marginTop: 12 }}>
-              <button
-                className="btn"
-                disabled={importing || requiredMissing.length > 0}
-                onClick={handleImport}
-              >
-                {importing ? "Importando..." : `Importar ${dataRows.length} clientes`}
-              </button>{" "}
-              <button className="btn secondary" onClick={resetUpload} disabled={importing}>Cancelar</button>
+              {format === "cartoes" && !preview ? (
+                <button className="btn" disabled={previewing || importing || requiredMissing.length > 0 || blocked} onClick={handlePreview}>
+                  {previewing ? "Conferindo..." : "Conferir impacto"}
+                </button>
+              ) : (
+                <button
+                  className="btn"
+                  disabled={importing || requiredMissing.length > 0 || blocked || (preview !== null && muitosZerados(preview) && !confirmZerar)}
+                  onClick={handleImport}
+                >
+                  {importing ? "Importando..." : `Importar ${dataRows.length} linhas`}
+                </button>
+              )}{" "}
+              <button className="btn secondary" onClick={resetUpload} disabled={importing || previewing}>Cancelar</button>
             </div>
           </div>
         )}
@@ -296,46 +543,53 @@ export default function Imports() {
 
       <div className="card">
         <h3>Histórico de importações</h3>
+        {undoMsg && <p style={{ fontSize: 13 }}>{undoMsg}</p>}
         <table>
           <thead>
-            <tr><th>Data</th><th>Origem</th><th>Status</th><th>Linhas</th><th>Novos</th><th>Atualizados</th><th>Erros</th><th></th></tr>
+            <tr><th>Data</th><th>Arquivo</th><th>Formato</th><th>Status</th><th>Linhas</th><th>Novos</th><th>Atualizados</th><th>Erros</th><th></th></tr>
           </thead>
           <tbody>
-            {jobs.map((j) => (
-              <Fragment key={j.id}>
+            {lotes.map((l) => (
+              <Fragment key={l.loteId}>
                 <tr>
-                  <td>{new Date(j.startedAt).toLocaleString("pt-BR")}</td>
-                  <td>{j.source}</td>
+                  <td>{new Date(l.startedAt).toLocaleString("pt-BR")}</td>
+                  <td>{l.nomeArquivo ?? <span style={{ color: "var(--text-muted)" }}>{l.source}</span>}</td>
+                  <td>{l.formatoNome ?? "—"}</td>
                   <td>
-                    <span className={`badge ${j.status === "CONCLUIDO" ? "ok" : j.status === "FALHOU" ? "danger" : j.errorCount ? "warn" : ""}`}>
-                      {j.status}
-                    </span>
+                    {l.desfeita ? (
+                      <span className="badge warn">DESFEITA</span>
+                    ) : (
+                      <span className={`badge ${l.status === "CONCLUIDO" ? "ok" : l.status === "FALHOU" ? "danger" : l.errorCount ? "warn" : ""}`}>{l.status}</span>
+                    )}
                   </td>
-                  <td>{j.totalRows}</td>
-                  <td>{j.addedCount}</td>
-                  <td>{j.updatedCount}</td>
-                  <td>{j.errorCount}</td>
+                  <td>{l.totalRows}</td>
+                  <td>{l.addedCount}</td>
+                  <td>{l.updatedCount}</td>
+                  <td>{l.errorCount}</td>
                   <td>
-                    {j.errorCount > 0 && (
-                      <button className="btn secondary" onClick={() => setExpanded(expanded === j.id ? null : j.id)}>
-                        {expanded === j.id ? "Ocultar erros" : "Ver erros"}
+                    {l.errorCount > 0 && (
+                      <button className="btn secondary" onClick={() => toggleErrors(l.loteId)}>
+                        {expanded === l.loteId ? "Ocultar erros" : "Ver erros"}
+                      </button>
+                    )}{" "}
+                    {isAdmin && l.podeDesfazer && (
+                      <button className="btn danger" disabled={undoing !== null} onClick={() => handleUndo(l)}>
+                        {undoing === l.loteId ? "Desfazendo..." : "Desfazer"}
                       </button>
                     )}
                   </td>
                 </tr>
-                {expanded === j.id && j.errors && (
+                {expanded === l.loteId && loteErrors[l.loteId] && (
                   <tr>
-                    <td colSpan={8}>
+                    <td colSpan={9}>
                       <div style={{ padding: 8, background: "var(--surface-alt)", borderRadius: 6 }}>
                         <p style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 0 }}>
-                          Corrija a planilha de origem para as linhas abaixo e rode a sincronização
-                          novamente, ou use <code>POST /api/imports/{j.id}/fix-errors</code> para
-                          reenviar apenas as linhas corrigidas.
+                          Corrija a planilha para as linhas abaixo e importe de novo (linhas já existentes só atualizam, não duplicam).
                         </p>
                         <table>
                           <thead><tr><th>Linha</th><th>Motivo</th></tr></thead>
                           <tbody>
-                            {j.errors.slice(0, 50).map((e, i) => (
+                            {loteErrors[l.loteId].slice(0, 50).map((e, i) => (
                               <tr key={i}><td>{e.row}</td><td>{e.motivo}</td></tr>
                             ))}
                           </tbody>
@@ -346,8 +600,8 @@ export default function Imports() {
                 )}
               </Fragment>
             ))}
-            {jobs.length === 0 && (
-              <tr><td colSpan={8} style={{ color: "var(--text-muted)" }}>Nenhuma importação registrada ainda</td></tr>
+            {lotes.length === 0 && (
+              <tr><td colSpan={9} style={{ color: "var(--text-muted)" }}>Nenhuma importação registrada ainda</td></tr>
             )}
           </tbody>
         </table>

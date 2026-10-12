@@ -190,6 +190,28 @@ tenta baixar o exemplo do cabeçalho na importação, senão envie uma em Templa
 0,0822 × 4,99; utilidade sem padrão), configurável em `GET/PUT /api/campaigns/custos` (ADMIN) e gravado em `Campaign.costPerMessage`. SQL: `backend/prisma/sql/2026-10-assistente-campanha.sql`
 (rodar antes do deploy, depois de `2026-10-campanha-manual.sql`).
 
+### Templates: lista, editor em 3 passos e botões (fase 1)
+
+`/templates` (lista com filtros de categoria/status, busca, pré-visualizar, usar em campanha) e `/templates/new|:id/edit` (`pages/TemplateEditor.tsx`: Configuração → Conteúdo →
+Botões, com preview em WhatsApp; template SMS fica num formulário simples na lista). Botões (`whatsappTemplates.ts`): resposta rápida (`quickReplies`, até 10), **Visitar site**
+(`buttons` tipo URL, até 2, `https://`, link fixo sem variável) e **Ligar** (`PHONE_NUMBER`, até 1, vira +DDI), até 10 no total, textos únicos de até 25 caracteres; no payload da
+Meta as respostas rápidas vêm antes dos botões de ação. `validateTemplate` valida tudo no servidor; criar/editar/enviar usam `buttons`/`language` em `routes/templates.ts` (mudar
+botões de um template já enviado gera nova versão). Link rastreado por cliente: ver abaixo (fase 2); copiar código e cabeçalho de
+vídeo/documento, a fase 3. Importados da Meta continuam só leitura (texto muda na Meta).
+
+### Link rastreado nos botões de template (fase 2)
+
+Botão "Visitar site" com **Rastrear cliques** (`CtaButton.tracked`, padrão ligado no editor): a Meta aprova `https://<LINK_BASE_URL>/r/{{1}}` (exemplo com código de mentira) e o DESTINO REAL fica
+só em `MessageTemplate.buttons[].url`, editável sem nova aprovação (`buttonsSignature` em `routes/templates.ts` ignora o destino ao decidir se é nova versão). `services/trackedLinks.ts`:
+código de 45 caracteres = tipo (`e` mensagem de campanha / `n` teste e Inbox) + id (32 hex) + índice do botão + assinatura HMAC (chave derivada de `JWT_SECRET`); `trackedButtons` calcula o índice
+como a Meta conta (respostas rápidas antes dos botões de ação). No envio (`processQueueBatch`, `sendTemplateMessage`) o código entra como `button`/`sub_type: url` do template.
+`GET /r/:token` (`routes/trackedLinks.ts`, **público**, 120/min por IP, cross-tenant de propósito) valida a assinatura, acha o destino pelo template, soma `MessageEvent.clickCount` e grava
+`clickedAt` no 1º clique, e redireciona (302). Não é redirecionador aberto (destino só do template cadastrado); código inválido vai para `LINK_FALLBACK_URL` (https) ou dá 404. Prévia de link
+do WhatsApp, HEAD e robôs (`isBotUserAgent`) redirecionam sem contar. Relatório: `cliques` em `GET /campaigns/:id/report` (clicaram, taxa, dias até o clique, uso do limite de quem clicou x quem não),
+"Clicou?" em `/destinatarios` e `clicou_em`/`cliques` no CSV. Env: `LINK_BASE_URL` (domínio dos links; padrão `PUBLIC_BACKEND_URL` ou o da Vercel — o domínio vai dentro do template aprovado, então
+mudá-lo exige nova versão do template) e `LINK_FALLBACK_URL`. SQL: `backend/prisma/sql/2026-10-link-rastreado.sql` (rodar antes do deploy). Ainda não testado contra a Meta (aprovação de template com
+link dinâmico é decisão deles).
+
 ### Fila de oportunidades e campanhas por categoria
 
 `services/opportunities.ts` calcula a fila do dashboard (`GET /api/dashboard/oportunidades`): faixas
@@ -296,6 +318,38 @@ separador decimal. Segmentos e campanhas filtram por `categoriasCompra`/`lojista
 **SQL cru e RLS:** `prisma.$queryRaw*` não passa pelo hook de tenant e, sob o role `app_runtime`, não
 enxerga nenhuma linha. Use sempre `tenantRaw.query/execute` (`config/db.ts`), que abre a transaction com
 `app.tenant_id`.
+
+### Proteção da importação (formato, não zerar, impacto, desfazer)
+
+Nasceu de um incidente: um CSV de compras importado como "Cartões e contas" zerou limite/saldo/status de ~2.900 clientes. Camadas:
+(1) `services/importFormat.ts` (e cópia em `frontend/src/utils/importFormat.ts`, pacotes independentes) reconhece o formato pelos cabeçalhos; a tela bloqueia
+e oferece "Usar o formato X", e o servidor devolve `422 FORMATO_INCOMPATIVEL` (ADMIN pode `forcarFormato`) com base nos `cabecalhos` enviados.
+(2) **Coluna ausente nunca zera**: `FieldPresence` (limite/saldo/utilizado/status) é calculada sobre o ARQUIVO INTEIRO na tela (`camposPresentes`) e `planUpdate`
+(cartões) / `PROTEGIDOS` (genérico) tiram esses campos do update; célula vazia em coluna que TEM dados continua valendo zero (comércio credenciado).
+(3) `POST /imports/cartoes/preview` simula sem gravar (novos, atualizados, limites alterados/zerados, status, autorização revogada, campos ignorados); a tela soma os
+lotes e exige confirmação extra se zera ≥20 clientes ou ≥2%. (4) Desfazer: cada import de clientes grava `ImportChange` (estado anterior das colunas tocadas, ou CRIADO),
+guardado 30 dias; `POST /imports/lotes/:loteId/desfazer` (ADMIN, só a ÚLTIMA importação de clientes, em partes de 300 até `concluido`; a tela repete) restaura, apaga criados e
+seus snapshots/movimentos. Compras não têm preview nem desfazer. (5) `ImportJob.formato/loteId/nomeArquivo`: o arquivo (vários jobs de 400 linhas) é um `loteId`; o histórico
+vem de `GET /imports/lotes` (`groupLotes`). SQL: `backend/prisma/sql/2026-10-protecao-importacao.sql` (rodar antes do deploy). O servidor confia nos cabeçalhos enviados pela tela.
+
+### Ciclo de cobrança por cidade (fase 1)
+
+Cada cidade tem um dia de **abertura** do ciclo, quando o limite renova (fechamento = dia anterior; fatura descontada em folha). Dados do extrato confirmam: o uso dispara na abertura
+e decai nos dias seguintes. `CicloCidade` (por tenant, `cidadeKey` = `cidades.ts`) guarda o cadastro; `services/ciclos.ts` é o cálculo puro em dias civis de Brasília (`cicloInfo`: dias desde a
+abertura, dias para abrir, dia do ciclo; mês curto usa o último dia). A abertura da cidade fica em `Client.diaCicloAbertura`, refeita por `services/cicloRefresh.ts` (ao salvar o cadastro, ao fim
+de cada importação de clientes e no job diário de snapshot) — assim os filtros seguem síncronos: `cicloAbriuHaDias {min,max}` e `cicloAbreEmDias {min,max}` viram `diaCicloAbertura in [...]`
+(`diasAberturaNaFaixa`); cidade sem ciclo não entra em nenhum. `routes/ciclos.ts`: `GET /api/ciclos` (cadastro + cidades da base sem ciclo), `PUT /api/ciclos` (ADMIN, tabela inteira),
+`GET /api/ciclos/proximos` (card do Dashboard: abriu há ≤2 dias ou abre em ≤7), `GET /api/ciclos/audiencia?cidadeKey=` (ids aptos + mensagem para "Criar campanha"). Telas: `/ciclos`
+(preenche a tabela da TopConta: Natal 6, Carmópolis 7, Itaporanga e N. S. da Glória 10, Lagarto/Itabaianinha/Boquim/Luziânia 15), card no Dashboard e seção em Segmentos. **Fase 2:** gatilho de automação `CICLO_ABERTO` (`automationEngine.ts`): casa quem tem `diaCicloAbertura` igual ao de uma cidade que abriu há `diasAposAbertura` dias
+(default 0 = no dia), opcionalmente só `cidades` escolhidas (chaves de `CicloCidade`), `perfilRenda`, `etapaUso` (exige extrato em dia) e `comSaldo` (o saldo vem da última planilha, pode não
+refletir a renovação). `matchClients` devolve **um grupo por cidade** e `runRule` executa a ação por grupo: uma campanha por cidade (`Automação: <regra> · <cidade> (<data>)`, resultado separado e
+sem repetir no mesmo dia). `POST /api/automations/:id/run` (`simular: true` só conta por cidade) alimenta "Simular"/"Rodar agora" na tela. Limite do plano Hobby: o motor roda 1x/dia (~07h BRT) e a
+ação de campanha envia só `throttlePerMin` (default 60) mensagens por execução; o resto depende do "Disparar lote"/cron de disparo — para públicos grandes (Natal) o caminho mais completo é o botão
+"Criar campanha" do card (o navegador drena em lotes). **Fase 3** (`services/cicloReport.ts`, puro e testado): (a) `GET /api/ciclos/uso-por-dia?dias=90` — curva de uso (antecipação + compra à vista do extrato) por dia do ciclo, por cidade e no
+total, normalizada em "usos por 100 clientes por dia observado" (o extrato cobre período parcial; o período termina no último dia do extrato, não em hoje). Diagnóstico da data cadastrada:
+pico nos dias 1–3 = ok, pico depois = "revisar data" (ou o limite renova mais tarde), <30 usos = poucos dados. Componente `UsoPorDiaCiclo` na tela `/ciclos`. (b) `porCiclo` em
+`GET /api/campaigns/:id/report` — resultado e lift pelo dia do ciclo da cidade do cliente no momento do envio (faixas 1–3, 4–7, 8–15, 16+, sem ciclo), card "Resultado por dia do ciclo no
+envio". Não usa `AccountSnapshot` para validar a abertura (hoje só há uma foto; quando houver histórico dá para checar o salto do saldo). SQL: `backend/prisma/sql/2026-10-ciclos-cidade.sql` (rodar antes do deploy).
 
 ### Cron jobs: local vs. Vercel
 

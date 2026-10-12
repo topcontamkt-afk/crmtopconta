@@ -39,6 +39,8 @@ const filtersSchema = z.object({
   usosMax: z.number().int().min(0).optional(),
   diasSemUsoRealMin: z.number().int().min(0).optional(),
   diasSemUsoRealMax: z.number().int().min(0).optional(),
+  cicloAbriuHaDias: z.object({ min: z.number().int().min(0).max(31).optional(), max: z.number().int().min(0).max(31).optional() }).optional(),
+  cicloAbreEmDias: z.object({ min: z.number().int().min(0).max(31).optional(), max: z.number().int().min(0).max(31).optional() }).optional(),
 });
 
 // Grupo de filtros combináveis (AND/OR aninhados) — segment builder avançado (Fase 2).

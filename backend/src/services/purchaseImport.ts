@@ -66,11 +66,12 @@ export async function runPurchaseImport(
   prisma: AppPrismaClient,
   tenantId: string,
   rows: PurchaseRow[],
-  triggeredBy: string
+  triggeredBy: string,
+  opts: { loteId?: string; nomeArquivo?: string } = {}
 ): Promise<{ importJobId: string; result: PurchaseImportResult }> {
   const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } });
   const job = await prisma.importJob.create({
-    data: { tenantId, source: "compras", status: "EM_EXECUCAO", totalRows: rows.length, triggeredBy },
+    data: { tenantId, source: "compras", formato: "compras", loteId: opts.loteId, nomeArquivo: opts.nomeArquivo, status: "EM_EXECUCAO", totalRows: rows.length, triggeredBy },
   });
 
   const errors: RowError[] = [];

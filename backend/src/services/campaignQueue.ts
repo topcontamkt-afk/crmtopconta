@@ -5,6 +5,7 @@ import { MockWhatsAppAdapter, WhatsAppCloudAdapter } from "./channels/whatsapp";
 import { buildSegmentWhere, ENVIAVEL_WHERE, SegmentFilters, SegmentGroup } from "./segments";
 import { templateParams, templatePreview } from "./whatsappTemplates";
 import { unmappedPositions } from "./templateImport";
+import { makeToken, trackedButtons } from "./trackedLinks";
 import { recordOutboundTemplateMessage } from "./whatsappInbox";
 import { credentialsOf } from "./whatsappAccount";
 import { decryptSecret, isEncryptedPayload } from "./crypto";
@@ -106,7 +107,7 @@ async function sendWithFailover(
   providers: ResolvedProvider[],
   to: string,
   body: string,
-  template?: { name: string; language: string; params: string[]; headerImageId?: string }
+  template?: { name: string; language: string; params: string[]; headerImageId?: string; buttonTokens?: { index: number; token: string }[] }
 ): Promise<SendResult & { provider: string }> {
   let last: SendResult = { providerMessageId: "", status: "FAILED", error: "Nenhum provedor configurado" };
   for (const p of providers) {
@@ -350,7 +351,7 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
       providers,
       telefone,
       body,
-      metaTemplate ? { name: metaTemplate.metaName, language: metaTemplate.language, params: tplParams!, headerImageId: header.imageId } : undefined
+      metaTemplate ? { name: metaTemplate.metaName, language: metaTemplate.language, params: tplParams!, headerImageId: header.imageId, buttonTokens: trackedButtons(metaTemplate).map((b) => ({ index: b.index, token: makeToken("e", evt.id, b.index) })) } : undefined
     );
 
     // A conversa da inbox passa a mostrar o que foi enviado (quando o cliente responder, quem atende vê a oferta).
@@ -413,7 +414,7 @@ export async function sendTestMessages(
 
   const results = [];
   for (const phone of phones) {
-    const sendResult = await sendWithFailover(providers, phone, body, metaTemplate ? { name: metaTemplate.metaName, language: metaTemplate.language, params: params!, headerImageId: header.imageId } : undefined);
+    const sendResult = await sendWithFailover(providers, phone, body, metaTemplate ? { name: metaTemplate.metaName, language: metaTemplate.language, params: params!, headerImageId: header.imageId, buttonTokens: trackedButtons(metaTemplate).map((b) => ({ index: b.index, token: makeToken("n", metaTemplate.id, b.index) })) } : undefined);
     results.push({ phone, status: sendResult.status, provider: sendResult.provider, error: sendResult.error });
   }
   return { body, results };

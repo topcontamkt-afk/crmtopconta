@@ -15,6 +15,7 @@ import { previewOf } from "./whatsappPayload";
 import { templateContext } from "./messageContext";
 import { sendTemplateMessage, templateParams, templatePreview } from "./whatsappTemplates";
 import { unmappedPositions } from "./templateImport";
+import { makeToken, trackedButtons } from "./trackedLinks";
 
 /**
  * Responde a um cliente dentro de uma conversa: confere a janela de 24 horas, envia pela Meta e só
@@ -178,7 +179,7 @@ export async function sendTemplateReply(
     if (!media) throw new SendError("TEMPLATE_INDISPONIVEL", "Este template precisa da imagem do cabeçalho (Templates).");
     headerImageId = await uploadMedia(conversation.account.phoneNumberId, token, Buffer.from(media.data), media.mime, media.filename, deps.fetchImpl);
   }
-  const wamid = await sendTemplateMessage(conversation.account.phoneNumberId, token, conversation.waId, template.metaName!, template.language, params, deps.fetchImpl, headerImageId);
+  const wamid = await sendTemplateMessage(conversation.account.phoneNumberId, token, conversation.waId, template.metaName!, template.language, params, deps.fetchImpl, headerImageId, trackedButtons(template).map((b) => ({ index: b.index, token: makeToken("n", template.id, b.index) })));
   const message = await prisma.waMessage.create({
     data: { tenantId, conversationId: conversation.id, direction: "SAIDA", wamid, type: "template", body: texto, status: "sent", sentByUserId: userId, timestamp: now },
   });

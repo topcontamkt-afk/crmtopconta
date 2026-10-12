@@ -63,6 +63,8 @@ export const TENANT_SCOPED_MODELS = [
   "WaMessage",
   "WaMediaBlob",
   "TemplateMedia",
+  "ImportChange",
+  "CicloCidade",
 ] as const;
 
 type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number];

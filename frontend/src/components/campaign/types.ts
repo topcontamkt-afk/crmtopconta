@@ -11,13 +11,18 @@ export interface WaTemplate {
   category: string | null;
   footer: string | null;
   quickReplies: string[] | null;
-  buttons?: { type: string; text: string; url?: string; phone?: string }[] | null;
+  buttons?: { type: string; text: string; url?: string; phone?: string; tracked?: boolean }[] | null;
   headerFormat?: string | null;
   imagem?: { mime: string; size: number; filename: string } | null;
   origin?: string;
   sendIssue?: string | null;
   qualityScore: string | null;
   updatedAt?: string;
+  channel?: "WHATSAPP" | "SMS";
+  rejectionReason?: string | null;
+  version?: number;
+  metaName?: string | null;
+  language?: string;
 }
 
 export interface Check {
