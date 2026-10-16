@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api/client";
 import WhatsAppConfigModal, { WhatsAppConfig } from "../components/WhatsAppConfigModal";
 import { useAuth } from "../context/AuthContext";
+import VoiceTestCard from "../components/VoiceTestCard";
 
 interface ServiceAccountStatus {
   configured: boolean;
@@ -205,6 +206,8 @@ export default function Integrations() {
         </div>
       </div>
       {waAberto && <WhatsAppConfigModal onClose={() => setWaAberto(false)} onChanged={carregarWa} />}
+
+      <VoiceTestCard />
 
       <div className="card">
         <h3>SMS</h3>

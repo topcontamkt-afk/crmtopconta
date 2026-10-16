@@ -1,6 +1,12 @@
 {
-  "builds": [{ "src": "api/index.ts", "use": "@vercel/node" }],
-  "routes": [{ "src": "/(.*)", "dest": "api/index.ts" }],
+  "builds": [
+    { "src": "api/voice-bridge.ts", "use": "@vercel/node" },
+    { "src": "api/index.ts", "use": "@vercel/node" }
+  ],
+  "routes": [
+    { "src": "/api/voice-bridge", "dest": "api/voice-bridge.ts" },
+    { "src": "/(.*)", "dest": "api/index.ts" }
+  ],
   "crons": [
     { "path": "/api/cron/dispatch", "schedule": "0 9 * * *" },
     { "path": "/api/cron/automations", "schedule": "0 10 * * *" },

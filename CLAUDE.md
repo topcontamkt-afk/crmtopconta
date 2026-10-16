@@ -351,6 +351,19 @@ pico nos dias 1–3 = ok, pico depois = "revisar data" (ou o limite renova mais 
 `GET /api/campaigns/:id/report` — resultado e lift pelo dia do ciclo da cidade do cliente no momento do envio (faixas 1–3, 4–7, 8–15, 16+, sem ciclo), card "Resultado por dia do ciclo no
 envio". Não usa `AccountSnapshot` para validar a abertura (hoje só há uma foto; quando houver histórico dá para checar o salto do saldo). SQL: `backend/prisma/sql/2026-10-ciclos-cidade.sql` (rodar antes do deploy).
 
+### Ligação com IA de voz (xAI + Twilio) — fase 1: teste
+
+O CRM manda o Twilio ligar (`POST /api/voice/test-call`, ADMIN, `routes/voice.ts`); ao atender, o Twilio abre um WebSocket (Media Streams) com a **ponte** `backend/api/voice-bridge.ts` (função própria da Vercel, só importa código
+puro), que abre outro WebSocket com o agente de voz da xAI (`wss://api.x.ai/v1/realtime?agent_id=…` ou `?model=grok-voice-latest`) e repassa o áudio nos dois sentidos em G.711 μ-law 8 kHz (`audio/pcmu`, sem conversão).
+`services/voice.ts` (puro): token HMAC da ligação (contexto nome/saldo, expira em 10 min; o endpoint da ponte é público, então só confia no token), `buildTwiml`, `buildInstructions` (português; só diz o saldo depois de
+confirmar quem atende; nunca pede CPF/senha), `buildSessionUpdate` e as funções `registrar_resultado`/`encerrar_ligacao`. `services/voiceBridge.ts`: máquina de estados da ponte, sem rede e testada (`voiceBridge.test.ts`): agente fala
+primeiro, `speech_started` manda `clear` ao Twilio, aviso de despedida 12 s antes do limite (`VOICE_MAX_SECONDS`, padrão 90), fechar o WebSocket do Twilio encerra a ligação, logs `[voice] …` (latência do primeiro áudio, duração,
+resultado; transcrição só com `VOICE_LOG_TRANSCRIPT=1`). Webhook de status público `POST /api/voice/twilio-status` (assinatura X-Twilio-Signature). Fase 1 liga SÓ para `VOICE_TEST_NUMBER` (nunca número da tela), 3 por hora.
+Env (backend): `XAI_API_KEY`, `XAI_AGENT_ID` (opcional), `XAI_VOICE_MODEL`, `XAI_VOICE`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_VOICE_NUMBER` (ou `TWILIO_FROM_NUMBER`), `VOICE_TEST_NUMBER`, `PUBLIC_BACKEND_URL`.
+`backend/vercel.json` ganhou build/rota própria da ponte antes do catch-all. **Ainda não verificado:** se a Vercel mantém o WebSocket com essa configuração `builds`/`routes` e por quanto tempo (limite de duração da função), a qualidade do
+português, a latência e o custo por minuto — o teste da fase 1 serve para isso. Protocolo da xAI conferido no código do Pipecat (`pipecat/services/xai/realtime`), não na documentação oficial. Próximas fases: campanha de voz (canal VOZ, fila,
+janela de horário), ações (link por WhatsApp, opt-out) e resultado no relatório.
+
 ### Cron jobs: local vs. Vercel
 
 Locally, `services/scheduler.ts` runs everything via `node-cron` in-process.
