@@ -1,4 +1,6 @@
+import { cidadeKeySql } from "../services/cidades";
 import { USO_TIPO_SQL } from "../services/usageRefresh";
+import { periodoAnterior, preencheDias, resolvePeriodo, variacaoPct } from "../services/usoPeriodo";
 import { avaliarFrescor, mensagemFrescor } from "../services/dataFreshness";
 import { ETAPA_CASE_SQL } from "../services/etapaUso";
 import { ENVIAVEL_WHERE } from "../services/segments";
@@ -376,8 +378,12 @@ router.get("/evolucao", async (req, res) => {
   res.json(rows.map((r) => ({ periodo: r.periodo, total: Number(r.total) })));
 });
 
+const dataIso = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const overviewQuerySchema = z.object({
   days: z.enum(["7", "30", "90"]).default("30"),
+  /** filtro por datas: quando vem, vale no lugar dos 7/30/90 dias (série, variação e campanhas) */
+  de: dataIso.optional(),
+  ate: dataIso.optional(),
   cidade: z.string().trim().min(1).max(120).optional(),
   empresaConveniada: z.string().trim().min(1).max(160).optional(),
 });
@@ -408,23 +414,31 @@ router.get("/overview", async (req, res) => {
   const parsed = overviewQuerySchema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
   const { tenantId } = req.user!;
-  const days = Number(parsed.data.days);
   const filters: DashboardFilters = { cidade: parsed.data.cidade, empresaConveniada: parsed.data.empresaConveniada };
   const hasFilters = !!(filters.cidade || filters.empresaConveniada);
+  const todayIso = todayBrt().toISOString().slice(0, 10);
+  const custom = !!(parsed.data.de || parsed.data.ate);
+  const janela = custom ? resolvePeriodo({ de: parsed.data.de, ate: parsed.data.ate, days: Number(parsed.data.days) }, todayIso) : null;
+  if (janela && "erro" in janela) return res.status(400).json({ error: janela.erro });
+  const days = janela ? janela.dias : Number(parsed.data.days);
 
   // Primeira visita do dia grava a foto de hoje — o histórico começa a acumular sem depender de cron.
   await ensureTodaySnapshot(prisma, tenantId);
 
   const today = todayBrt();
-  const sinceDay = addDays(today, -days);
-  const sinceTs = addDays(new Date(), -days);
+  const sinceDay = janela ? new Date(`${janela.de}T00:00:00.000Z`) : addDays(today, -days);
+  // fim do filtro por datas (inclusive o dia final); sem filtro de datas a janela vai até agora
+  const untilDay = janela ? new Date(`${janela.ate}T00:00:00.000Z`) : null;
+  const sinceTs = janela ? new Date(`${janela.de}T03:00:00.000Z`) : addDays(new Date(), -days); // 00h de Brasília
+  const untilTs = untilDay ? addDays(new Date(`${janela!.ate}T03:00:00.000Z`), 1) : null;
+  const naJanela = untilTs ? { lt: untilTs } : {};
   const base = clientWhere(tenantId, filters);
   const raw = rawFilterSql(filters, 2);
 
   const notNull = (field: "cidade" | "empresaConveniada" | "remuneracaoBruta" | "dataUltimaUtilizacao" | "encerradoEm" | "dataNascimento") =>
     prisma.client.count({ where: { AND: [base, { [field]: { not: null } }] } });
 
-  const msgBase = { campaign: { tenantId, isSandbox: false }, queuedAt: { gte: sinceTs } };
+  const msgBase = { campaign: { tenantId, isSandbox: false }, queuedAt: { gte: sinceTs, ...naJanela } };
 
   const [
     kpis,
@@ -451,13 +465,13 @@ router.get("/overview", async (req, res) => {
     msgAgg,
   ] = await Promise.all([
     computeKpis(prisma, tenantId, filters),
-    prisma.dashboardSnapshot.findMany({ where: { tenantId, day: { gte: sinceDay } }, orderBy: { day: "asc" } }),
+    prisma.dashboardSnapshot.findMany({ where: { tenantId, day: { gte: sinceDay, ...(untilDay ? { lte: untilDay } : {}) } }, orderBy: { day: "asc" } }),
     prisma.importJob.findFirst({ where: { tenantId }, orderBy: { startedAt: "desc" } }),
     prisma.importJob.findFirst({
       where: { tenantId, status: "EM_EXECUCAO", startedAt: { lt: addDays(new Date(), -1 / 48) } }, // > 30 min
       orderBy: { startedAt: "desc" },
     }),
-    prisma.client.count({ where: { AND: [base, { createdAt: { gte: sinceTs } }] } }),
+    prisma.client.count({ where: { AND: [base, { createdAt: { gte: sinceTs, ...naJanela } }] } }),
     rankingPorCampo(tenantId, "cidade"),
     rankingPorCampo(tenantId, "empresaConveniada"),
     prisma.client.groupBy({
@@ -487,7 +501,7 @@ router.get("/overview", async (req, res) => {
     notNull("dataUltimaUtilizacao"),
     notNull("encerradoEm"),
     notNull("dataNascimento"),
-    prisma.campaign.count({ where: { tenantId, isSandbox: false, createdAt: { gte: sinceTs } } }),
+    prisma.campaign.count({ where: { tenantId, isSandbox: false, createdAt: { gte: sinceTs, ...naJanela } } }),
     prisma.messageEvent.count({ where: { ...msgBase, sentAt: { not: null } } }),
     prisma.messageEvent.count({ where: { ...msgBase, deliveredAt: { not: null } } }),
     prisma.messageEvent.count({ where: { ...msgBase, respondedAt: { not: null } } }),
@@ -708,7 +722,7 @@ router.get("/overview", async (req, res) => {
   }
 
   res.json({
-    periodo: { dias: days, desde: isoDay(sinceDay) },
+    periodo: { dias: days, desde: isoDay(sinceDay), ate: janela ? janela.ate : null, personalizado: custom },
     filtros: {
       aplicados: { cidade: filters.cidade ?? null, empresaConveniada: filters.empresaConveniada ?? null },
       cidades: cidadeOpts.map((c) => ({ valor: c.cidade as string, count: c._count })),
@@ -740,6 +754,117 @@ router.get("/overview", async (req, res) => {
     cobertura,
     insights,
     ultimaAtualizacao: lastImport?.finishedAt || lastImport?.startedAt || null,
+  });
+});
+
+
+const usoPeriodoQuery = z.object({
+  days: z.enum(["7", "30", "90"]).default("30"),
+  de: dataIso.optional(),
+  ate: dataIso.optional(),
+  cidade: z.string().trim().min(1).max(120).optional(),
+  empresaConveniada: z.string().trim().min(1).max(160).optional(),
+});
+
+/**
+ * GET /api/dashboard/uso-periodo — uso REAL no período, pelo extrato de compras (antecipação e compra à vista;
+ * assinatura e fatura não contam): quantos clientes usaram, quantos usos, valor, juros (lucro das antecipações), uso por
+ * dia e cidades que mais usaram, com a variação contra o período anterior de mesma duração. Dias em Brasília.
+ * Aceita os filtros de cidade/convênio do painel e as datas De/Até (sem elas, os últimos 7/30/90 dias).
+ */
+router.get("/uso-periodo", async (req, res) => {
+  const q = usoPeriodoQuery.safeParse(req.query);
+  if (!q.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  const { tenantId } = req.user!;
+  const hoje = todayBrt().toISOString().slice(0, 10);
+  const periodo = resolvePeriodo({ de: q.data.de, ate: q.data.ate, days: Number(q.data.days) }, hoje);
+  if ("erro" in periodo) return res.status(400).json({ error: periodo.erro });
+  const anterior = periodoAnterior(periodo);
+  const raw = rawFilterSql({ cidade: q.data.cidade, empresaConveniada: q.data.empresaConveniada }, 4, "c");
+  const tipo = USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"');
+  const ANTEC = `p."tipo" ~* '^\\s*d[eé]bito\\s+pix'`;
+  const dia = `(p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date`;
+  const from = `FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
+    WHERE p."tenantId" = $1 AND ${tipo} ${raw.sql} AND ${dia} BETWEEN $2::date AND $3::date`;
+
+  const resumo = (de: string, ate: string) =>
+    tenantRaw.query<Array<{ clientes: bigint; usos: bigint; valor: string; antec: bigint; antec_valor: string; juros: string; compras: bigint; compras_valor: string }>>(
+      `SELECT COUNT(DISTINCT p."clientId")::bigint AS clientes, COUNT(*)::bigint AS usos,
+              COALESCE(SUM(p."valorPrincipal"),0)::text AS valor,
+              COUNT(*) FILTER (WHERE ${ANTEC})::bigint AS antec,
+              COALESCE(SUM(p."valorPrincipal") FILTER (WHERE ${ANTEC}),0)::text AS antec_valor,
+              COALESCE(SUM(p."juros") FILTER (WHERE ${ANTEC}),0)::text AS juros,
+              COUNT(*) FILTER (WHERE NOT (${ANTEC}))::bigint AS compras,
+              COALESCE(SUM(p."valorPrincipal") FILTER (WHERE NOT (${ANTEC})),0)::text AS compras_valor
+       ${from}`,
+      tenantId,
+      de,
+      ate,
+      ...raw.params
+    );
+
+  const [atual, ant, serie, cidades, cobertura, comLimite] = await Promise.all([
+    resumo(periodo.de, periodo.ate),
+    resumo(anterior.de, anterior.ate),
+    tenantRaw.query<Array<{ dia: string; usos: bigint; clientes: bigint; valor: string }>>(
+      `SELECT to_char(${dia}, 'YYYY-MM-DD') AS dia, COUNT(*)::bigint AS usos, COUNT(DISTINCT p."clientId")::bigint AS clientes,
+              COALESCE(SUM(p."valorPrincipal"),0)::text AS valor
+       ${from} GROUP BY 1 ORDER BY 1`,
+      tenantId,
+      periodo.de,
+      periodo.ate,
+      ...raw.params
+    ),
+    tenantRaw.query<Array<{ cidade: string | null; usos: bigint; clientes: bigint; valor: string }>>(
+      `SELECT MIN(c."cidade") AS cidade, COUNT(*)::bigint AS usos, COUNT(DISTINCT p."clientId")::bigint AS clientes,
+              COALESCE(SUM(p."valorPrincipal"),0)::text AS valor
+       ${from} AND ${cidadeKeySql('c."cidade"')} <> '__SEM_CIDADE__'
+       GROUP BY ${cidadeKeySql('c."cidade"')} ORDER BY COUNT(*) DESC LIMIT 8`,
+      tenantId,
+      periodo.de,
+      periodo.ate,
+      ...raw.params
+    ),
+    tenantRaw.query<Array<{ primeiro: string | null; ultimo: string | null }>>(
+      `SELECT to_char(MIN(${dia}), 'YYYY-MM-DD') AS primeiro, to_char(MAX(${dia}), 'YYYY-MM-DD') AS ultimo FROM "Purchase" p WHERE p."tenantId" = $1 AND ${tipo}`,
+      tenantId
+    ),
+    prisma.client.count({ where: { ...clientWhere(tenantId, { cidade: q.data.cidade, empresaConveniada: q.data.empresaConveniada }), limiteTotal: { gt: 0 } } }),
+  ]);
+
+  const pack = (r: (typeof atual)[number] | undefined) => ({
+    clientes: Number(r?.clientes ?? 0),
+    usos: Number(r?.usos ?? 0),
+    valorMovimentado: Number(r?.valor ?? 0),
+    antecipacoes: { qtd: Number(r?.antec ?? 0), valor: Number(r?.antec_valor ?? 0) },
+    comprasAVista: { qtd: Number(r?.compras ?? 0), valor: Number(r?.compras_valor ?? 0) },
+    lucroJuros: Number(r?.juros ?? 0),
+  });
+  const a = pack(atual[0]);
+  const b = pack(ant[0]);
+  const ext = cobertura[0];
+
+  res.json({
+    periodo,
+    anterior,
+    personalizado: !!(q.data.de || q.data.ate),
+    extrato: { primeiro: ext?.primeiro ?? null, ultimo: ext?.ultimo ?? null, cobrePeriodo: !!ext?.ultimo && ext.ultimo >= periodo.ate },
+    totais: a,
+    clientesComLimite: comLimite,
+    percentualQueUsou: comLimite > 0 ? Number(((a.clientes / comLimite) * 100).toFixed(1)) : null,
+    variacao: {
+      clientes: variacaoPct(a.clientes, b.clientes),
+      usos: variacaoPct(a.usos, b.usos),
+      valorMovimentado: variacaoPct(a.valorMovimentado, b.valorMovimentado),
+      lucroJuros: variacaoPct(a.lucroJuros, b.lucroJuros),
+    },
+    anteriorTotais: b,
+    serie: preencheDias(
+      periodo,
+      serie.map((d) => ({ dia: d.dia, usos: Number(d.usos), clientes: Number(d.clientes), valor: Number(d.valor) })),
+      (d) => ({ dia: d, usos: 0, clientes: 0, valor: 0 })
+    ),
+    cidades: cidades.map((c) => ({ cidade: c.cidade ?? "", usos: Number(c.usos), clientes: Number(c.clientes), valor: Number(c.valor) })),
   });
 });
 

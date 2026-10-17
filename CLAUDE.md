@@ -351,6 +351,14 @@ pico nos dias 1–3 = ok, pico depois = "revisar data" (ou o limite renova mais 
 `GET /api/campaigns/:id/report` — resultado e lift pelo dia do ciclo da cidade do cliente no momento do envio (faixas 1–3, 4–7, 8–15, 16+, sem ciclo), card "Resultado por dia do ciclo no
 envio". Não usa `AccountSnapshot` para validar a abertura (hoje só há uma foto; quando houver histórico dá para checar o salto do saldo). SQL: `backend/prisma/sql/2026-10-ciclos-cidade.sql` (rodar antes do deploy).
 
+### Filtro por datas e "Uso no período" no dashboard
+
+`GET /api/dashboard/overview` aceita `de`/`ate` (YYYY-MM-DD, Brasília) no lugar de `days`: a janela passa a ser a das datas para a série (fotos `DashboardSnapshot`), a linha de base da variação, campanhas e novos clientes
+(os KPIs seguem sendo "de agora"; `periodo.personalizado`). `GET /api/dashboard/uso-periodo` (`services/usoPeriodo.ts`, puro: `resolvePeriodo`, `periodoAnterior`, `preencheDias`, `variacaoPct`) mede o uso REAL pelo extrato
+(`Purchase`, antecipação e compra à vista, mesmo critério de `USO_TIPO_SQL`): clientes que usaram, usos, valor, juros das antecipações, uso por dia e cidades que mais usaram, com variação contra o período anterior de mesma duração,
+e `extrato.cobrePeriodo` avisa quando o extrato termina antes do fim do período. Aceita cidade/convênio. Tela: campos De/Até no cabeçalho do Dashboard (sobrepõem os botões 7/30/90 dias; "Limpar datas" volta) e o card
+`UsoPeriodoCard`. `.main:has(.pd)` libera a largura do dashboard (antes limitada a 1440px, o que deixava faixa vazia à direita em monitor largo).
+
 ### Ligação com IA de voz (xAI + Twilio) — fase 1: teste
 
 O CRM manda o Twilio ligar (`POST /api/voice/test-call`, ADMIN, `routes/voice.ts`); ao atender, o Twilio abre um WebSocket (Media Streams) com a **ponte** `backend/api/voice-bridge.ts` (função própria da Vercel, só importa código
