@@ -4,7 +4,7 @@ import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { maskPhone, normalizePhone } from "../services/masking";
-import { bridgeUrl, buildTwiml, signVoiceToken } from "../services/voice";
+import { bridgeUrl, buildInboundTwiml, buildTwiml, signVoiceToken } from "../services/voice";
 import { verifyTwilioSignature } from "../services/webhookAuth";
 
 /**
@@ -99,6 +99,34 @@ export default router;
 
 /** Webhook público do Twilio com o andamento da chamada (toca, atendeu, terminou). Valida a assinatura X-Twilio-Signature. */
 export const voiceWebhook = Router();
+/** Confere a assinatura X-Twilio-Signature (mesma URL pública que o Twilio chamou). */
+function assinaturaValida(req: express.Request): boolean {
+  const token = process.env.TWILIO_AUTH_TOKEN;
+  const signature = req.headers["x-twilio-signature"] as string | undefined;
+  if (!token) return false;
+  const proto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0] || req.protocol;
+  const host = (req.headers["x-forwarded-host"] as string | undefined) || req.get("host") || "";
+  return verifyTwilioSignature(`${proto}://${host}${req.originalUrl}`, req.body as Record<string, string>, signature, token);
+}
+
+/**
+ * Webhook de ligação RECEBIDA (configurado no número do Twilio em "A call comes in"). Só atende o celular de teste: devolve
+ * o TwiML que conecta o áudio à ponte; para qualquer outro número, <Reject/>.
+ */
+voiceWebhook.post("/inbound", express.urlencoded({ extended: false }), (req, res) => {
+  if (!assinaturaValida(req)) return res.sendStatus(401);
+  const from = (req.body as Record<string, string>).From;
+  const ref = crypto.randomBytes(6).toString("hex");
+  const nome = process.env.VOICE_TEST_NAME || "Maria";
+  const saldoEnv = process.env.VOICE_TEST_SALDO;
+  const saldo = saldoEnv === undefined || saldoEnv === "" ? 250 : Number(saldoEnv);
+  const token = signVoiceToken({ nome, saldo: Number.isFinite(saldo) ? saldo : null, ref });
+  const teste = process.env.VOICE_TEST_NUMBER ? normalizePhone(process.env.VOICE_TEST_NUMBER) : null;
+  const twiml = buildInboundTwiml({ from, testNumber: teste, streamUrl: bridgeUrl(publicBackend()), token });
+  console.log("[voice] ligacao_recebida", JSON.stringify({ ref, aceita: twiml.includes("<Connect>"), de: from ? maskPhone(from) : null }));
+  res.type("text/xml").send(twiml);
+});
+
 voiceWebhook.post("/twilio-status", express.urlencoded({ extended: false }), (req, res) => {
   const token = process.env.TWILIO_AUTH_TOKEN;
   const signature = req.headers["x-twilio-signature"] as string | undefined;

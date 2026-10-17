@@ -1,4 +1,4 @@
-import { buildInstructions, buildSessionUpdate, buildTwiml, bridgeUrl, signVoiceToken, verifyVoiceToken } from "./voice";
+import { buildInboundTwiml, buildInstructions, buildSessionUpdate, buildTwiml, bridgeUrl, signVoiceToken, verifyVoiceToken } from "./voice";
 
 beforeAll(() => {
   process.env.JWT_SECRET = "segredo-de-teste";
@@ -61,5 +61,17 @@ describe("instruções e sessão", () => {
     expect(s.session.audio.input.format.type).toBe("audio/pcmu");
     expect(s.session.audio.output.format.type).toBe("audio/pcmu");
     expect(s.session.tools.map((t: any) => t.name)).toEqual(["registrar_resultado", "encerrar_ligacao"]);
+  });
+});
+
+describe("ligação recebida (teste)", () => {
+  const base = { testNumber: "+5579996653232", streamUrl: "wss://a.b/api/voice-bridge", token: "tok" };
+  it("atende só o celular de teste", () => {
+    expect(buildInboundTwiml({ ...base, from: "+5579996653232" })).toContain("<Connect>");
+    expect(buildInboundTwiml({ ...base, from: "+5511999990000" })).toContain("<Reject");
+  });
+  it("sem número de teste configurado ou sem From, recusa", () => {
+    expect(buildInboundTwiml({ ...base, testNumber: null, from: "+5579996653232" })).toContain("<Reject");
+    expect(buildInboundTwiml({ ...base, from: undefined })).toContain("<Reject");
   });
 });

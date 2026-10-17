@@ -61,6 +61,17 @@ export function bridgeUrl(publicBackend: string): string {
   return `${publicBackend.replace(/\/+$/, "").replace(/^http/i, "ws")}/api/voice-bridge`;
 }
 
+/**
+ * Teste por ligação RECEBIDA: o celular de teste liga para o número do Twilio e o Twilio chama o webhook. Só atende quem
+ * liga do celular de teste (senão qualquer pessoa gastaria crédito da xAI e do Twilio): os outros recebem <Reject/>, que o
+ * Twilio não cobra.
+ */
+export function buildInboundTwiml(opts: { from: string | undefined; testNumber: string | null; streamUrl: string; token: string }): string {
+  const ok = !!opts.testNumber && !!opts.from && opts.from.replace(/\s/g, "") === opts.testNumber;
+  if (!ok) return `<?xml version="1.0" encoding="UTF-8"?><Response><Reject reason="rejected"/></Response>`;
+  return buildTwiml(opts.streamUrl, opts.token);
+}
+
 const brl = (n: number) => n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 
 export const VOICE_TOOLS = [
