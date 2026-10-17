@@ -360,7 +360,10 @@ e `extrato.cobrePeriodo` avisa quando o extrato termina antes do fim do período
 `UsoPeriodoCard`. **Adesão da base ativa ao saldo** (`adesao` e `cidades[]` em `uso-periodo`; `services/usoPeriodo.ts`: `taxaAdesao`, `faixaAdesao`, `faltamParaMeta`): meta da TopConta = **80% da base ATIVA** (conta `ATIVO` e `limiteTotal > 0`)
 usando o saldo; taxa = clientes dessa base que usaram no período (antecipação ou compra à vista, distintos) ÷ base ativa, no geral e por cidade (cidade sem uso entra com 0%), com "faltam N clientes para a meta" e variação em p.p. contra o período
 anterior (mesma base de hoje nos dois). Faixas: ≥80% meta atingida, 60–79,9% atenção, abaixo fora da meta. Nos dados de 10/09–09/10: Luziânia 86,4%, Itaporanga 79,8% (falta 1), Natal 43,1%, Lagarto 45,3% (cidade vem de `cidadeKeySql`; nomes de empresa
-sem a palavra-chave da regra, como "ASSESSORIA", ainda aparecem como cidade). `.main:has(.pd)` libera a largura do dashboard (antes limitada a 1440px, o que deixava faixa vazia à direita em monitor largo).
+sem a palavra-chave da regra, como "ASSESSORIA", ainda aparecem como cidade). **Adesão por ciclo** (`GET /api/dashboard/adesao-ciclo`, card `AdesaoCicloCard`): uma janela fixa de 30 dias corta o ciclo de cada cidade num ponto diferente (Luziânia foi de 86% para 76% só por isso), então a comparação justa para a meta de 80% é por
+ciclo: para cada cidade de `CicloCidade`, `janelasDoCiclo` (`cicloReport.ts`) dá o último ciclo COMPLETO (abertura anterior → dia antes da última abertura) e o ciclo em andamento (parcial); mede clientes ativos com limite que usaram em cada um, `faltam` para 80%,
+e `coberto`/`semDados` quando o extrato não cobre a janela (ex.: Natal e Carmópolis não têm compras de setembro no extrato: ciclo anterior ≈ 0% com ciclo atual alto = falta de dado, não de uso). O geral do ciclo completo soma só cidades com dados.
+`.main:has(.pd)` libera a largura do dashboard (antes limitada a 1440px, o que deixava faixa vazia à direita em monitor largo).
 
 ### Ligação com IA de voz (xAI + Twilio) — fase 1: teste
 

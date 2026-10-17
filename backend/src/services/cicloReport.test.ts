@@ -1,4 +1,4 @@
-import { buildUsoPorDiaCiclo, breakdownByCiclo, diaDoCicloNoEnvio, faixaDoDiaCiclo, periodoAnalise } from "./cicloReport";
+import { buildUsoPorDiaCiclo, breakdownByCiclo, diaDoCicloNoEnvio, faixaDoDiaCiclo, janelaCoberta, janelasDoCiclo, periodoAnalise } from "./cicloReport";
 
 describe("buildUsoPorDiaCiclo", () => {
   // Cidade abre dia 15; período 10/10 a 25/10 (16 dias): dias do ciclo vistos: 26-31 (10 a 14/10 ≈ dias 26..30), 1..11
@@ -65,5 +65,31 @@ describe("breakdownByCiclo", () => {
     const r = breakdownByCiclo(treated, [], () => 15, 7);
     expect(r.map((x) => [x.faixa, x.enviados])).toEqual([["D1_3", 2], ["D8_15", 1]]);
     expect(r[0].convertidos).toBe(1);
+  });
+});
+
+describe("janelas do ciclo (adesão por ciclo)", () => {
+  const hoje = { y: 2026, m: 10, d: 17 };
+  it("cidade que abre dia 15: ciclo atual desde 15/10 e último completo 15/09 a 14/10", () => {
+    expect(janelasDoCiclo(15, hoje)).toEqual({
+      completo: { de: "2026-09-15", ate: "2026-10-14" },
+      atual: { de: "2026-10-15", ate: "2026-10-17", diaDoCiclo: 3 },
+    });
+  });
+  it("cidade que abre dia 6: ciclo atual desde 06/10 e último completo 06/09 a 05/10", () => {
+    expect(janelasDoCiclo(6, hoje)).toEqual({
+      completo: { de: "2026-09-06", ate: "2026-10-05" },
+      atual: { de: "2026-10-06", ate: "2026-10-17", diaDoCiclo: 12 },
+    });
+  });
+  it("no próprio dia da abertura o ciclo atual tem 1 dia", () => {
+    expect(janelasDoCiclo(17, hoje).atual).toEqual({ de: "2026-10-17", ate: "2026-10-17", diaDoCiclo: 1 });
+  });
+  it("detecta janela que o extrato não cobre inteira", () => {
+    const extrato = { primeiro: "2026-09-09", ultimo: "2026-10-15" };
+    expect(janelaCoberta({ de: "2026-09-15", ate: "2026-10-14" }, extrato)).toBe(true);
+    expect(janelaCoberta({ de: "2026-09-06", ate: "2026-10-05" }, extrato)).toBe(false); // começa antes do extrato
+    expect(janelaCoberta({ de: "2026-10-15", ate: "2026-10-17" }, extrato)).toBe(false); // termina depois do extrato
+    expect(janelaCoberta({ de: "2026-10-15", ate: "2026-10-17" }, { primeiro: null, ultimo: null })).toBe(false);
   });
 });

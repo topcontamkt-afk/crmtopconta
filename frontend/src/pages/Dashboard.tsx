@@ -31,6 +31,7 @@ import FrescorExtrato from "../components/FrescorExtrato";
 import PerfisRendaCard from "../components/PerfisRendaCard";
 import CiclosCard from "../components/CiclosCard";
 import UsoPeriodoCard from "../components/UsoPeriodoCard";
+import AdesaoCicloCard from "../components/AdesaoCicloCard";
 import { FAIXA_LABELS, FAIXA_OPTIONS } from "../utils/faixas";
 
 type Delta = { abs: number; pct: number | null } | null;
@@ -311,6 +312,8 @@ export default function Dashboard() {
       </div>
 
       <UsoPeriodoCard days={days} de={de} ate={ate} cidade={cidade} convenio={convenio} />
+
+      <AdesaoCicloCard cidade={cidade} convenio={convenio} />
 
       <FrescorExtrato />
 

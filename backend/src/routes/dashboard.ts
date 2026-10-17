@@ -1,4 +1,6 @@
-import { cidadeKeySql } from "../services/cidades";
+import { cidadeKey, cidadeKeySql } from "../services/cidades";
+import { hojeBrasilia } from "../services/ciclos";
+import { janelaCoberta, janelasDoCiclo } from "../services/cicloReport";
 import { USO_TIPO_SQL } from "../services/usageRefresh";
 import { faixaAdesao, faltamParaMeta, META_ADESAO, periodoAnterior, preencheDias, resolvePeriodo, taxaAdesao, variacaoPct, variacaoPontos } from "../services/usoPeriodo";
 import { avaliarFrescor, mensagemFrescor } from "../services/dataFreshness";
@@ -920,6 +922,107 @@ const filtersQuerySchema = z.object({
   cidade: z.string().trim().min(1).max(120).optional(),
   empresaConveniada: z.string().trim().min(1).max(160).optional(),
 });
+
+/**
+ * GET /api/dashboard/adesao-ciclo — adesão da base ativa ao saldo POR CICLO: para cada cidade (com ciclo cadastrado), quantos
+ * clientes ativos com limite usaram entre a abertura anterior e o dia antes da última abertura (último ciclo completo) e
+ * desde a última abertura (ciclo em andamento). Compara com a meta de 80%. Cada cidade tem o seu dia de abertura, então
+ * esta é a comparação justa (uma janela fixa de 30 dias corta cada ciclo num ponto diferente). `coberto` diz se o extrato
+ * cobre a janela inteira; sem cobertura a adesão fica subestimada.
+ */
+router.get("/adesao-ciclo", async (req, res) => {
+  const q = filtersQuerySchema.safeParse(req.query);
+  if (!q.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  const { tenantId } = req.user!;
+  const hoje = hojeBrasilia();
+  const hojeIso = `${hoje.y}-${String(hoje.m).padStart(2, "0")}-${String(hoje.d).padStart(2, "0")}`;
+
+  const configs = (await prisma.cicloCidade.findMany({ where: { tenantId }, orderBy: { cidade: "asc" } })).filter(
+    (c) => !q.data.cidade || cidadeKey(q.data.cidade) === c.cidadeKey
+  );
+  if (configs.length === 0) return res.json({ configurado: false, meta: META_ADESAO, cidades: [] });
+
+  const dia = `(p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date`;
+  const [ext] = await tenantRaw.query<Array<{ primeiro: string | null; ultimo: string | null }>>(
+    `SELECT to_char(MIN(${dia}), 'YYYY-MM-DD') AS primeiro, to_char(MAX(${dia}), 'YYYY-MM-DD') AS ultimo FROM "Purchase" p WHERE p."tenantId" = $1 AND ${USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"')}`,
+    tenantId
+  );
+  const extrato = { primeiro: ext?.primeiro ?? null, ultimo: ext?.ultimo ?? null };
+
+  const jan = configs.map((c) => ({ c, j: janelasDoCiclo(c.diaAbertura, hoje) }));
+  const raw = rawFilterSql({ empresaConveniada: q.data.empresaConveniada }, 7, "c");
+  const tipo = USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"');
+  const rows = await tenantRaw.query<Array<{ k: string; base: bigint; usaram_completo: bigint; usaram_atual: bigint }>>(
+    `WITH j AS (
+       SELECT * FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[]) AS t(k, de_c, ate_c, de_a, ate_a)
+     ), cli AS (
+       SELECT c.id, ${cidadeKeySql('c."cidade"')} AS k FROM "Client" c
+       WHERE c."tenantId" = $1 AND c."statusConta" = 'ATIVO' AND c."limiteTotal" > 0 ${raw.sql}
+     ), base AS (
+       SELECT k, COUNT(*) AS base FROM cli GROUP BY k
+     ), uso AS (
+       SELECT cli.k, ${dia} AS d, p."clientId" AS cid FROM cli JOIN "Purchase" p ON p."clientId" = cli.id AND p."tenantId" = $1 WHERE ${tipo}
+     )
+     SELECT j.k, COALESCE(base.base, 0)::bigint AS base,
+            COUNT(DISTINCT uso.cid) FILTER (WHERE uso.d BETWEEN j.de_c::date AND j.ate_c::date)::bigint AS usaram_completo,
+            COUNT(DISTINCT uso.cid) FILTER (WHERE uso.d BETWEEN j.de_a::date AND j.ate_a::date)::bigint AS usaram_atual
+     FROM j LEFT JOIN base ON base.k = j.k LEFT JOIN uso ON uso.k = j.k
+     GROUP BY j.k, base.base`,
+    tenantId,
+    jan.map((x) => x.c.cidadeKey),
+    jan.map((x) => x.j.completo.de),
+    jan.map((x) => x.j.completo.ate),
+    jan.map((x) => x.j.atual.de),
+    jan.map((x) => x.j.atual.ate),
+    ...raw.params
+  );
+  const porKey = new Map(rows.map((r) => [r.k, r]));
+
+  const medida = (usaram: number, base: number) => {
+    const taxa = taxaAdesao(usaram, base);
+    return { usaram, taxa, faixa: faixaAdesao(taxa), faltam: faltamParaMeta(usaram, base) };
+  };
+  const cidades = jan
+    .map(({ c, j }) => {
+      const r = porKey.get(c.cidadeKey);
+      const base = Number(r?.base ?? 0);
+      return {
+        cidade: c.cidade,
+        cidadeKey: c.cidadeKey,
+        diaAbertura: c.diaAbertura,
+        base,
+        completo: (() => {
+          const m = medida(Number(r?.usaram_completo ?? 0), base);
+          const atualTaxa = taxaAdesao(Number(r?.usaram_atual ?? 0), base) ?? 0;
+          // A cidade claramente usa (ciclo atual) mas o ciclo anterior quase não tem uso: faltam compras dela no extrato
+          const semDados = (m.taxa ?? 0) < 5 && atualTaxa >= 20;
+          return { ...j.completo, ...m, coberto: janelaCoberta(j.completo, extrato) && !semDados, semDados };
+        })(),
+        atual: { ...j.atual, ...medida(Number(r?.usaram_atual ?? 0), base), coberto: janelaCoberta(j.atual, extrato) },
+      };
+    })
+    .sort((a, b) => b.base - a.base);
+
+  const somaBase = cidades.reduce((a, c) => a + c.base, 0);
+  res.json({
+    configurado: true,
+    meta: META_ADESAO,
+    hoje: hojeIso,
+    extrato,
+    geral: {
+      base: somaBase,
+      // Ciclo completo: soma só as cidades com dados confiáveis do ciclo anterior (sem isso o geral ficaria artificialmente baixo)
+      completo: (() => {
+        const ok = cidades.filter((c) => c.completo.coberto);
+        return { ...medida(ok.reduce((a, c) => a + c.completo.usaram, 0), ok.reduce((a, c) => a + c.base, 0)), cidades: ok.length, base: ok.reduce((a, c) => a + c.base, 0) };
+      })(),
+      atual: medida(cidades.reduce((a, c) => a + c.atual.usaram, 0), somaBase),
+      completoCoberto: cidades.every((c) => c.completo.coberto),
+    },
+    cidades,
+  });
+});
+
 
 /** GET /api/dashboard/frescor — o extrato de compras está em dia? (aviso de dado velho) */
 router.get("/frescor", async (req, res) => {
