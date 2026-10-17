@@ -357,7 +357,9 @@ envio". Não usa `AccountSnapshot` para validar a abertura (hoje só há uma fot
 (os KPIs seguem sendo "de agora"; `periodo.personalizado`). `GET /api/dashboard/uso-periodo` (`services/usoPeriodo.ts`, puro: `resolvePeriodo`, `periodoAnterior`, `preencheDias`, `variacaoPct`) mede o uso REAL pelo extrato
 (`Purchase`, antecipação e compra à vista, mesmo critério de `USO_TIPO_SQL`): clientes que usaram, usos, valor, juros das antecipações, uso por dia e cidades que mais usaram, com variação contra o período anterior de mesma duração,
 e `extrato.cobrePeriodo` avisa quando o extrato termina antes do fim do período. Aceita cidade/convênio. Tela: campos De/Até no cabeçalho do Dashboard (sobrepõem os botões 7/30/90 dias; "Limpar datas" volta) e o card
-`UsoPeriodoCard`. `.main:has(.pd)` libera a largura do dashboard (antes limitada a 1440px, o que deixava faixa vazia à direita em monitor largo).
+`UsoPeriodoCard`. **Taxa de recorrência** (em `uso-periodo`, `recorrencia` e por cidade): dos clientes que usaram no período, % que usaram **2 vezes ou mais** (`taxaRecorrencia`); meta de saúde da TopConta: **80%** (`META_RECORRENCIA`), 60–79,9% atenção,
+abaixo disso fora da meta (`faixaRecorrencia`); variação em pontos percentuais contra o período anterior. Medida no último mês de extrato (10/09–09/10) deu 36,4% no geral (Luziânia 52%, Natal 17%): com um pagamento por ciclo, a definição
+"2+ usos no mês" fica longe de 80%; a alternativa "voltou a usar no ciclo seguinte" precisa de mais de um ciclo de extrato. `.main:has(.pd)` libera a largura do dashboard (antes limitada a 1440px, o que deixava faixa vazia à direita em monitor largo).
 
 ### Ligação com IA de voz (xAI + Twilio) — fase 1: teste
 

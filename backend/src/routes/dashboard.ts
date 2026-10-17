@@ -1,6 +1,6 @@
 import { cidadeKeySql } from "../services/cidades";
 import { USO_TIPO_SQL } from "../services/usageRefresh";
-import { periodoAnterior, preencheDias, resolvePeriodo, variacaoPct } from "../services/usoPeriodo";
+import { faixaRecorrencia, META_RECORRENCIA, periodoAnterior, preencheDias, resolvePeriodo, taxaRecorrencia, variacaoPct, variacaoPontos } from "../services/usoPeriodo";
 import { avaliarFrescor, mensagemFrescor } from "../services/dataFreshness";
 import { ETAPA_CASE_SQL } from "../services/etapaUso";
 import { ENVIAVEL_WHERE } from "../services/segments";
@@ -803,7 +803,18 @@ router.get("/uso-periodo", async (req, res) => {
       ...raw.params
     );
 
-  const [atual, ant, serie, cidades, cobertura, comLimite] = await Promise.all([
+  // Recorrência: dos clientes que usaram no período, quantos usaram 2 vezes ou mais
+  const recorr = (de: string, ate: string) =>
+    tenantRaw.query<Array<{ usaram: bigint; recorrentes: bigint }>>(
+      `SELECT COUNT(*)::bigint AS usaram, COUNT(*) FILTER (WHERE t.n >= 2)::bigint AS recorrentes
+       FROM (SELECT p."clientId", COUNT(*) AS n ${from} GROUP BY p."clientId") t`,
+      tenantId,
+      de,
+      ate,
+      ...raw.params
+    );
+
+  const [atual, ant, serie, cidades, cobertura, comLimite, recAtual, recAnt] = await Promise.all([
     resumo(periodo.de, periodo.ate),
     resumo(anterior.de, anterior.ate),
     tenantRaw.query<Array<{ dia: string; usos: bigint; clientes: bigint; valor: string }>>(
@@ -815,11 +826,15 @@ router.get("/uso-periodo", async (req, res) => {
       periodo.ate,
       ...raw.params
     ),
-    tenantRaw.query<Array<{ cidade: string | null; usos: bigint; clientes: bigint; valor: string }>>(
-      `SELECT MIN(c."cidade") AS cidade, COUNT(*)::bigint AS usos, COUNT(DISTINCT p."clientId")::bigint AS clientes,
-              COALESCE(SUM(p."valorPrincipal"),0)::text AS valor
-       ${from} AND ${cidadeKeySql('c."cidade"')} <> '__SEM_CIDADE__'
-       GROUP BY ${cidadeKeySql('c."cidade"')} ORDER BY COUNT(*) DESC LIMIT 8`,
+    tenantRaw.query<Array<{ cidade: string | null; usos: bigint; clientes: bigint; recorrentes: bigint; valor: string }>>(
+      `SELECT MIN(t.cidade) AS cidade, SUM(t.n)::bigint AS usos, COUNT(*)::bigint AS clientes,
+              COUNT(*) FILTER (WHERE t.n >= 2)::bigint AS recorrentes, COALESCE(SUM(t.valor),0)::text AS valor
+       FROM (
+         SELECT c."cidade" AS cidade, ${cidadeKeySql('c."cidade"')} AS k, p."clientId" AS cid, COUNT(*) AS n, SUM(p."valorPrincipal") AS valor
+         ${from} AND ${cidadeKeySql('c."cidade"')} <> '__SEM_CIDADE__'
+         GROUP BY p."clientId", c."cidade"
+       ) t
+       GROUP BY t.k ORDER BY SUM(t.n) DESC LIMIT 12`,
       tenantId,
       periodo.de,
       periodo.ate,
@@ -830,6 +845,8 @@ router.get("/uso-periodo", async (req, res) => {
       tenantId
     ),
     prisma.client.count({ where: { ...clientWhere(tenantId, { cidade: q.data.cidade, empresaConveniada: q.data.empresaConveniada }), limiteTotal: { gt: 0 } } }),
+    recorr(periodo.de, periodo.ate),
+    recorr(anterior.de, anterior.ate),
   ]);
 
   const pack = (r: (typeof atual)[number] | undefined) => ({
@@ -843,6 +860,10 @@ router.get("/uso-periodo", async (req, res) => {
   const a = pack(atual[0]);
   const b = pack(ant[0]);
   const ext = cobertura[0];
+  const rec = { usaram: Number(recAtual[0]?.usaram ?? 0), recorrentes: Number(recAtual[0]?.recorrentes ?? 0) };
+  const recB = { usaram: Number(recAnt[0]?.usaram ?? 0), recorrentes: Number(recAnt[0]?.recorrentes ?? 0) };
+  const taxa = taxaRecorrencia(rec.recorrentes, rec.usaram);
+  const taxaAnt = taxaRecorrencia(recB.recorrentes, recB.usaram);
 
   res.json({
     periodo,
@@ -864,7 +885,28 @@ router.get("/uso-periodo", async (req, res) => {
       serie.map((d) => ({ dia: d.dia, usos: Number(d.usos), clientes: Number(d.clientes), valor: Number(d.valor) })),
       (d) => ({ dia: d, usos: 0, clientes: 0, valor: 0 })
     ),
-    cidades: cidades.map((c) => ({ cidade: c.cidade ?? "", usos: Number(c.usos), clientes: Number(c.clientes), valor: Number(c.valor) })),
+    // Recorrência: % dos clientes que usaram no período e usaram 2x ou mais (meta de saúde: 80%)
+    recorrencia: {
+      meta: META_RECORRENCIA,
+      usaram: rec.usaram,
+      recorrentes: rec.recorrentes,
+      taxa,
+      faixa: faixaRecorrencia(taxa),
+      anterior: taxaAnt,
+      variacaoPontos: variacaoPontos(taxa, taxaAnt),
+    },
+    cidades: cidades.map((c) => {
+      const t = taxaRecorrencia(Number(c.recorrentes), Number(c.clientes));
+      return {
+        cidade: c.cidade ?? "",
+        usos: Number(c.usos),
+        clientes: Number(c.clientes),
+        recorrentes: Number(c.recorrentes),
+        taxaRecorrencia: t,
+        faixaRecorrencia: faixaRecorrencia(t),
+        valor: Number(c.valor),
+      };
+    }),
   });
 });
 

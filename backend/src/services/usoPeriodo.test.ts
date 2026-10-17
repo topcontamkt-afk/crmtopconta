@@ -1,4 +1,4 @@
-import { periodoAnterior, preencheDias, resolvePeriodo, validaData, variacaoPct } from "./usoPeriodo";
+import { faixaRecorrencia, META_RECORRENCIA, periodoAnterior, preencheDias, resolvePeriodo, taxaRecorrencia, validaData, variacaoPct, variacaoPontos } from "./usoPeriodo";
 
 describe("resolvePeriodo", () => {
   it("sem datas: últimos N dias terminando hoje", () => {
@@ -34,5 +34,26 @@ describe("periodoAnterior e série", () => {
     expect(variacaoPct(150, 100)).toBe(50);
     expect(variacaoPct(50, 100)).toBe(-50);
     expect(variacaoPct(10, 0)).toBeNull();
+  });
+});
+
+describe("taxa de recorrência", () => {
+  it("é o percentual de quem usou que usou 2 vezes ou mais", () => {
+    expect(taxaRecorrencia(80, 100)).toBe(80);
+    expect(taxaRecorrencia(1, 3)).toBe(33.3);
+    expect(taxaRecorrencia(0, 0)).toBeNull();
+  });
+  it("80% ou mais é saudável; 60 a 79 atenção; abaixo disso baixa", () => {
+    expect(META_RECORRENCIA).toBe(80);
+    expect(faixaRecorrencia(80)).toBe("SAUDAVEL");
+    expect(faixaRecorrencia(79.9)).toBe("ATENCAO");
+    expect(faixaRecorrencia(60)).toBe("ATENCAO");
+    expect(faixaRecorrencia(59.9)).toBe("BAIXA");
+    expect(faixaRecorrencia(null)).toBeNull();
+  });
+  it("variação em pontos percentuais", () => {
+    expect(variacaoPontos(72.5, 70)).toBe(2.5);
+    expect(variacaoPontos(60, 70)).toBe(-10);
+    expect(variacaoPontos(null, 70)).toBeNull();
   });
 });

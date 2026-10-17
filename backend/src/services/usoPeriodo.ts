@@ -53,3 +53,33 @@ export function variacaoPct(atual: number, anterior: number): number | null {
   if (!anterior) return null;
   return Math.round(((atual - anterior) / anterior) * 1000) / 10;
 }
+
+// ---------- Taxa de recorrência ----------
+
+/**
+ * Recorrência = dos clientes que usaram no período (antecipação ou compra à vista), quantos usaram 2 vezes ou mais.
+ * Meta de saúde definida pela TopConta: 80% ou mais é saudável.
+ */
+export const META_RECORRENCIA = 80;
+export const LIMITE_ATENCAO_RECORRENCIA = 60;
+
+export type FaixaRecorrencia = "SAUDAVEL" | "ATENCAO" | "BAIXA";
+
+/** Percentual com 1 casa (0-100); null quando ninguém usou no período. */
+export function taxaRecorrencia(recorrentes: number, usaram: number): number | null {
+  if (!usaram || usaram <= 0) return null;
+  return Math.round((recorrentes / usaram) * 1000) / 10;
+}
+
+export function faixaRecorrencia(taxa: number | null): FaixaRecorrencia | null {
+  if (taxa === null) return null;
+  if (taxa >= META_RECORRENCIA) return "SAUDAVEL";
+  if (taxa >= LIMITE_ATENCAO_RECORRENCIA) return "ATENCAO";
+  return "BAIXA";
+}
+
+/** Diferença em pontos percentuais (atual - anterior); null se falta um dos lados. */
+export function variacaoPontos(atual: number | null, anterior: number | null): number | null {
+  if (atual === null || anterior === null) return null;
+  return Math.round((atual - anterior) * 10) / 10;
+}
