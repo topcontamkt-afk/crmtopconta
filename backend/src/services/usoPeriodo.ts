@@ -54,28 +54,34 @@ export function variacaoPct(atual: number, anterior: number): number | null {
   return Math.round(((atual - anterior) / anterior) * 1000) / 10;
 }
 
-// ---------- Taxa de recorrência ----------
+// ---------- Adesão: % da base ativa que usou o saldo ----------
 
 /**
- * Recorrência = dos clientes que usaram no período (antecipação ou compra à vista), quantos usaram 2 vezes ou mais.
- * Meta de saúde definida pela TopConta: 80% ou mais é saudável.
+ * Meta da TopConta: pelo menos 80% da base ATIVA (conta ativa e com limite) deve usar o saldo. Adesão = clientes ativos
+ * com limite que usaram no período (antecipação ou compra à vista) ÷ clientes ativos com limite. Por cidade e no geral.
  */
-export const META_RECORRENCIA = 80;
-export const LIMITE_ATENCAO_RECORRENCIA = 60;
+export const META_ADESAO = 80;
+export const LIMITE_ATENCAO_ADESAO = 60;
 
-export type FaixaRecorrencia = "SAUDAVEL" | "ATENCAO" | "BAIXA";
+export type FaixaAdesao = "SAUDAVEL" | "ATENCAO" | "BAIXA";
 
-/** Percentual com 1 casa (0-100); null quando ninguém usou no período. */
-export function taxaRecorrencia(recorrentes: number, usaram: number): number | null {
-  if (!usaram || usaram <= 0) return null;
-  return Math.round((recorrentes / usaram) * 1000) / 10;
+/** Percentual com 1 casa (0-100); null quando não há base. */
+export function taxaAdesao(usaram: number, base: number): number | null {
+  if (!base || base <= 0) return null;
+  return Math.round((usaram / base) * 1000) / 10;
 }
 
-export function faixaRecorrencia(taxa: number | null): FaixaRecorrencia | null {
+export function faixaAdesao(taxa: number | null): FaixaAdesao | null {
   if (taxa === null) return null;
-  if (taxa >= META_RECORRENCIA) return "SAUDAVEL";
-  if (taxa >= LIMITE_ATENCAO_RECORRENCIA) return "ATENCAO";
+  if (taxa >= META_ADESAO) return "SAUDAVEL";
+  if (taxa >= LIMITE_ATENCAO_ADESAO) return "ATENCAO";
   return "BAIXA";
+}
+
+/** Quantos clientes a mais precisam usar para a base chegar na meta (0 se já chegou). */
+export function faltamParaMeta(usaram: number, base: number, meta: number = META_ADESAO): number {
+  if (!base || base <= 0) return 0;
+  return Math.max(0, Math.ceil((base * meta) / 100) - usaram);
 }
 
 /** Diferença em pontos percentuais (atual - anterior); null se falta um dos lados. */

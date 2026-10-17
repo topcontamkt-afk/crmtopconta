@@ -1,4 +1,4 @@
-import { faixaRecorrencia, META_RECORRENCIA, periodoAnterior, preencheDias, resolvePeriodo, taxaRecorrencia, validaData, variacaoPct, variacaoPontos } from "./usoPeriodo";
+import { faixaAdesao, faltamParaMeta, META_ADESAO, periodoAnterior, preencheDias, resolvePeriodo, taxaAdesao, validaData, variacaoPct, variacaoPontos } from "./usoPeriodo";
 
 describe("resolvePeriodo", () => {
   it("sem datas: últimos N dias terminando hoje", () => {
@@ -37,19 +37,25 @@ describe("periodoAnterior e série", () => {
   });
 });
 
-describe("taxa de recorrência", () => {
-  it("é o percentual de quem usou que usou 2 vezes ou mais", () => {
-    expect(taxaRecorrencia(80, 100)).toBe(80);
-    expect(taxaRecorrencia(1, 3)).toBe(33.3);
-    expect(taxaRecorrencia(0, 0)).toBeNull();
+describe("adesão: % da base ativa que usou o saldo", () => {
+  it("é usaram ÷ base ativa", () => {
+    expect(taxaAdesao(669, 774)).toBe(86.4);
+    expect(taxaAdesao(552, 1282)).toBe(43.1);
+    expect(taxaAdesao(0, 0)).toBeNull();
   });
-  it("80% ou mais é saudável; 60 a 79 atenção; abaixo disso baixa", () => {
-    expect(META_RECORRENCIA).toBe(80);
-    expect(faixaRecorrencia(80)).toBe("SAUDAVEL");
-    expect(faixaRecorrencia(79.9)).toBe("ATENCAO");
-    expect(faixaRecorrencia(60)).toBe("ATENCAO");
-    expect(faixaRecorrencia(59.9)).toBe("BAIXA");
-    expect(faixaRecorrencia(null)).toBeNull();
+  it("80% ou mais é a meta; 60 a 79,9 atenção; abaixo disso fora da meta", () => {
+    expect(META_ADESAO).toBe(80);
+    expect(faixaAdesao(80)).toBe("SAUDAVEL");
+    expect(faixaAdesao(79.8)).toBe("ATENCAO");
+    expect(faixaAdesao(60)).toBe("ATENCAO");
+    expect(faixaAdesao(43.1)).toBe("BAIXA");
+    expect(faixaAdesao(null)).toBeNull();
+  });
+  it("quantos clientes faltam para chegar nos 80%", () => {
+    expect(faltamParaMeta(194, 243)).toBe(1); // 80% de 243 = 194,4 -> 195
+    expect(faltamParaMeta(552, 1282)).toBe(474); // 80% de 1282 = 1025,6 -> 1026
+    expect(faltamParaMeta(669, 774)).toBe(0); // já passou
+    expect(faltamParaMeta(0, 0)).toBe(0);
   });
   it("variação em pontos percentuais", () => {
     expect(variacaoPontos(72.5, 70)).toBe(2.5);

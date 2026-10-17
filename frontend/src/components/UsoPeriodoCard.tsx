@@ -15,17 +15,15 @@ interface Resp {
   anterior: { de: string; ate: string };
   extrato: { primeiro: string | null; ultimo: string | null; cobrePeriodo: boolean };
   totais: Totais;
-  clientesComLimite: number;
-  percentualQueUsou: number | null;
   variacao: { clientes: number | null; usos: number | null; valorMovimentado: number | null; lucroJuros: number | null };
   serie: { dia: string; usos: number; clientes: number; valor: number }[];
-  recorrencia: { meta: number; usaram: number; recorrentes: number; taxa: number | null; faixa: Faixa | null; anterior: number | null; variacaoPontos: number | null };
-  cidades: { cidade: string; usos: number; clientes: number; recorrentes: number; taxaRecorrencia: number | null; faixaRecorrencia: Faixa | null; valor: number }[];
+  adesao: { meta: number; base: number; usaram: number; taxa: number | null; faixa: Faixa | null; faltam: number; anterior: number | null; variacaoPontos: number | null };
+  cidades: { cidade: string; base: number; usaram: number; taxa: number | null; faixa: Faixa | null; faltam: number; usos: number; valor: number }[];
 }
 type Faixa = "SAUDAVEL" | "ATENCAO" | "BAIXA";
 
 const FAIXA_COR: Record<Faixa, string> = { SAUDAVEL: "#35c17a", ATENCAO: "#e0a233", BAIXA: "#e15b5b" };
-const FAIXA_TXT: Record<Faixa, string> = { SAUDAVEL: "Saudável", ATENCAO: "Atenção", BAIXA: "Abaixo da meta" };
+const FAIXA_TXT: Record<Faixa, string> = { SAUDAVEL: "Meta atingida", ATENCAO: "Atenção", BAIXA: "Abaixo da meta" };
 const pctBr = (n: number) => `${n.toFixed(1).replace(".", ",")}%`;
 
 const GRID = "#2a3346";
@@ -80,7 +78,6 @@ export default function UsoPeriodoCard({ days, de, ate, cidade, convenio }: { da
   const t = d.totais;
   const semDados = t.usos === 0;
   const pontos = d.serie.map((s) => ({ ...s, label: s.dia.slice(8, 10) + "/" + s.dia.slice(5, 7) }));
-  const maxCidade = Math.max(1, ...d.cidades.map((c) => c.usos));
 
   return (
     <div className="pd-row">
@@ -101,13 +98,13 @@ export default function UsoPeriodoCard({ days, de, ate, cidade, convenio }: { da
         )}
 
         <div className="pd-minis">
-          <Mini label="Clientes que usaram" value={int(t.clientes)} delta={d.variacao.clientes} sub={d.percentualQueUsou !== null ? `${String(d.percentualQueUsou).replace(".", ",")}% da base com limite` : undefined} />
+          <Mini label="Clientes que usaram" value={int(t.clientes)} delta={d.variacao.clientes} sub={d.adesao.taxa !== null ? `${pctBr(d.adesao.taxa)} da base ativa` : undefined} />
           <Mini label="Usos" value={int(t.usos)} delta={d.variacao.usos} sub={`${int(t.antecipacoes.qtd)} antecipações · ${int(t.comprasAVista.qtd)} compras`} />
           <Mini label="Valor movimentado" value={brl(t.valorMovimentado)} delta={d.variacao.valorMovimentado} sub={`${brl(t.antecipacoes.valor)} em antecipações`} />
           <Mini label="Lucro (juros)" value={brl(t.lucroJuros)} delta={d.variacao.lucroJuros} sub="só antecipações" />
         </div>
 
-        <Recorrencia r={d.recorrencia} />
+        <Adesao a={d.adesao} />
 
         {semDados ? (
           <div className="chart-empty-state" style={{ height: 180 }}>
@@ -135,28 +132,25 @@ export default function UsoPeriodoCard({ days, de, ate, cidade, convenio }: { da
       </div>
 
       <div className="card pd-card pd-grow-1">
-        <h3>Cidades que mais usaram</h3>
-        <p className="pd-card-sub">Usos no período por cidade do cliente, e a taxa de recorrência de cada uma (meta {d.recorrencia.meta}%).</p>
+        <h3>Adesão por cidade</h3>
+        <p className="pd-card-sub">Clientes ativos com limite que usaram o saldo no período, por cidade. Meta: {d.adesao.meta}% da base.</p>
         {d.cidades.length === 0 ? (
-          <p className="pd-hint">Sem uso por cidade neste período.</p>
+          <p className="pd-hint">Sem clientes ativos com limite neste recorte.</p>
         ) : (
           d.cidades.map((c) => (
             <div key={c.cidade} className="pd-bar-row">
               <div className="pd-bar-head">
                 <span>{c.cidade}</span>
-                <span>{int(c.usos)} usos · {int(c.clientes)} clientes</span>
+                <span style={{ color: c.faixa ? FAIXA_COR[c.faixa] : undefined, fontWeight: 600 }}>{c.taxa !== null ? pctBr(c.taxa) : "—"}</span>
               </div>
-              {c.taxaRecorrencia !== null && c.faixaRecorrencia && (
-                <div className="pd-rec-line" title={`${int(c.recorrentes)} de ${int(c.clientes)} clientes usaram 2 vezes ou mais`}>
-                  <span style={{ color: FAIXA_COR[c.faixaRecorrencia] }}>● Recorrência {pctBr(c.taxaRecorrencia)}</span>
-                  <span className="pd-rec-track">
-                    <span className="pd-rec-fill" style={{ width: `${Math.min(100, c.taxaRecorrencia)}%`, background: FAIXA_COR[c.faixaRecorrencia] }} />
-                    <span className="pd-rec-meta" style={{ left: `${d.recorrencia.meta}%` }} />
-                  </span>
-                </div>
-              )}
-              <div className="pd-track"><div className="pd-fill" style={{ width: `${(c.usos / maxCidade) * 100}%`, background: "#ff6907" }} /></div>
-              <span className="pd-hint">{brl(c.valor)} movimentados</span>
+              <div className="pd-rec-track">
+                <span className="pd-rec-fill" style={{ width: `${Math.min(100, c.taxa ?? 0)}%`, background: c.faixa ? FAIXA_COR[c.faixa] : MUTED }} />
+                <span className="pd-rec-meta" style={{ left: `${d.adesao.meta}%` }} />
+              </div>
+              <span className="pd-hint">
+                {int(c.usaram)} de {int(c.base)} clientes usaram ·{" "}
+                {c.faltam > 0 ? <strong>faltam {int(c.faltam)} para a meta</strong> : <span style={{ color: FAIXA_COR.SAUDAVEL }}>meta atingida</span>} · {int(c.usos)} usos · {brl(c.valor)}
+              </span>
             </div>
           ))
         )}
@@ -165,34 +159,35 @@ export default function UsoPeriodoCard({ days, de, ate, cidade, convenio }: { da
   );
 }
 
-/** Taxa de recorrência geral: % dos clientes que usaram no período e usaram 2 vezes ou mais. Meta de saúde: 80%. */
-function Recorrencia({ r }: { r: Resp["recorrencia"] }) {
-  if (r.taxa === null || !r.faixa) return null;
-  const cor = FAIXA_COR[r.faixa];
+/** Adesão geral: % da base ATIVA (com limite) que usou o saldo no período. Meta da TopConta: 80%. */
+function Adesao({ a }: { a: Resp["adesao"] }) {
+  if (a.taxa === null || !a.faixa) return null;
+  const cor = FAIXA_COR[a.faixa];
   return (
     <div className="pd-rec">
       <div className="pd-rec-head">
         <div>
-          <div className="pd-kpi-label">Taxa de recorrência</div>
+          <div className="pd-kpi-label">Adesão da base ativa ao saldo</div>
           <div className="pd-kpi-value" style={{ color: cor }}>
-            {pctBr(r.taxa)} <span className="pd-rec-badge" style={{ color: cor, borderColor: cor }}>{FAIXA_TXT[r.faixa]}</span>
+            {pctBr(a.taxa)} <span className="pd-rec-badge" style={{ color: cor, borderColor: cor }}>{FAIXA_TXT[a.faixa]}</span>
           </div>
         </div>
         <div className="pd-rec-side">
-          <span>Meta de saúde: <strong>{r.meta}%</strong></span>
-          {r.variacaoPontos !== null && (
-            <span className={`pd-delta ${r.variacaoPontos > 0 ? "up" : r.variacaoPontos < 0 ? "down" : "flat"}`}>
-              {r.variacaoPontos > 0 ? "+" : ""}{String(r.variacaoPontos).replace(".", ",")} p.p. vs. período anterior
+          <span>Meta: <strong>{a.meta}%</strong> da base ativa</span>
+          {a.variacaoPontos !== null && (
+            <span className={`pd-delta ${a.variacaoPontos > 0 ? "up" : a.variacaoPontos < 0 ? "down" : "flat"}`}>
+              {a.variacaoPontos > 0 ? "+" : ""}{String(a.variacaoPontos).replace(".", ",")} p.p. vs. período anterior
             </span>
           )}
         </div>
       </div>
       <div className="pd-rec-track big">
-        <span className="pd-rec-fill" style={{ width: `${Math.min(100, r.taxa)}%`, background: cor }} />
-        <span className="pd-rec-meta" style={{ left: `${r.meta}%` }} title={`Meta ${r.meta}%`} />
+        <span className="pd-rec-fill" style={{ width: `${Math.min(100, a.taxa)}%`, background: cor }} />
+        <span className="pd-rec-meta" style={{ left: `${a.meta}%` }} title={`Meta ${a.meta}%`} />
       </div>
       <p className="pd-hint" style={{ marginTop: 6 }}>
-        {int(r.recorrentes)} de {int(r.usaram)} clientes que usaram no período usaram <strong>2 vezes ou mais</strong>. Saudável a partir de {r.meta}%; entre 60% e 79,9% pede atenção.
+        {int(a.usaram)} de {int(a.base)} clientes ativos com limite usaram o saldo no período.{" "}
+        {a.faltam > 0 ? <strong>Faltam {int(a.faltam)} clientes para chegar a {a.meta}%.</strong> : <strong style={{ color: FAIXA_COR.SAUDAVEL }}>Meta atingida.</strong>}
       </p>
     </div>
   );
