@@ -15,6 +15,7 @@ import { applyTemplateEvent } from "../services/whatsappTemplateSync";
 import { parseTemplateEvents, parseWebhookPayload } from "../services/whatsappPayload";
 import { nextEventStatus } from "../services/whatsappPayload";
 import { applyOutboundStatus } from "../services/whatsappReply";
+import { callingChecks } from "../services/whatsappCalling";
 import { getOrCacheMessageMedia } from "../services/whatsappMedia";
 import { storeInboundMessage } from "../services/whatsappInbox";
 import { maybeAutoReply } from "../services/whatsappAutoReply";
@@ -257,7 +258,20 @@ router.post("/whatsapp/test", requireAuth, requireRole("ADMIN"), async (req, res
 
   const message = checks.map((c) => `${c.ok ? "OK" : "FALHA"}: ${c.nome} — ${c.detalhe}`).join(" | ").slice(0, 500);
   await prisma.whatsAppAccount.update({ where: { id: account.id }, data: { lastCheckAt: new Date(), lastCheckOk: ok, lastCheckMessage: message, displayName, displayPhone } });
-  res.json({ ok, checks });
+
+  // Pré-requisitos da Calling API: só informativo (não muda "ok" nem o resultado guardado acima).
+  let tier: string | undefined, tierError: string | undefined, callingStatus: string | undefined, callingError: string | undefined;
+  try {
+    tier = (await get(`${encodeURIComponent(account.phoneNumberId)}?fields=messaging_limit_tier`)).messaging_limit_tier;
+  } catch (e) {
+    tierError = (e as Error).message;
+  }
+  try {
+    callingStatus = (await get(`${encodeURIComponent(account.phoneNumberId)}/settings`))?.calling?.status;
+  } catch (e) {
+    callingError = (e as Error).message;
+  }
+  res.json({ ok, checks, ligacoes: callingChecks({ tier, callingStatus, tierError, callingError }) });
 });
 
 /** POST /api/integrations/whatsapp/subscribe — inscreve o app na conta (WABA) para a Meta enviar os webhooks. */

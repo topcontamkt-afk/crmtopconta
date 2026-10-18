@@ -286,6 +286,15 @@ na Inbox. **Aviso de mensagem nova:** `GET /api/inbox/resumo` (leve: não lidas 
 (some em 9 s, abre a conversa), bipe, "(N)" no título da aba e, com a aba em segundo plano, notificação do navegador (botão "Ativar avisos no navegador" na Inbox pede a permissão). A
 primeira consulta só marca o que já existia. A Inbox usa a tela toda (`.main:has(.inbox-page)`). SQL: `backend/prisma/sql/2026-10-whatsapp-resposta-automatica.sql` (rodar antes do deploy; `Conversation.lastAutoReplyAt` da 1ª versão ficou no banco sem uso).
 
+### Ligações pelo WhatsApp (Calling API da Meta) — passo 0: diagnóstico
+
+Decisão: o cliente liga PARA nós pelo WhatsApp (ligação recebida, sem pedir permissão; a empresa ligar exige permissão por template, 2.000 destinatários/dia e tem limites por cliente). Requisitos
+da Meta (documentação oficial): número na Cloud API, assinar o campo `calls` do webhook, `whatsapp_business_messaging`, limite diário de **2.000 destinatários únicos** e ligar o recurso nas "call
+settings" do número (vem desligado). Mídia por WebRTC (ICE+DTLS+SRTP) ou SIP; áudio Opus, e G.711 (PCMA/PCMU) desde março/2026 — PCMU é o que a ponte da xAI já usa. Isso exige um servidor SEMPRE
+LIGADO fora da Vercel (ainda não existe). Passo 0 já feito: `services/whatsappCalling.ts` (puro, testado) lê `messaging_limit_tier` e `GET /{phone}/settings → calling.status` e o "Testar conexão" do
+modal da Meta devolve `ligacoes` (informativo: não muda o resultado do teste). Próximos passos: ligar o recurso no número, assinar `calls`, tratar o webhook (SDP offer → accept com SDP answer),
+servidor de áudio ↔ xAI e registro das ligações.
+
 ### Templates do WhatsApp (Meta) — Fase 4
 
 `services/whatsappTemplates.ts` (validação das regras da Meta, nosso `{{nome}}` → `{{1}}`, payload com exemplos, Graph API de criar/listar/excluir
