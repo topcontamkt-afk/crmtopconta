@@ -16,6 +16,16 @@ describe("areaForRequest", () => {
     expect(areaForRequest("POST", "/automations/1/run")).toEqual(["automations"]);
   });
 
+  it("casa o caminho como o Express: sem diferenciar maiúsculas, com %XX decodificado e barras repetidas (LGPD 05-07)", () => {
+    expect(areaForRequest("GET", "/CLIENTS/export.csv")).toEqual(["clients"]);
+    expect(areaForRequest("GET", "/Clients/Export.csv")).toEqual(["clients"]);
+    expect(areaForRequest("GET", "/%63lients/export.csv")).toEqual(["clients"]);
+    expect(areaForRequest("GET", "//clients//export.csv")).toEqual(["clients"]);
+    expect(areaForRequest("GET", "/AUDIT-LOGS")).toEqual(["audit"]);
+    expect(areaForRequest("POST", "/Clients/PURGE")).toEqual(["imports"]);
+    expect(areaForRequest("GET", "/%E0%A4%A")).toBeNull(); // %XX malformado não derruba
+  });
+
   it("não confunde prefixos parecidos", () => {
     expect(areaForRequest("GET", "/clientsx")).toBeNull();
     expect(areaForRequest("GET", "/inboxes")).toBeNull();
