@@ -1,7 +1,7 @@
 ---
 tags: [segurança, LGPD, autenticação, multi-tenant]
 created: 2026-09-10
-updated: 2026-09-10
+updated: 2026-10-18
 sources: [repository-analysis.md]
 ---
 
@@ -21,7 +21,11 @@ sources: [repository-analysis.md]
 | Credenciais | AES-256-GCM | Chave de aplicação não equivale a KMS/HSM externo. |
 | Webhooks | Assinaturas de provedor | Falha de verificação deve impedir alteração de estado. |
 | Auditoria | `AuditLog` e hash-chain | Permite verificar adulteração. |
-| Retenção | Anonimização diária | Aplicada a clientes sem atividade além da política. |
+| Retenção | Anonimização diária | Inativos, contas encerradas, Inbox, mídias e histórico de importação, com prazos por tenant. |
+| Base legal | `Tenant.baseLegalMarketing` | Sem base declarada pelo controlador, nenhum envio de marketing sai. |
+| Opt-out | Supressão por telefone (`SupressaoTitular`) | Vale em todos os cadastros, listas e canais; só hashes. |
+| Direitos do titular | Relatório, correção, bloqueio, eliminação, pedidos com prazo | Ver `docs/lgpd/`. |
+| Exposição | Máscara de telefone, `select` explícito, busca fora da URL | Telefone completo só para ADMIN com motivo auditado. |
 
 ## Fluxo de autenticação
 
@@ -42,7 +46,7 @@ sequenceDiagram
 
 ## Limites e pendências
 
-O repositório não deve ser tratado como prova de configuração externa. Estado de RLS, backups, rotação de chaves, rate limit distribuído e KMS/HSM real precisam ser verificados separadamente. Documentação pública nunca deve expor valores de ambiente.
+A adequação à LGPD (outubro de 2026) tem fonte legal, auditorias e pendências em `docs/lgpd/`; contratos, encarregado e aviso de privacidade dependem da controladora. O repositório não deve ser tratado como prova de configuração externa. Estado de RLS, backups, rotação de chaves, rate limit distribuído e KMS/HSM real precisam ser verificados separadamente. Documentação pública nunca deve expor valores de ambiente.
 
 ## Relações
 

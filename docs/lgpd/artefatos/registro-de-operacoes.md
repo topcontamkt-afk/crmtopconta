@@ -19,7 +19,7 @@ consumo, idade, escala) estão na seção 3 de [fora-do-codigo.md](../auditoria/
 | Operadores | Contratado que opera os disparos; quem desenvolve e hospeda o CRM |
 | Suboperadores | Ver [suboperadores.md](suboperadores.md) |
 | Sistema | CRM TopConta (`backend/` + `frontend/`) |
-| Data desta versão | 2026-10-18 |
+| Data desta versão | 2026-10-18 (conferido com o código da branch `claude/lgpd-adequacao`) |
 
 Valores `{{...}}` são configurados por tenant em Configurações → LGPD. Outro controlador que use o CRM mantém o próprio
 registro com estas mesmas linhas.
@@ -56,8 +56,12 @@ Bases legais marcadas *(sugerida)* são a recomendação técnica da triagem; a 
 - Credenciais de canal cifradas com AES-256-GCM (cifragem envelope).
 - Login com JWT, bloqueio por tentativas e 2FA opcional; papéis ADMIN, OPERATOR, ANALYST e VIEWER, e acesso por área.
 - Trilha de auditoria encadeada por hash (`AuditLog`).
-- Telefone mascarado nas telas e exports; logs sem dado pessoal.
-- Retenção automática com anonimização diária.
+- Telefone mascarado nas telas e exports; telefone completo só para ADMIN com motivo registrado. Buscas por nome ou
+  telefone não vão na URL.
+- Supressão do titular (opt-out, eliminação, bloqueio) guardada só como hash, consultada em todo envio e na importação.
+- Trilha de auditoria por controlador, com tentativas de acesso indevido (login falho, 2FA falho, ação acima do papel).
+- Retenção automática diária: inativos, contas encerradas, mensagens e mídias da Inbox, histórico de importação (30 dias),
+  com prazos configurados por controlador.
 
 ## Manutenção
 

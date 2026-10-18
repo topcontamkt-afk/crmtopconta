@@ -110,6 +110,39 @@ the import.
   clients inactive past `Tenant.retentionDays`.
 - Every sensitive action goes through `middleware/audit.ts` into `AuditLog`.
 
+**Adequação LGPD (branch `claude/lgpd-adequacao`, 2026-10).** Fonte legal e relatórios em `docs/lgpd/` (corpus oficial,
+auditorias, plano de correções, rascunhos de artefatos); skills `/lgpd-audit` (varredura multi-agente) e `/lgpd-check`
+(só o diff). Regras que o código agora garante:
+- **Config por controlador (tenant)**: `GET/PUT /api/tenant/lgpd` (Configurações → LGPD): base legal de marketing
+  (`Tenant.baseLegalMarketing`, nulo = envio de marketing bloqueado em campanha, lista manual e automação; ver
+  `services/baseLegal.ts`), LIA, controlador/encarregado, aviso de privacidade, rodapé de opt-out e prazos de retenção
+  (30–1825 dias, fundamento obrigatório, prévia antes de reduzir).
+- **Supressão por titular** (`services/privacy.ts`, `SupressaoTitular`, só hashes HMAC com `cpfSalt`): opt-out (PARAR por
+  WhatsApp/Z-API, STOP por SMS, manual) vale pelo **telefone canônico** em todos os cadastros e listas; o envio consulta em
+  lote (`suprimidosEmLote`). ELIMINACAO bloqueia a reimportação só pelo documento (volta se a planilha mostrar conta
+  aberta depois do pedido, ou por liberação de ADMIN) e não barra número reaproveitado com outro CPF.
+- **Público de envio**: `ENVIAVEL_WHERE` (segments.ts) exclui sem limite, `bloqueadoLgpdAt`, `encerradoEm` e
+  `anonymizedAt`; `CONTATO_LIBERADO_WHERE` exige autorização, sem opt-out e sem bloqueio. Renda não é critério de público
+  (só estatística). Toda mensagem de marketing leva rodapé com controlador e "responda SAIR" (`montarRodape`), exceto
+  template da Meta, que precisa ter rodapé ou botão de saída para ser criado.
+- **Direitos do titular**: relatório completo (`GET /api/clients/:id/relatorio-titular`), correção que trava o campo contra
+  reimportação (`Client.camposCorrigidos`), bloqueio (`/bloqueio`), eliminação (`POST /api/clients/:id/anonymize`, anonimiza
+  cliente e dados ligados: Inbox, compras, snapshots, histórico de importação, destinatários) e registro de pedidos com prazo
+  de 15 dias (`/api/titular/pedidos`, tela `/clients/pedidos-titular`).
+- **Retenção** (job diário `/api/cron/retention`): inativos, contas encerradas (`retentionDaysAfterClosure`), Inbox
+  (`inboxRetentionDays`), mídias (`mediaRetentionDays`), `ImportChange` com mais de 30 dias. Redigir PII de `AuditLog` grava
+  o evento encadeado `AUDIT_REDACAO_LGPD`, então a verificação continua ok.
+- **Exposição**: listas e ficha com `select` explícito, VIEWER sem telefone completo; exports com telefone mascarado (completo
+  só ADMIN com motivo, auditado); buscas por nome/telefone vão no corpo (POST), nunca na URL; aviso de mensagem nova sem
+  conteúdo; leitura em volume auditada.
+- **Trilha**: cadeia de hash do `AuditLog` **por tenant** (âncora `AUDIT_CADEIA_POR_TENANT` na transição); login falho,
+  bloqueio, 2FA falho e 403 por papel ficam no AuditLog (e-mail mascarado).
+- **Canais**: credencial de canal do ambiente só vale para `PLATFORM_DEFAULT_TENANT_ID` (ou todos com
+  `ALLOW_GLOBAL_CHANNEL_CREDENTIALS=true`, dev); webhook SMS exige assinatura (Twilio) ou segredo por canal; planilha
+  Google só se cadastrada no próprio tenant e nunca em dois; Z-API segue a janela de 24h.
+- SQL: `backend/prisma/sql/2026-10-lgpd-adequacao.sql` (antes do deploy) e `2026-10-lgpd-minimizacao-dados.sql`
+  (destrutivo, depois). Pendências e decisões em `docs/lgpd/correcoes/pendencias-integracao.md`.
+
 ### Campaign send path
 
 `services/campaignQueue.ts` enqueues the eligible audience as `MessageEvent`

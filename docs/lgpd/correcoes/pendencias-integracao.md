@@ -1,81 +1,65 @@
-# Pendências entre lotes (rodada 1 → rodada 2 e integração)
+# Pendências entre lotes: estado após a integração (2026-10-18)
 
-Itens que os lotes deixaram para outro dono. Marque ao resolver.
+Todos os lotes (0 a 5) estão integrados em `claude/lgpd-adequacao`. Esta lista guarda o que foi trocado entre lotes, o
+que ficou de fora de propósito e o que depende de alguém fora do código.
 
-## Para o Lote 2 (retenção, importação)
-- [ ] Importação respeita `Client.camposCorrigidos` quando `Tenant.correcaoManualVence` e não atualiza cliente com
-  `bloqueadoLgpdAt` (Lote 3). Aviso ao responsável pela planilha: hoje só a tela mostra ao operador.
-- [ ] `retention.ts` reescreve `AuditLog.details` ao anonimizar, o que quebra a cadeia de hash (a verificação acusa
-  `CONTEUDO`). Precisa de desenho: registrar a redação como evento encadeado, ou hash sobre resumo (Lote 5).
-- [ ] O mock de `retention.test.ts` não tem `auditLog.count`; o Lote 5 trocou por `findMany` com `select id`. Manter compatível.
+## Resolvido na integração
 
-- [ ] Importação e reimportação usam `semSuprimidos`/`estaSuprimido` e `CONTATO_LIBERADO_WHERE` (`services/privacy.ts`);
-  anonimização chama `suprimir(..., { motivo: "ELIMINACAO" })` (Lote 1).
-- [ ] Opt-out manual em `routes/clients.ts` chama `registrarOptOutTelefone` (Lote 1).
+| Item | Onde ficou |
+|------|------------|
+| Importação respeita `camposCorrigidos`, ignora cliente bloqueado, consulta a supressão e nunca religa opt-out | Lote 2 (`cardAccountImport.ts`, `importService.ts`, `dedupe.ts`) |
+| Retenção não quebra a cadeia de auditoria (evento encadeado `AUDIT_REDACAO_LGPD`) | Lote 2 (`auditIntegrity.ts`, `retention.ts`) |
+| Opt-out manual por telefone; PARAR cria `PedidoTitular` REVOGACAO atendido | Lote 2 (`routes/clients.ts`, `whatsappInbox.ts`) |
+| Eliminação do titular (`POST /clients/:id/anonymize`) e liberação de supressão | Lote 2 |
+| Telefone mascarado no export do relatório de campanha | Lote 4 (`routes/campaigns.ts`) |
+| Rodapé de opt-out no envio (SMS, texto livre, Z-API, teste) | Lote 4 (`campaignQueue.ts`, `templateVariables.ts`) |
+| `webhookUrl` do SMS em Configurações | Lote 4 (`Settings.tsx`) |
+| Janela de 24h da Z-API na Inbox; 403 por papel auditado; planilha única por tenant; variáveis de credencial global documentadas | integração `f98c4c9` |
+| Público de envio exclui bloqueado, encerrado e anonimizado (`ENVIAVEL_WHERE`); dashboard não conta anonimizado nem bloqueado | integração `9fcc163` + Lote 2 (`dashboardMetrics.ts`) |
+| Resposta automática da Inbox com o padrão do controlador; automação confere base legal; prévia de retenção = critério do job | integração `9fcc163` |
 
-## Para o Lote 4 (campanhas, segmentos)
-- [ ] Telefone mascarado em `/campaigns/:id/report/export.csv` e no relatório nominal (`/destinatarios`) (Lote 3, 05-01).
-- [ ] `segments.ts` (`buildSegmentWhere`/`ENVIAVEL_WHERE`) exclui `bloqueadoLgpdAt` (Lote 3, 03-04).
+## Ficou de fora de propósito
 
-- [ ] `Settings.tsx` mostra a `webhookUrl` dos canais SMS; o texto "usando variáveis de ambiente/mock" não vale mais em produção (Lote 1).
+- `trust proxy`: a auditoria já lê `x-vercel-forwarded-for`; ligar mudaria o rate limit da app inteira.
+- Contagem de segmento (`/segments/preview`) mostra quantos clientes casam com o filtro; quem pode receber é
+  conferido no assistente e no envio (`ENVIAVEL_WHERE`).
+- `POST /imports/cartoes/preview` não simula supressão nem correção manual; a importação real conta e mostra.
+- Templates MARKETING já existentes sem SAIR só voltam a ser editáveis/reenviáveis com rodapé ou botão de saída.
 
-## Integração (orquestrador)
-- [x] `routes/inbox.ts:185` devolve `janelaAberta: true` para toda conversa Z-API; usar a regra da Meta e desabilitar o
-  Composer com janela fechada (Lote 1, 02-06).
-- [x] Documentar `ALLOW_GLOBAL_CHANNEL_CREDENTIALS` e `PLATFORM_DEFAULT_TENANT_ID` no `.env.example` e no CLAUDE.md (Lote 1, 06-01).
-- [ ] Opt-out automático (`whatsappInbox.ts`) cria `PedidoTitular` tipo REVOGACAO já atendido (Lote 3).
-- [ ] `services/dashboardMetrics.ts` e KPIs ainda contam clientes bloqueados (Lote 3).
-- [x] Ligar `logAcessoNegado` em `requireRole` (`middleware/auth.ts`) antes do 403 (Lote 5, 05-03).
-- [x] ~~`trust proxy`~~: desnecessário para a auditoria, que lê `x-vercel-forwarded-for` primeiro (`origemRequisicao`).
-  Ligar mudaria o rate limit da app inteira, fora do escopo LGPD.
-- [x] `PUT /sheets` (`routes/integrations.ts`) recusa `sheetId` já ativo em outro tenant e grava o sheetId na auditoria.
-  Hoje a proteção é só na leitura (409 para todos), o que deixa um tenant bloquear a sincronização de outro (Lote 5).
-- [x] Comentários desatualizados: `config/tenantGuard.ts` (auditIntegrity como cross-tenant) e `schema.prisma`
-  (cadeia "GLOBAL" no `AuditLog`); CLAUDE.md e achado #11 de `docs/security-audit/findings.md` (Lote 5).
-- [ ] Rodapé de opt-out no envio (`montarRodape` do Lote 4 em `campaignQueue.ts`).
-- [ ] `POST /clients/:id/anonymize` com o `anonymizeClient` do Lote 2.
-- [ ] 08-07: seção LGPD do CLAUDE.md, README e `docs/llm-wiki/wiki/topics/seguranca-e-lgpd.md`.
-- [ ] Conferir `docs/lgpd/artefatos/registro-de-operacoes.md` contra o comportamento final.
+## Decidir depois
 
-## Antes do deploy (operador)
-- Confirmar em Integrações que o WhatsApp da TopConta está configurado na tela (token cifrado), senão o envio para (06-01).
-- Se houver SMS saindo pelas variáveis `TWILIO_*`: definir `PLATFORM_DEFAULT_TENANT_ID` na Vercel ou cadastrar o canal
-  SMS, e configurar no provedor a `webhookUrl` que `GET /channels` devolve (06-01, 05-05).
-
-## Decidir depois (sem dono)
-- Auditoria de leitura de conversa e download de mídia na Inbox (polling de 5 s inundaria o AuditLog; precisa de dedupe).
-- `requireRole` em `/api/inbox/resumo` (hoje só sem conteúdo).
+- Auditoria de leitura de conversa e download de mídia na Inbox (o polling de 5 s inundaria o AuditLog; precisa de dedupe).
+- `requireRole` em `/api/inbox/resumo` (hoje já sem conteúdo).
 - Campos de schema sugeridos: `AuditLog.ip`/`userAgent`, `Tenant.avisoInboxMostraConteudo`, prazo de pedido por tenant.
 - Credencial Google por tenant (OAuth ou Service Account cifrada) como solução definitiva de 06-02.
 - Retenção do log do servidor para tentativas de login com e-mail inexistente (log drain).
+- Anonimização por retenção também grava supressão ELIMINACAO (volta por `NOVA_RELACAO` ou liberação manual): confirmar com a controladora.
 
-## Decisão: eliminação x reimportação (2026-10-18)
-Nota de revisão: bloquear a importação por documento OU telefone apagaria para sempre quem volta a ser cliente e quem
-herda um celular reaproveitado. Regra adotada (enviada ao Lote 2): a importação bloqueia eliminado só pelo documento;
-volta sozinho quando a planilha mostra conta aberta depois do pedido (relação nova); senão fica de fora, contado, e o ADMIN
-libera com motivo auditado. No envio, ELIMINACAO por telefone não barra contato com CPF próprio diferente (número
-reaproveitado); OPT_OUT e BLOQUEIO por telefone continuam barrando o número. Revisável pela controladora.
+## Decisão: eliminação x reimportação
 
-## URGENTE: bug de produção encontrado pelo Lote 4 (2026-10-18)
-`POST /api/segments` (e `/preview`) em produção (`ae033a0`): `z.union([groupSchema, filtersSchema])` com `groupSchema`
-não estrito transforma filtros simples da tela (`{ cidade: [...] }`) em `{ operator: "AND" }`, isto é, a base inteira.
-Campanha por segmento salvo pela tela vai para toda a base enviável. Reproduzido com zod. Corrigido nesta branch
-(`.strict()`, commit do Lote 4). Candidato a hotfix na `dreamy-brown` (como a PR #6) e a conferir no banco quais
-segmentos estão salvos como `{"operator":"AND"}` e quais campanhas os usaram. Decisão do usuário pendente.
+A importação bloqueia eliminado só pelo documento. Ele volta sozinho quando a planilha mostra conta aberta depois do
+pedido (relação nova); senão fica de fora, contado, e o ADMIN libera com motivo auditado. No envio, ELIMINACAO por
+telefone não barra contato com CPF próprio diferente (número reaproveitado); OPT_OUT e BLOQUEIO por telefone continuam
+barrando o número. Revisável pela controladora.
 
-## Pendências do Lote 4 para a integração
-- Inbox (`routes/inbox.ts`): usar `autoReplyTextOf(account, tenant)` e `autoReplyPadraoDo(tenant)`; PUT auto-reply recusa texto sem SAIR.
-- Automação (`executeAction`): checar base legal antes de criar a campanha e gravar `baseLegal`.
-- Retenção: exportar o critério de vencidos para `routes/tenant.ts` (`vencidosWhere` copiado hoje).
-- KPIs do dashboard e contagem de segmentos ainda contam bloqueados.
-- Templates MARKETING existentes sem SAIR não podem ser editados/reenviados até ganharem rodapé ou botão.
+## URGENTE: bug de produção encontrado pelo Lote 4
 
-## Pendências do Lote 2 para a integração
-- `ENVIAVEL_WHERE`, segments e opportunities excluem `encerradoEm`, `anonymizedAt` e `bloqueadoLgpdAt` (hoje só bloqueado).
-- `routes/dashboard.ts`: queries cruas em `"Client"` (~48/143/188/255/270/332/349/383) não usam `rawFilterSql` e contam
-  anonimizados/bloqueados; card `/encerramentos` fica sem motivo após a minimização.
-- `POST /imports/cartoes/preview` não simula supressão nem correção manual.
-- `routes/audit.test.ts`: mock sem o campo `redigidas`.
-- Decisão do controlador: anonimização por retenção também grava supressão ELIMINACAO (mitigado por `NOVA_RELACAO` e liberação manual).
-- Validar em ambiente real, sob `app_runtime` + RLS: o bloco `DO $purge$` do `/clients/purge` e o `UPDATE "Purchase"` da anonimização (mockados nos testes).
-- Legado: linhas de AuditLog redigidas pela retenção antiga aparecem como CONTEUDO no verificador.
+`POST /api/segments` e `/preview` em produção (`ae033a0`): `z.union([groupSchema, filtersSchema])` com `groupSchema` não
+estrito transforma os filtros simples da tela (`{ cidade: [...] }`) em `{ operator: "AND" }`, ou seja, a base inteira.
+Campanha por segmento salvo pela tela vai para toda a base enviável. Reproduzido com zod; corrigido nesta branch
+(`.strict()`). Candidato a hotfix na `dreamy-brown` (decisão do usuário) e a conferir no banco quais segmentos estão salvos
+como `{"operator":"AND"}` e quais campanhas os usaram.
+
+## Antes do deploy (operador)
+
+- Aplicar `backend/prisma/sql/2026-10-lgpd-adequacao.sql` antes do deploy (declara `LEGITIMO_INTERESSE` nos tenants
+  existentes, senão o envio de marketing para).
+- Confirmar em Integrações que o WhatsApp da TopConta está configurado na tela (token cifrado), senão o envio para (06-01).
+- Se houver SMS saindo pelas variáveis `TWILIO_*`: definir `PLATFORM_DEFAULT_TENANT_ID` na Vercel ou cadastrar o canal SMS,
+  e configurar no provedor a `webhookUrl` que Configurações mostra (06-01, 05-05).
+- Validar em ambiente real, sob `app_runtime` + RLS: o bloco `DO $purge$` do `/clients/purge` e o `UPDATE "Purchase"` da
+  anonimização (mockados nos testes).
+- Preencher Configurações → LGPD (controlador, encarregado, aviso de privacidade).
+- Depois do deploy e da confirmação da controladora: `2026-10-lgpd-minimizacao-dados.sql` (destrutivo).
+- Legado conhecido: linhas de AuditLog redigidas pela retenção antiga aparecem como CONTEUDO no verificador; `encerradoEm`
+  só é confiável a partir do deploy.

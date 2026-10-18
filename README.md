@@ -166,7 +166,10 @@ Implementado, mapeando os itens **Must have** do PRD:
   por tenant + versão mascarada), opt-out sticky (uma vez recusado, importação
   não reativa autorização sozinha), controle de acesso por papel (Admin,
   Operador, Analista, Visualizador), log de auditoria em todas as ações
-  sensíveis, isolamento de dados por tenant em todas as queries.
+  sensíveis, isolamento de dados por tenant em todas as queries. A adequação
+  completa à LGPD (base legal por controlador, supressão por telefone, direitos
+  do titular, retenção, rodapé de opt-out) está descrita em `docs/lgpd/README.md`
+  e na seção LGPD do `CLAUDE.md`.
 - **Auth**: login com JWT, roles, tela de auditoria restrita a Admin/Analista.
 
 ## Escopo da Fase 2 (Robustez e Automação)
