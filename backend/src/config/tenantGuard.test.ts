@@ -180,6 +180,8 @@ describe("TENANT_SCOPED_MODELS", () => {
         "TemplateMedia",
         "ImportChange",
         "CicloCidade",
+        "SupressaoTitular",
+        "PedidoTitular",
       ].sort()
     );
   });

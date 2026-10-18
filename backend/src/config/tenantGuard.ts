@@ -65,6 +65,8 @@ export const TENANT_SCOPED_MODELS = [
   "TemplateMedia",
   "ImportChange",
   "CicloCidade",
+  "SupressaoTitular",
+  "PedidoTitular",
 ] as const;
 
 type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number];
