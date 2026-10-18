@@ -24,6 +24,8 @@ const DIMENSOES = [
 const a = args || {}
 if (!a.data) throw new Error('args.data (AAAA-MM-DD) é obrigatório')
 const SAIDA = a.saida || `docs/lgpd/auditoria/${a.data}`
+// Rodada incremental: texto anexado à varredura e à consolidação (ex.: intervalo de commits e relatório anterior).
+const FOCO = a.foco ? `\n\nFOCO DESTA RODADA (prevalece sobre o escopo geral):\n${a.foco}\n` : ''
 const alvo = a.dimensoes && a.dimensoes.length ? DIMENSOES.filter(d => a.dimensoes.includes(d.id)) : DIMENSOES
 if (alvo.length < DIMENSOES.length) log(`Rodando só as dimensões ${alvo.map(d => d.id).join(', ')}`)
 
@@ -126,7 +128,7 @@ Depois percorra o checklist item a item contra o código em HEAD. Para cada item
 - Abra o dispositivo legal citado em docs/lgpd/fontes/ e confirme que o texto sustenta a exigência. Use só âncoras que existem (grep 'id="..."').
 - Registre o resultado em "cobertura" (todo item do checklist precisa de uma entrada) e, quando houver descumprimento, um achado no formato do finding-schema, com id ${d.id}-NN.
 Se encontrar algo relevante para esta dimensão que o checklist não previu, inclua também (cobertura com item "extra").
-${mcp}
+${mcp}${FOCO}
 
 ${ESCOPO}
 
@@ -200,7 +202,7 @@ Leia antes docs/lgpd/README.md e ${REF}/finding-schema.md.
 4. ${SAIDA}/decisoes-pendentes.md: só achados tipo decisao_negocio. Para cada um, a pergunta à controladora, as opções, o impacto de cada uma no código e a recomendação.
 5. ${SAIDA}/fora-do-codigo.md: achados tipo fora_do_codigo mais as pendências do item 08.9 do checklist, como checklist de ações para a controladora (contratos, encarregado, RIPD, aviso publicado). Diga quem age: controladora ou operador.
 
-Os links para docs/lgpd/fontes/ devem continuar válidos a partir do diretório de saída. Confira cada um com grep antes de escrever.
+Os links para docs/lgpd/fontes/ devem continuar válidos a partir do diretório de saída. Confira cada um com grep antes de escrever.${FOCO}
 Não copie dado pessoal real.
 
 Achados sobreviventes (${sobreviventes.length}):

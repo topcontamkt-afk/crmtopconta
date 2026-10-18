@@ -32,6 +32,10 @@ Workflow({
 Rodada parcial (ex.: reverificar só o que foi corrigido): `args.dimensoes: ["04", "07"]` e uma `saida`
 própria, ex. `docs/lgpd/auditoria/<data>-pos`.
 
+Rodada incremental (código novo desde uma auditoria): `args.foco` com o intervalo de commits, a lista de
+arquivos e o caminho do `achados.json` anterior, pedindo para não repetir achados já registrados (só os
+agravados pelo delta). O texto entra nos prompts de varredura e consolidação.
+
 O script faz:
 
 | Fase | O quê |
