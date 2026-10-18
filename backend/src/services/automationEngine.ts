@@ -9,6 +9,7 @@ import { isPerfilRenda } from "./rendaPerfil";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 import { cidadeKey } from "./cidades";
 import { diasAberturaNaFaixa } from "./ciclos";
+import { CONTATO_LIBERADO_WHERE, semSuprimidos } from "./privacy";
 
 /**
  * Motor de automação (Fase 2): avalia periodicamente as AutomationRule ativas de cada tenant
@@ -28,6 +29,10 @@ import { diasAberturaNaFaixa } from "./ciclos";
  *  - OPT_OUT_TELEFONE_INVALIDO: inconsistências de opt-out (autorização=true com optOutAt
  *    preenchido) — a ação aqui é sempre "block", corrigindo o dado.
  *
+ * LGPD 02-03: todo gatilho de contato exclui, além do opt-out do cadastro, o tratamento bloqueado a pedido do
+ * titular (`bloqueadoLgpdAt`) e o telefone/documento suprimido (`semSuprimidos`, pedido feito por outro
+ * cadastro com o mesmo número ou por contato de lista). O envio confere de novo (campaignQueue).
+ *
  * Ações suportadas:
  *  - { type: 'campaign', channel, templateId? | messageTemplate?, throttlePerMin?, ... }:
  *    cria uma campanha (adHocFilters com os ids explícitos dos clientes casados) e já
@@ -35,6 +40,10 @@ import { diasAberturaNaFaixa } from "./ciclos";
  *  - { type: 'notification', message? }: cria uma Notification resumindo quantos clientes casaram.
  *  - { type: 'block' }: corrige/bloqueia os clientes casados diretamente (sem campanha).
  */
+
+/** Campos para conferir a supressão por telefone/documento depois da consulta (LGPD 02-03). */
+const CONTATO_SELECT = { id: true, telefone: true, cpfHash: true } as const;
+const ids = (xs: { id: string }[]) => xs.map((c) => c.id);
 
 interface MatchResult {
   clientIds: string[];
@@ -52,13 +61,12 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
           tenantId,
           faixaUso: "SEM_USO",
           createdAt: { lte: cutoff },
-          autorizacaoComunicacao: true,
-          optOutAt: null,
+          ...CONTATO_LIBERADO_WHERE,
           statusConta: "ATIVO",
         },
-        select: { id: true },
+        select: CONTATO_SELECT,
       });
-      return { clientIds: clients.map((c) => c.id) };
+      return { clientIds: ids(await semSuprimidos(prisma, tenantId, clients)) };
     }
 
     case "INATIVO_30_DIAS": {
@@ -68,24 +76,24 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
         where: {
           tenantId,
           OR: [{ dataUltimaUtilizacao: { lte: cutoff } }, { dataUltimaUtilizacao: null, createdAt: { lte: cutoff } }],
-          autorizacaoComunicacao: true,
-          optOutAt: null,
+          ...CONTATO_LIBERADO_WHERE,
           statusConta: "ATIVO",
         },
-        select: { id: true },
+        select: CONTATO_SELECT,
       });
-      return { clientIds: clients.map((c) => c.id) };
+      return { clientIds: ids(await semSuprimidos(prisma, tenantId, clients)) };
     }
 
     case "LIMITE_RENOVADO": {
       const horas = condition?.horasJanela ?? 24;
       const cutoff = new Date(Date.now() - horas * 60 * 60 * 1000);
       const movements = await prisma.movement.findMany({
-        where: { tipo: "renovacao_limite", data: { gte: cutoff }, client: { tenantId, autorizacaoComunicacao: true, optOutAt: null } },
-        select: { clientId: true },
+        where: { tipo: "renovacao_limite", data: { gte: cutoff }, client: { tenantId, ...CONTATO_LIBERADO_WHERE } },
+        select: { clientId: true, client: { select: { telefone: true, cpfHash: true } } },
         distinct: ["clientId"],
       });
-      return { clientIds: movements.map((m) => m.clientId) };
+      const clients = movements.map((m) => ({ id: m.clientId, telefone: m.client?.telefone ?? null, cpfHash: m.client?.cpfHash ?? null }));
+      return { clientIds: ids(await semSuprimidos(prisma, tenantId, clients)) };
     }
 
     case "ESTIMULO_FAIXA": {
@@ -94,13 +102,12 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
         where: {
           tenantId,
           faixaUso: condition.faixa,
-          autorizacaoComunicacao: true,
-          optOutAt: null,
+          ...CONTATO_LIBERADO_WHERE,
           statusConta: "ATIVO",
         },
-        select: { id: true },
+        select: CONTATO_SELECT,
       });
-      return { clientIds: clients.map((c) => c.id) };
+      return { clientIds: ids(await semSuprimidos(prisma, tenantId, clients)) };
     }
 
     case "ETAPA_PERFIL": {
@@ -127,12 +134,12 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
               saldoDisponivelMin: condition?.comSaldo ? SALDO_MINIMO_ELEGIVEL : undefined,
             }),
             ENVIAVEL_WHERE,
-            { autorizacaoComunicacao: true, optOutAt: null, statusConta: "ATIVO" },
+            { ...CONTATO_LIBERADO_WHERE, statusConta: "ATIVO" },
           ],
         },
-        select: { id: true },
+        select: CONTATO_SELECT,
       });
-      return { clientIds: clients.map((c) => c.id) };
+      return { clientIds: ids(await semSuprimidos(prisma, tenantId, clients)) };
     }
 
     case "CICLO_ABERTO": {
@@ -151,7 +158,7 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
       }
       const alvo = configs.filter((c) => hoje.includes(c.diaAbertura) && (!escolhidas || escolhidas.has(c.cidadeKey)));
       if (alvo.length === 0) return { clientIds: [] };
-      const clients = await prisma.client.findMany({
+      const encontrados = await prisma.client.findMany({
         where: {
           AND: [
             buildSegmentWhere(tenantId, {
@@ -160,11 +167,12 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
               saldoDisponivelMin: condition?.comSaldo ? SALDO_MINIMO_ELEGIVEL : undefined,
             }),
             ENVIAVEL_WHERE,
-            { diaCicloAbertura: { in: [...new Set(alvo.map((c) => c.diaAbertura))] }, autorizacaoComunicacao: true, optOutAt: null, statusConta: "ATIVO" },
+            { diaCicloAbertura: { in: [...new Set(alvo.map((c) => c.diaAbertura))] }, ...CONTATO_LIBERADO_WHERE, statusConta: "ATIVO" },
           ],
         },
-        select: { id: true, cidade: true },
+        select: { ...CONTATO_SELECT, cidade: true },
       });
+      const clients = await semSuprimidos(prisma, tenantId, encontrados);
       const grupos = alvo
         .map((c) => ({ label: c.cidade, clientIds: clients.filter((cl) => cidadeKey(cl.cidade) === c.cidadeKey).map((cl) => cl.id) }))
         .filter((g) => g.clientIds.length > 0);

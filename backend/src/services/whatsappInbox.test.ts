@@ -4,11 +4,21 @@ import { storeInboundMessage } from "./whatsappInbox";
 jest.mock("../middleware/audit", () => ({ logAudit: jest.fn(async () => undefined) }));
 import { logAudit } from "../middleware/audit";
 
-function makeFake(opts: { client?: any; duplicate?: boolean; evento?: any; lastInboundAt?: Date | null } = {}) {
-  const calls: Record<string, any[]> = { msgCreate: [], convUpdate: [], clientUpdate: [], eventoUpdate: [], recipientUpdate: [] };
+function makeFake(opts: { client?: any; mesmoTelefone?: any[]; duplicate?: boolean; evento?: any; lastInboundAt?: Date | null } = {}) {
+  const calls: Record<string, any[]> = { msgCreate: [], convUpdate: [], clientUpdate: [], eventoUpdate: [], recipientUpdate: [], supressao: [] };
   const prisma: any = {
+    tenant: { findUnique: jest.fn(async () => ({ cpfSalt: "salt-t1" })) },
+    supressaoTitular: {
+      findMany: jest.fn(async () => []),
+      create: jest.fn(async (a: any) => {
+        calls.supressao.push(a);
+        return { id: "sup1" };
+      }),
+    },
     client: {
       findFirst: jest.fn(async () => opts.client ?? null),
+      // todos os cadastros do tenant com o mesmo telefone (LGPD 02-03)
+      findMany: jest.fn(async () => opts.mesmoTelefone ?? (opts.client ? [{ id: opts.client.id }] : [])),
       updateMany: jest.fn(async (a: any) => void calls.clientUpdate.push(a)),
     },
     conversation: {
@@ -73,7 +83,8 @@ describe("storeInboundMessage", () => {
     const { prisma, calls } = makeFake({ client: { id: "c1" } });
     const r = await storeInboundMessage(prisma, "t1", "acc1", msg({ body: "PARAR" }));
     expect(r.optedOut).toBe(true);
-    expect(calls.clientUpdate[0]).toMatchObject({ where: { id: "c1", tenantId: "t1" }, data: { autorizacaoComunicacao: false } });
+    expect(calls.clientUpdate[0]).toMatchObject({ where: { id: { in: ["c1"] }, tenantId: "t1" }, data: { autorizacaoComunicacao: false } });
+    expect(calls.clientUpdate[1]).toMatchObject({ where: { optOutAt: null }, data: { optOutAt: expect.any(Date) } });
     expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "OPT_OUT_WHATSAPP", targetId: "c1" }));
   });
 
@@ -81,7 +92,30 @@ describe("storeInboundMessage", () => {
     const { prisma, calls } = makeFake({ client: { id: "c1" } });
     const r = await storeInboundMessage(prisma, "t1", "acc1", msg({ type: "button", body: "SAIR" }));
     expect(r.optedOut).toBe(true);
-    expect(calls.clientUpdate).toHaveLength(1);
+    expect(calls.clientUpdate.length).toBeGreaterThan(0);
+  });
+
+  // LGPD 02-03 (b): antes só o findFirst (o cadastro mais recente) era marcado
+  it("PARAR marca opt-out em TODOS os cadastros com o mesmo telefone, nas duas formas do nono dígito", async () => {
+    const { prisma, calls } = makeFake({ client: { id: "c1" }, mesmoTelefone: [{ id: "c1" }, { id: "c2-cnpj" }] });
+    await storeInboundMessage(prisma, "t1", "acc1", msg({ waId: "558499998888", body: "Parar" }));
+    const busca = (prisma.client.findMany as jest.Mock).mock.calls[0][0].where;
+    expect(busca).toMatchObject({ tenantId: "t1" });
+    expect(busca.telefone.in).toEqual(expect.arrayContaining(["+5584999998888", "+558499998888"]));
+    expect(calls.clientUpdate.every((u) => JSON.stringify(u.where.id.in) === JSON.stringify(["c1", "c2-cnpj"]))).toBe(true);
+  });
+
+  // LGPD 02-03 (a): o pedido vale pelo telefone e sobrevive à reimportação/anonimização (SupressaoTitular)
+  it("PARAR grava a supressão do telefone (hash, nunca o número), com ou sem cliente", async () => {
+    for (const client of [{ id: "c1" }, undefined]) {
+      const { prisma, calls } = makeFake({ client });
+      await storeInboundMessage(prisma, "t1", "acc1", msg({ body: "PARAR" }));
+      expect(calls.supressao).toHaveLength(1);
+      const data = calls.supressao[0].data;
+      expect(data).toMatchObject({ tenantId: "t1", motivo: "OPT_OUT", canal: "WHATSAPP" });
+      expect(data.phoneHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(JSON.stringify(data)).not.toContain("99998888");
+    }
   });
 
   it("PARAR de número fora da base não mexe em cliente, mas bloqueia o contato nas próximas listas", async () => {
@@ -89,8 +123,24 @@ describe("storeInboundMessage", () => {
     const r = await storeInboundMessage(prisma, "t1", "acc1", msg({ body: "parar" }));
     expect(r.optedOut).toBe(true);
     expect(calls.clientUpdate).toHaveLength(0);
-    expect(calls.recipientUpdate[0].where).toMatchObject({ tenantId: "t1" });
+    expect(calls.recipientUpdate[0].where).toMatchObject({ tenantId: "t1", optOutAt: null });
     expect(calls.recipientUpdate[0].data.optOutAt).toBeInstanceOf(Date);
+  });
+
+  // LGPD 02-04: frases usuais (não só a palavra exata)
+  it("'Me tira dessa lista, por favor' também é descadastro", async () => {
+    const { prisma, calls } = makeFake({ client: { id: "c1" } });
+    const r = await storeInboundMessage(prisma, "t1", "acc1", msg({ body: "Me tira dessa lista, por favor" }));
+    expect(r.optedOut).toBe(true);
+    expect(calls.supressao).toHaveLength(1);
+  });
+
+  it("mensagem comum não descadastra", async () => {
+    const { prisma, calls } = makeFake({ client: { id: "c1" } });
+    const r = await storeInboundMessage(prisma, "t1", "acc1", msg({ body: "Oi, quero saber meu limite" }));
+    expect(r.optedOut).toBe(false);
+    expect(calls.supressao).toHaveLength(0);
+    expect(calls.clientUpdate).toHaveLength(0);
   });
 
   it("mensagem mais antiga que a última não sobrescreve o resumo da conversa", async () => {

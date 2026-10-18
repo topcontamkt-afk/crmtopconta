@@ -1,5 +1,8 @@
 import { AUTO_REPLY_JANELA_MS, AUTO_REPLY_MAX, AUTO_REPLY_PADRAO, autoReplyTextOf, maybeAutoReply, shouldAutoReply } from "./whatsappAutoReply";
 
+// LGPD 06-01: o token do ambiente (WHATSAPP_ACCESS_TOKEN) só vale como reserva com liberação explícita.
+process.env.ALLOW_GLOBAL_CHANNEL_CREDENTIALS = "true";
+
 const conta = { id: "a1", phoneNumberId: "pn1", autoReplyEnabled: true, autoReplyText: null, credentials: null };
 const ok = (wamid = "wamid.AUTO") => jest.fn(async () => ({ ok: true, json: async () => ({ messages: [{ id: wamid }] }) }));
 

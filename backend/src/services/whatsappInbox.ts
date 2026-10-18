@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { AppPrismaClient } from "../config/db";
 import { logAudit } from "../middleware/audit";
 import { InboundMessage, isOptOutMessage, phoneCandidates, previewOf } from "./whatsappPayload";
+import { registrarOptOutTelefone } from "./privacy";
 
 /**
  * Grava uma mensagem recebida do cliente: acha (ou cria) a conversa, liga ao cliente pelo telefone,
@@ -150,30 +151,20 @@ export async function storeInboundMessage(
     if (evento) await prisma.messageEvent.update({ where: { id: evento.id }, data: { status: "RESPONDIDO", respondedAt: m.timestamp } });
   }
 
-  // 6) pedido de descadastro (LGPD): vale na hora e fica no log de auditoria
+  // 6) pedido de descadastro (LGPD): vale na hora e fica no log de auditoria.
+  // LGPD 02-03: o pedido vale para o TELEFONE, não para um registro: grava a supressão (sobrevive à
+  // reimportação e à anonimização) e marca opt-out em TODOS os clientes do tenant com esse número (todas as
+  // formas do nono dígito, não só o `findFirst` acima) e em todos os destinatários de listas manuais.
   let optedOut = false;
   // texto digitado ou toque num botão (ex.: o botão "SAIR" do template)
-  if (client && ["text", "button", "interactive"].includes(m.type) && isOptOutMessage(m.body)) {
-    await prisma.client.updateMany({
-      where: { id: client.id, tenantId },
-      data: { autorizacaoComunicacao: false, optOutAt: new Date() },
-    });
+  if (candidates.length && ["text", "button", "interactive"].includes(m.type) && isOptOutMessage(m.body)) {
+    const r = await registrarOptOutTelefone(prisma, tenantId, { telefone: m.waId, canal: "WHATSAPP", origem: "whatsapp_inbound", quando: m.timestamp });
     await logAudit({
       tenantId,
       action: "OPT_OUT_WHATSAPP",
-      target: "Client",
-      targetId: client.id,
-      details: { conversationId: conversation.id, wamid: m.wamid },
-    });
-    optedOut = true;
-  } else if (!client && candidates.length && ["text", "button", "interactive"].includes(m.type) && isOptOutMessage(m.body)) {
-    // Contato fora da base (lista manual): o pedido de descadastro vale para as próximas listas.
-    await prisma.campaignRecipient.updateMany({ where: { tenantId, telefone: { in: candidates } }, data: { optOutAt: new Date() } });
-    await logAudit({
-      tenantId,
-      action: "OPT_OUT_WHATSAPP",
-      target: "CampaignRecipient",
-      details: { conversationId: conversation.id, wamid: m.wamid },
+      target: client ? "Client" : "CampaignRecipient",
+      targetId: client?.id,
+      details: { conversationId: conversation.id, wamid: m.wamid, telefone: r.telefoneMasked, clientIds: r.clientIds },
     });
     optedOut = true;
   }

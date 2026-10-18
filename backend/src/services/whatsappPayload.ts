@@ -135,7 +135,10 @@ export function phoneCandidates(waId: string): string[] {
   return [...out];
 }
 
-const OPT_OUT_FIRST_WORDS = new Set(["parar", "pare", "sair", "stop", "cancelar", "cancela", "descadastrar", "remover", "unsubscribe"]);
+const OPT_OUT_FIRST_WORDS = new Set([
+  "parar", "pare", "parem", "sair", "stop", "cancelar", "cancela", "descadastrar", "descadastre", "descadastra",
+  "remover", "unsubscribe",
+]);
 const OPT_OUT_PHRASES = new Set([
   "nao quero receber",
   "nao quero mais receber",
@@ -143,29 +146,68 @@ const OPT_OUT_PHRASES = new Set([
   "nao quero mais mensagens",
   "nao me envie mais",
   "nao envie mais mensagens",
+  // LGPD 02-04: recusas curtas usuais
+  "nao quero mais",
+  "nao quero mais nada",
+  "quero sair",
+  "sem interesse",
+  "chega",
 ]);
 
-/** minúsculas, sem acento, sem pontuação, espaços colapsados */
+/**
+ * LGPD 02-04: frases usuais de quem pede para parar, procuradas em QUALQUER ponto da mensagem (texto já
+ * normalizado: sem acento, minúsculas, sem pontuação). Só valem em mensagem de até OPT_OUT_MAX_PALAVRAS
+ * palavras, para não pegar um trecho perdido num texto longo sobre outro assunto.
+ */
+const OPT_OUT_PATTERNS: RegExp[] = [
+  // "não quero (mais) receber", "não desejo receber mensagens", "não quero mais propaganda"
+  /\bnao (quero|desejo|aceito) (mais )?(receber|mensage(?:m|ns)|msgs?|propagandas?|ofertas?|promocoes|promocao|contato|sms|whats|whatsapp|ligac)/,
+  // "não me mande mais", "não enviem mais nada", "não me liguem mais"
+  /\bnao (me )?(mande|mandem|manda|envie|enviem|envia|liguem|ligue) mais\b/,
+  // "me tira dessa lista", "tire meu número do cadastro", "remove meu contato da lista", "me exclua da lista"
+  // (o complemento precisa de "da/dessa/do..." antes: "me tira uma dúvida sobre o cadastro" não é pedido)
+  /\b(tira|tire|tirem|retira|retire|remove|remova|removam|exclui|exclua|excluam)\b( \w+){0,4} (da|dessa|desta|de sua|da sua|do|desse|deste|do seu|de seu) (lista|cadastro|contatos)\b/,
+  /\bme (tira|tire|tirem|remove|remova|exclui|exclua) daqui\b/,
+  // "quero me descadastrar", "pode descadastrar"
+  /\bdescadastr/,
+  // "quero sair da lista", "sair dessa lista"
+  /\bsair (da|dessa|desta|de sua|da sua) lista\b/,
+  // "por favor parar de mandar", "pare de me enviar" (mas não "não pare de me mandar")
+  /(?<!\bnao )\b(para|pare|parem|parar) de (me )?(mandar|enviar|mandarem|enviarem|ligar|perturbar|incomodar)\b/,
+  // "não tenho (mais) interesse"
+  /\bnao tenho (mais )?interesse\b/,
+  // "chega de mensagem"
+  /\bchega de (mensage(?:m|ns)|msgs?|propagandas?|ligac)/,
+  // "não me perturbe", "não me incomode mais"
+  /\bnao (me )?(perturbe|perturbem|incomode|incomodem)\b/,
+];
+const OPT_OUT_MAX_PALAVRAS = 15;
+
+/** minúsculas, sem acento, sem pontuação, espaços colapsados; "n" sozinho (abreviação de "não") vira "nao" */
 export function normalizeText(text: string): string {
   return (text || "")
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
-    .trim();
+    .trim()
+    .replace(/(^| )n(?= )/g, "$1nao");
 }
 
 /**
  * Pedido de opt-out: mensagem curta que começa com PARAR/SAIR/STOP/CANCELAR... (até 4 palavras,
- * para não tratar "quero sair do aperto financeiro" como descadastro) ou uma frase clara de recusa.
+ * para não tratar "quero sair do aperto financeiro" como descadastro), uma frase curta de recusa
+ * ou (LGPD 02-04) uma das frases usuais de OPT_OUT_PATTERNS em mensagem de até 15 palavras. Na dúvida
+ * pende para o titular: tratar uma recusa como descadastro só tira a pessoa do marketing.
  */
 export function isOptOutMessage(text: string | null | undefined): boolean {
   const t = normalizeText(text ?? "");
   if (!t) return false;
   if (OPT_OUT_PHRASES.has(t)) return true;
   const words = t.split(" ");
-  return words.length <= 4 && OPT_OUT_FIRST_WORDS.has(words[0]);
+  if (words.length <= 4 && OPT_OUT_FIRST_WORDS.has(words[0])) return true;
+  return words.length <= OPT_OUT_MAX_PALAVRAS && OPT_OUT_PATTERNS.some((re) => re.test(t));
 }
 
 /** Texto curto para a lista de conversas. */
