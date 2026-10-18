@@ -19,7 +19,9 @@ docs/lgpd/
     ferramentas/       conversor original → Markdown
     lei-13709.md, anpd-res-*.md, anpd-guia-legitimo-interesse.md
   auditoria/<data>/    saída de cada rodada da skill /lgpd-audit
-  artefatos/           rascunhos (registro de operações, aviso de privacidade, LIA)
+  artefatos/           rascunhos: registro de operações, aviso de privacidade, LIA,
+                       incidentes, suboperadores (requerem revisão jurídica)
+  pendencias-fora-do-codigo.md   andamento do que o código não resolve
 ```
 
 ## Papéis no tratamento
