@@ -118,8 +118,8 @@ async function listarConversas(req: Request, res: Response, src: unknown) {
 
   const where: any = { tenantId, status: "ABERTA" };
   if (filtro === "nao_lidas") where.unreadCount = { gt: 0 };
-  // Z-API não tem janela de 24h: essas conversas contam sempre como abertas
-  if (filtro === "janela_aberta") where.OR = [{ lastInboundAt: { gte: new Date(Date.now() - 24 * 3600_000) } }, { account: { is: { provider: "ZAPI" } } }];
+  // LGPD 02-06: a Z-API segue a mesma janela de 24h da Meta (whatsappReply.ts recusa fora dela)
+  if (filtro === "janela_aberta") where.lastInboundAt = { gte: new Date(Date.now() - 24 * 3600_000) };
   if (filtro === "sem_cliente") where.clientId = null;
   if (busca?.trim()) {
     const t = busca.trim();
@@ -144,8 +144,7 @@ async function listarConversas(req: Request, res: Response, src: unknown) {
   res.json({
     naoLidas,
     conversas: rows.map((c) => {
-      const zapi = c.account.provider === "ZAPI";
-      const ate = zapi ? null : janelaAte(c.lastInboundAt);
+      const ate = janelaAte(c.lastInboundAt);
       return {
         canal: c.account.provider,
         id: c.id,
@@ -156,7 +155,7 @@ async function listarConversas(req: Request, res: Response, src: unknown) {
         preview: c.lastPreview,
         ultimaMensagemEm: c.lastMessageAt.toISOString(),
         naoLidas: c.unreadCount,
-        janelaAberta: zapi || (!!ate && ate.getTime() > agora),
+        janelaAberta: !!ate && ate.getTime() > agora,
         janelaAte: ate?.toISOString() ?? null,
       };
     }),
@@ -186,8 +185,7 @@ router.get("/conversations/:id/messages", async (req, res) => {
   });
   mensagens.reverse();
 
-  const zapi = conversa.account.provider === "ZAPI";
-  const ate = zapi ? null : janelaAte(conversa.lastInboundAt);
+  const ate = janelaAte(conversa.lastInboundAt);
   const c = conversa.client;
   res.json({
     conversa: {
@@ -195,7 +193,7 @@ router.get("/conversations/:id/messages", async (req, res) => {
       nome: c?.nome ?? conversa.contactName ?? "Contato sem cadastro",
       telefone: maskPhone(conversa.waId),
       canal: conversa.account.provider,
-      janelaAberta: zapi || (!!ate && ate.getTime() > Date.now()),
+      janelaAberta: !!ate && ate.getTime() > Date.now(),
       janelaAte: ate?.toISOString() ?? null,
       naoLidas: conversa.unreadCount,
     },

@@ -63,13 +63,23 @@ router.put("/sheets", requireRole("ADMIN"), async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { tenantId, id: userId } = req.user!;
 
+  // LGPD 06-02: a Service Account é uma só para todos os tenants; a mesma planilha não pode ser de dois
+  // controladores (a leitura recusa planilha ativa em mais de um, então cadastrar a de outro travaria a dele).
+  const outro = await withCrossTenantAccess(() =>
+    prisma.sheetConnection.findFirst({ where: { sheetId: parsed.data.sheetId, active: true, tenantId: { not: tenantId } }, select: { id: true } })
+  );
+  if (outro) return res.status(409).json({ error: "Esta planilha já está conectada a outra conta.", codigo: "PLANILHA_EM_OUTRO_CONTROLADOR" });
+
   const existing = await prisma.sheetConnection.findFirst({ where: { tenantId } });
   const data = { tenantId, ...parsed.data, columnMapping: parsed.data.columnMapping as any };
   const conn = existing
     ? await prisma.sheetConnection.update({ where: { id: existing.id }, data })
     : await prisma.sheetConnection.create({ data });
 
-  await logAudit({ tenantId, userId, action: "CONFIGURE_SHEETS_CONNECTION", target: "SheetConnection", targetId: conn.id });
+  await logAudit({
+    tenantId, userId, action: "CONFIGURE_SHEETS_CONNECTION", target: "SheetConnection", targetId: conn.id,
+    details: { sheetId: conn.sheetId, sheetRange: conn.sheetRange },
+  });
   res.json(conn);
 });
 

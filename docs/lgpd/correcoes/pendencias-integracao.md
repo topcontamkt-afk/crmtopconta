@@ -20,16 +20,17 @@ Itens que os lotes deixaram para outro dono. Marque ao resolver.
 - [ ] `Settings.tsx` mostra a `webhookUrl` dos canais SMS; o texto "usando variáveis de ambiente/mock" não vale mais em produção (Lote 1).
 
 ## Integração (orquestrador)
-- [ ] `routes/inbox.ts:185` devolve `janelaAberta: true` para toda conversa Z-API; usar a regra da Meta e desabilitar o
+- [x] `routes/inbox.ts:185` devolve `janelaAberta: true` para toda conversa Z-API; usar a regra da Meta e desabilitar o
   Composer com janela fechada (Lote 1, 02-06).
-- [ ] Documentar `ALLOW_GLOBAL_CHANNEL_CREDENTIALS` e `PLATFORM_DEFAULT_TENANT_ID` no `.env.example` e no CLAUDE.md (Lote 1, 06-01).
+- [x] Documentar `ALLOW_GLOBAL_CHANNEL_CREDENTIALS` e `PLATFORM_DEFAULT_TENANT_ID` no `.env.example` e no CLAUDE.md (Lote 1, 06-01).
 - [ ] Opt-out automático (`whatsappInbox.ts`) cria `PedidoTitular` tipo REVOGACAO já atendido (Lote 3).
 - [ ] `services/dashboardMetrics.ts` e KPIs ainda contam clientes bloqueados (Lote 3).
-- [ ] Ligar `logAcessoNegado` em `requireRole` (`middleware/auth.ts`) antes do 403 (Lote 5, 05-03).
-- [ ] `app.set('trust proxy', 1)` em `app.ts` e conferir se o IP real chega pela rewrite da Vercel (Lote 5).
-- [ ] `PUT /sheets` (`routes/integrations.ts`) recusa `sheetId` já ativo em outro tenant e grava o sheetId na auditoria.
+- [x] Ligar `logAcessoNegado` em `requireRole` (`middleware/auth.ts`) antes do 403 (Lote 5, 05-03).
+- [x] ~~`trust proxy`~~: desnecessário para a auditoria, que lê `x-vercel-forwarded-for` primeiro (`origemRequisicao`).
+  Ligar mudaria o rate limit da app inteira, fora do escopo LGPD.
+- [x] `PUT /sheets` (`routes/integrations.ts`) recusa `sheetId` já ativo em outro tenant e grava o sheetId na auditoria.
   Hoje a proteção é só na leitura (409 para todos), o que deixa um tenant bloquear a sincronização de outro (Lote 5).
-- [ ] Comentários desatualizados: `config/tenantGuard.ts` (auditIntegrity como cross-tenant) e `schema.prisma`
+- [x] Comentários desatualizados: `config/tenantGuard.ts` (auditIntegrity como cross-tenant) e `schema.prisma`
   (cadeia "GLOBAL" no `AuditLog`); CLAUDE.md e achado #11 de `docs/security-audit/findings.md` (Lote 5).
 - [ ] Rodapé de opt-out no envio (`montarRodape` do Lote 4 em `campaignQueue.ts`).
 - [ ] `POST /clients/:id/anonymize` com o `anonymizeClient` do Lote 2.
@@ -47,3 +48,10 @@ Itens que os lotes deixaram para outro dono. Marque ao resolver.
 - Campos de schema sugeridos: `AuditLog.ip`/`userAgent`, `Tenant.avisoInboxMostraConteudo`, prazo de pedido por tenant.
 - Credencial Google por tenant (OAuth ou Service Account cifrada) como solução definitiva de 06-02.
 - Retenção do log do servidor para tentativas de login com e-mail inexistente (log drain).
+
+## Decisão: eliminação x reimportação (2026-10-18)
+Nota de revisão: bloquear a importação por documento OU telefone apagaria para sempre quem volta a ser cliente e quem
+herda um celular reaproveitado. Regra adotada (enviada ao Lote 2): a importação bloqueia eliminado só pelo documento;
+volta sozinho quando a planilha mostra conta aberta depois do pedido (relação nova); senão fica de fora, contado, e o ADMIN
+libera com motivo auditado. No envio, ELIMINACAO por telefone não barra contato com CPF próprio diferente (número
+reaproveitado); OPT_OUT e BLOQUEIO por telefone continuam barrando o número. Revisável pela controladora.

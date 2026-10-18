@@ -7,9 +7,12 @@ import request from "supertest";
 const channelFindFirst = jest.fn();
 const eventFindFirst = jest.fn();
 const eventUpdate = jest.fn();
+const sheetFindFirst = jest.fn();
+const sheetCreate = jest.fn();
 jest.mock("../config/db", () => ({
   prisma: {
     channelConfig: { findFirst: (...a: any[]) => channelFindFirst(...a) },
+    sheetConnection: { findFirst: (...a: any[]) => sheetFindFirst(...a), create: (...a: any[]) => sheetCreate(...a), update: jest.fn() },
     messageEvent: { findFirst: (...a: any[]) => eventFindFirst(...a), update: (...a: any[]) => eventUpdate(...a) },
   },
 }));
@@ -19,7 +22,10 @@ jest.mock("../config/tenantGuard", () => ({
   runWithTenantContextAsync: (_t: string, fn: () => Promise<any>) => fn(),
 }));
 jest.mock("../middleware/auth", () => ({
-  requireAuth: (_q: any, _r: any, n: any) => n(),
+  requireAuth: (q: any, _r: any, n: any) => {
+    q.user = { id: "u1", tenantId: "t1", role: "ADMIN" };
+    n();
+  },
   requireRole: () => (_q: any, _r: any, n: any) => n(),
 }));
 jest.mock("../middleware/rateLimit", () => ({ webhookLimiter: (_q: any, _r: any, n: any) => n() }));
@@ -145,5 +151,31 @@ describe("POST /webhooks/sms/:provider/:configId/:secret (por canal)", () => {
       .post(`/api/integrations/webhooks/sms/zenvia/cfg-z/${SEGREDO}`)
       .send({ type: "MESSAGE", direction: "IN", message: { from: "5584999998888", contents: [{ type: "text", text: "Qual meu limite?" }] } });
     expect(registrarOptOutTelefone).not.toHaveBeenCalled();
+  });
+});
+
+describe("PUT /sheets: planilha de outro controlador (LGPD 06-02)", () => {
+  const corpo = { sheetId: "planilha-1", columnMapping: { nome: "Nome" } };
+  beforeEach(() => {
+    sheetFindFirst.mockReset();
+    sheetCreate.mockReset();
+    (logAudit as jest.Mock).mockClear();
+  });
+
+  it("recusa com 409 a planilha já ativa em outro tenant, sem gravar", async () => {
+    sheetFindFirst.mockImplementation(async (a: any) => (a.where.tenantId?.not ? { id: "s-outro" } : null));
+    const r = await request(app).put("/api/integrations/sheets").send(corpo);
+    expect(r.status).toBe(409);
+    expect(r.body.codigo).toBe("PLANILHA_EM_OUTRO_CONTROLADOR");
+    expect(sheetFindFirst.mock.calls[0][0].where).toMatchObject({ sheetId: "planilha-1", active: true, tenantId: { not: "t1" } });
+    expect(sheetCreate).not.toHaveBeenCalled();
+  });
+
+  it("aceita planilha livre e audita o sheetId", async () => {
+    sheetFindFirst.mockResolvedValue(null);
+    sheetCreate.mockImplementation(async ({ data }: any) => ({ id: "s1", ...data }));
+    const r = await request(app).put("/api/integrations/sheets").send(corpo);
+    expect(r.status).toBe(200);
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "CONFIGURE_SHEETS_CONNECTION", details: expect.objectContaining({ sheetId: "planilha-1" }) }));
   });
 });

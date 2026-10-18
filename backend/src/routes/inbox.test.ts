@@ -57,3 +57,24 @@ describe("LGPD 07-03: busca de conversas fora da URL", () => {
     expect(JSON.stringify(where.AND)).toContain("Maria");
   });
 });
+
+describe("LGPD 02-06: conversa da Z-API segue a janela de 24h", () => {
+  const conversa = (lastInboundAt: Date) => ({
+    id: "cv1", waId: "5579999990000", contactName: "Contato", lastInboundAt, unreadCount: 0, status: "ABERTA",
+    lastMessageAt: lastInboundAt, lastPreview: null, client: null, account: { provider: "ZAPI" },
+  });
+
+  it("lista: conversa Z-API sem mensagem nas últimas 24h aparece com a janela fechada", async () => {
+    db.conversation.findMany.mockResolvedValueOnce([conversa(new Date(Date.now() - 30 * 3600_000))]);
+    const r = await request(app).get("/inbox/conversations");
+    expect(r.status).toBe(200);
+    expect(r.body.conversas[0].janelaAberta).toBe(false);
+  });
+
+  it("lista: filtro janela_aberta não inclui toda conversa Z-API", async () => {
+    await request(app).get("/inbox/conversations?filtro=janela_aberta");
+    const where = db.conversation.findMany.mock.calls[0][0].where;
+    expect(where.OR).toBeUndefined();
+    expect(where.lastInboundAt.gte).toBeInstanceOf(Date);
+  });
+});
