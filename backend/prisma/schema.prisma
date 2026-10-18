@@ -736,7 +736,6 @@ model Conversation {
   lastInboundAt   DateTime?
   lastPreview     String?
   unreadCount     Int                @default(0)
-  lastAutoReplyAt DateTime? // última resposta automática enviada (limita a 1 a cada poucas horas)
   assignedUserId  String?
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt

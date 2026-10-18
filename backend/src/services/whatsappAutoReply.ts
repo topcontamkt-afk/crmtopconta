@@ -5,14 +5,16 @@ import { SendError, sendText, TEXT_MAX_CHARS } from "./whatsappSend";
 /**
  * Resposta automática do número de avisos: quem escreve aqui recebe uma mensagem fixa mandando-o ao
  * suporte. Só vai dentro da janela de 24h que a própria mensagem do cliente acabou de abrir (texto
- * livre), no máximo uma vez por conversa a cada `AUTO_REPLY_COOLDOWN_MS` (senão "oi, oi, oi" gera três
- * respostas) e nunca para quem pediu descadastro (PARAR/SAIR).
+ * livre) e responde a TODA mensagem do cliente, mas no máximo `AUTO_REPLY_MAX` vezes por conversa em
+ * `AUTO_REPLY_JANELA_MS` (24 h corridas; depois disso o cliente é ignorado até a janela andar) e nunca
+ * para quem pediu descadastro (PARAR/SAIR). O limite conta as respostas automáticas já gravadas.
  */
 export const AUTO_REPLY_PADRAO =
   "Este é um canal apenas para informações. Informamos que não realizamos atendimentos por aqui.\n\n" +
   "Para suporte técnico ou em caso de dúvidas, entre em contato com nossa equipe de suporte: (79) 99837-2540.";
 
-export const AUTO_REPLY_COOLDOWN_MS = 6 * 3600_000;
+export const AUTO_REPLY_MAX = 3;
+export const AUTO_REPLY_JANELA_MS = 24 * 3600_000;
 
 type AccountLike = { autoReplyEnabled?: boolean | null; autoReplyText?: string | null };
 
@@ -45,14 +47,11 @@ export async function maybeAutoReply(
 ): Promise<boolean> {
   if (!shouldAutoReply(account, inbound)) return false;
   const now = deps.now ?? new Date();
-  const limite = new Date(now.getTime() - AUTO_REPLY_COOLDOWN_MS);
   try {
-    // Reserva o envio de forma atômica: dois webhooks simultâneos (reenvio da Meta) não respondem duas vezes.
-    const reservado = await prisma.conversation.updateMany({
-      where: { id: inbound.conversationId, tenantId, OR: [{ lastAutoReplyAt: null }, { lastAutoReplyAt: { lt: limite } }] },
-      data: { lastAutoReplyAt: now },
+    const enviadas = await prisma.waMessage.count({
+      where: { tenantId, conversationId: inbound.conversationId, direction: "SAIDA", automatic: true, timestamp: { gte: new Date(now.getTime() - AUTO_REPLY_JANELA_MS) } },
     });
-    if (reservado.count === 0) return false;
+    if (enviadas >= AUTO_REPLY_MAX) return false;
 
     const conversation = await prisma.conversation.findFirst({ where: { id: inbound.conversationId, tenantId }, select: { id: true, waId: true } });
     if (!conversation) return false;
@@ -66,8 +65,7 @@ export async function maybeAutoReply(
       await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: now, lastPreview: `Resposta automática: ${texto}`.slice(0, 140) } });
       return true;
     } catch (e) {
-      // Falhou na Meta: libera a trava para a próxima mensagem do cliente tentar de novo.
-      await prisma.conversation.updateMany({ where: { id: inbound.conversationId, tenantId, lastAutoReplyAt: now }, data: { lastAutoReplyAt: null } }).catch(() => undefined);
+      // Falhou na Meta: nada foi gravado, então não conta no limite e a próxima mensagem tenta de novo.
       console.warn(`[whatsapp/auto-reply] não enviada: ${e instanceof SendError ? e.message : (e as Error).message}`);
       return false;
     }

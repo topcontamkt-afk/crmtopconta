@@ -10,7 +10,7 @@ import { isSendableTemplate, previewTemplateFor, sendReply, sendTemplateReply } 
 import { SendError, OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
 import { accessTokenFor, credentialsOf } from "../services/whatsappAccount";
 import { janelaAte } from "../services/whatsappPayload";
-import { AUTO_REPLY_COOLDOWN_MS, AUTO_REPLY_PADRAO, autoReplyTextOf } from "../services/whatsappAutoReply";
+import { AUTO_REPLY_JANELA_MS, AUTO_REPLY_MAX, AUTO_REPLY_PADRAO, autoReplyTextOf } from "../services/whatsappAutoReply";
 
 /**
  * Inbox do WhatsApp (Fase 1): lista de conversas e histórico de mensagens recebidas. Leitura e
@@ -62,7 +62,8 @@ router.get("/auto-reply", async (req, res) => {
     texto: autoReplyTextOf(account),
     padrao: AUTO_REPLY_PADRAO,
     personalizado: !!account.autoReplyText?.trim(),
-    intervaloHoras: AUTO_REPLY_COOLDOWN_MS / 3600_000,
+    maximo: AUTO_REPLY_MAX,
+    janelaHoras: AUTO_REPLY_JANELA_MS / 3600_000,
   });
 });
 

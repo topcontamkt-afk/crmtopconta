@@ -1,16 +1,15 @@
-import { AUTO_REPLY_COOLDOWN_MS, AUTO_REPLY_PADRAO, autoReplyTextOf, maybeAutoReply, shouldAutoReply } from "./whatsappAutoReply";
+import { AUTO_REPLY_JANELA_MS, AUTO_REPLY_MAX, AUTO_REPLY_PADRAO, autoReplyTextOf, maybeAutoReply, shouldAutoReply } from "./whatsappAutoReply";
 
 const conta = { id: "a1", phoneNumberId: "pn1", autoReplyEnabled: true, autoReplyText: null, credentials: null };
 const ok = (wamid = "wamid.AUTO") => jest.fn(async () => ({ ok: true, json: async () => ({ messages: [{ id: wamid }] }) }));
 
-function fakePrisma(opts: { reservar?: number } = {}) {
+function fakePrisma(opts: { jaEnviadas?: number } = {}) {
   return {
     conversation: {
-      updateMany: jest.fn(async () => ({ count: opts.reservar ?? 1 })),
       findFirst: jest.fn(async () => ({ id: "c1", waId: "5579999990000" })),
       update: jest.fn(async () => ({})),
     },
-    waMessage: { create: jest.fn(async () => ({})) },
+    waMessage: { create: jest.fn(async () => ({})), count: jest.fn(async () => opts.jaEnviadas ?? 0) },
   } as any;
 }
 
@@ -71,33 +70,41 @@ describe("maybeAutoReply", () => {
     }
   });
 
-  it("respeita o intervalo: se a trava não reserva, não envia", async () => {
+  it("responde a toda mensagem, até o máximo de 3 nas últimas 24 h", async () => {
     process.env.WHATSAPP_ACCESS_TOKEN = "tok";
     try {
-      const prisma = fakePrisma({ reservar: 0 });
-      const fetchImpl = ok();
-      expect(await maybeAutoReply(prisma, "t1", conta, inbound, { fetchImpl })).toBe(false);
-      expect(fetchImpl).not.toHaveBeenCalled();
-      const now = new Date("2026-10-18T12:00:00Z");
-      await maybeAutoReply(fakePrisma(), "t1", conta, inbound, { fetchImpl: ok(), now });
-      const prisma2 = fakePrisma();
-      await maybeAutoReply(prisma2, "t1", conta, inbound, { fetchImpl: ok(), now });
-      const where = prisma2.conversation.updateMany.mock.calls[0][0].where;
-      expect(where.OR[1].lastAutoReplyAt.lt).toEqual(new Date(now.getTime() - AUTO_REPLY_COOLDOWN_MS));
+      expect(AUTO_REPLY_MAX).toBe(3);
+      for (const [ja, esperado] of [[0, true], [2, true], [3, false], [5, false]] as const) {
+        const fetchImpl = ok();
+        expect(await maybeAutoReply(fakePrisma({ jaEnviadas: ja }), "t1", conta, inbound, { fetchImpl })).toBe(esperado);
+        expect(fetchImpl).toHaveBeenCalledTimes(esperado ? 1 : 0);
+      }
     } finally {
       delete process.env.WHATSAPP_ACCESS_TOKEN;
     }
   });
 
-  it("se a Meta recusar, libera a trava e não grava mensagem", async () => {
+  it("conta só respostas automáticas de saída da própria conversa na janela de 24 h", async () => {
+    process.env.WHATSAPP_ACCESS_TOKEN = "tok";
+    try {
+      const prisma = fakePrisma();
+      const now = new Date("2026-10-18T12:00:00Z");
+      await maybeAutoReply(prisma, "t1", conta, inbound, { fetchImpl: ok(), now });
+      expect(prisma.waMessage.count).toHaveBeenCalledWith({
+        where: { tenantId: "t1", conversationId: "c1", direction: "SAIDA", automatic: true, timestamp: { gte: new Date(now.getTime() - AUTO_REPLY_JANELA_MS) } },
+      });
+    } finally {
+      delete process.env.WHATSAPP_ACCESS_TOKEN;
+    }
+  });
+
+  it("se a Meta recusar, não grava mensagem (então não conta no limite)", async () => {
     process.env.WHATSAPP_ACCESS_TOKEN = "tok";
     try {
       const prisma = fakePrisma();
       const fetchImpl = jest.fn(async () => ({ ok: false, status: 400, json: async () => ({ error: { message: "boom", code: 100 } }) }));
-      const now = new Date("2026-10-18T12:00:00Z");
-      expect(await maybeAutoReply(prisma, "t1", conta, inbound, { fetchImpl: fetchImpl as any, now })).toBe(false);
+      expect(await maybeAutoReply(prisma, "t1", conta, inbound, { fetchImpl: fetchImpl as any })).toBe(false);
       expect(prisma.waMessage.create).not.toHaveBeenCalled();
-      expect(prisma.conversation.updateMany).toHaveBeenLastCalledWith({ where: { id: "c1", tenantId: "t1", lastAutoReplyAt: now }, data: { lastAutoReplyAt: null } });
     } finally {
       delete process.env.WHATSAPP_ACCESS_TOKEN;
     }

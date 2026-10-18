@@ -279,13 +279,12 @@ telefones sempre mascarados. Tela `/inbox` (leitura, atualização por polling d
 ### Inbox: resposta automática, aviso de mensagem nova e tela cheia
 
 **Resposta automática** (`services/whatsappAutoReply.ts`): o número é canal só de avisos; quem escreve recebe `AUTO_REPLY_PADRAO` (manda ao suporte (79) 99837-2540) ou o texto
-da conta (`WhatsAppAccount.autoReplyText`, nulo = padrão; `autoReplyEnabled`, ligada por padrão). O webhook chama `maybeAutoReply` depois de `storeInboundMessage`: só para mensagem
-NOVA (reenvio da Meta não conta), nunca para opt-out (PARAR/SAIR), no máximo 1 a cada 6 h por conversa (`Conversation.lastAutoReplyAt`, reservado com `updateMany` atômico; se a
-Meta recusar a trava é liberada). Vai como texto livre dentro da janela de 24h que a mensagem do cliente acabou de abrir; grava `WaMessage.automatic=true` (a tela mostra "🤖 Resposta
+da conta (`WhatsAppAccount.autoReplyText`, nulo = padrão; `autoReplyEnabled`, ligada por padrão). O webhook chama `maybeAutoReply` depois de `storeInboundMessage`: responde a TODA mensagem NOVA do cliente (reenvio da Meta não conta), nunca a opt-out (PARAR/SAIR), mas no máximo
+`AUTO_REPLY_MAX` (3) vezes por conversa em 24 h corridas (conta os `WaMessage` SAIDA `automatic=true` da janela; sem coluna de controle; envio recusado pela Meta não grava, então não conta). Vai como texto livre dentro da janela de 24h que a mensagem do cliente acabou de abrir; grava `WaMessage.automatic=true` (a tela mostra "🤖 Resposta
 automática") e não zera o não lido. Nunca lança (o webhook não pode falhar por isso). `GET/PUT /api/inbox/auto-reply` (PUT só ADMIN, auditado) alimenta o painel "Resposta automática"
 na Inbox. **Aviso de mensagem nova:** `GET /api/inbox/resumo` (leve: não lidas + última) é consultado a cada 15 s por `components/InboxAlerts.tsx` em QUALQUER tela: balão no canto
 (some em 9 s, abre a conversa), bipe, "(N)" no título da aba e, com a aba em segundo plano, notificação do navegador (botão "Ativar avisos no navegador" na Inbox pede a permissão). A
-primeira consulta só marca o que já existia. A Inbox usa a tela toda (`.main:has(.inbox-page)`). SQL: `backend/prisma/sql/2026-10-whatsapp-resposta-automatica.sql` (rodar antes do deploy).
+primeira consulta só marca o que já existia. A Inbox usa a tela toda (`.main:has(.inbox-page)`). SQL: `backend/prisma/sql/2026-10-whatsapp-resposta-automatica.sql` (rodar antes do deploy; `Conversation.lastAutoReplyAt` da 1ª versão ficou no banco sem uso).
 
 ### Templates do WhatsApp (Meta) — Fase 4
 

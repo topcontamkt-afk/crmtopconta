@@ -293,7 +293,7 @@ function Composer({ conversaId, janelaAberta, podeEnviar, onEnviada }: { convers
   );
 }
 
-interface AutoReplyCfg { ativa: boolean; texto: string; padrao: string; personalizado: boolean; intervaloHoras: number }
+interface AutoReplyCfg { ativa: boolean; texto: string; padrao: string; personalizado: boolean; maximo: number; janelaHoras: number }
 
 /** Resposta automática: o que o cliente recebe ao escrever neste número (canal só de avisos). */
 function AutoReplyPanel({ podeEditar, onFechar }: { podeEditar: boolean; onFechar: () => void }) {
@@ -329,7 +329,7 @@ function AutoReplyPanel({ podeEditar, onFechar }: { podeEditar: boolean; onFecha
         <button type="button" className="btn secondary" style={{ padding: "2px 10px" }} onClick={onFechar}>Fechar</button>
       </div>
       <p className="seg-hint" style={{ marginTop: 4 }}>
-        Quando um cliente escreve para este número, ele recebe esta mensagem{cfg ? ` (no máximo uma vez a cada ${cfg.intervaloHoras} horas por conversa)` : ""}. Quem pede para parar (PARAR/SAIR) não recebe.
+        Quando um cliente escreve para este número, ele recebe esta mensagem a cada mensagem dele{cfg ? `, até ${cfg.maximo} vezes a cada ${cfg.janelaHoras} horas por conversa` : ""}. Quem pede para parar (PARAR/SAIR) não recebe.
       </p>
       <label style={{ display: "flex", gap: 8, alignItems: "center", margin: "8px 0" }}>
         <input type="checkbox" checked={ativa} disabled={!podeEditar || !cfg} onChange={(e) => setAtiva(e.target.checked)} />
