@@ -1,4 +1,5 @@
 import type { AppPrismaClient } from "../config/db";
+import { variantesTelefone } from "./privacy";
 
 /**
  * Direitos do titular (LGPD art. 18 e 19). Duas peças:
@@ -211,3 +212,80 @@ export async function relatorioTitular(prisma: AppPrismaClient, tenantId: string
 }
 
 export type RelatorioTitular = NonNullable<Awaited<ReturnType<typeof relatorioTitular>>>;
+
+/**
+ * LGPD 03-09: relatório de quem NÃO é cliente da base (contato de lista manual, quem só escreveu no WhatsApp), pelo
+ * telefone: listas em que entrou, mensagens de campanha, conversas da Inbox e com quem o dado foi compartilhado.
+ * Só registros sem cliente ligado (o de cliente é o relatorioTitular). Sem hash de documento nem binário de mídia.
+ * Devolve null para telefone inválido.
+ */
+export async function relatorioContato(prisma: AppPrismaClient, tenantId: string, telefone: string) {
+  const variantes = variantesTelefone(telefone);
+  if (variantes.length === 0) return null;
+  const waIds = variantes.map((v) => v.replace("+", ""));
+
+  const [tenant, listas, conversas] = await Promise.all([
+    prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { name: true, controladorNome: true, encarregadoNome: true, encarregadoContato: true, avisoPrivacidadeUrl: true, baseLegalMarketing: true },
+    }),
+    prisma.campaignRecipient.findMany({
+      where: { tenantId, clientId: null, telefone: { in: variantes } },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, nome: true, telefone: true, cpfMasked: true, limiteDisponivel: true, optOutAt: true, createdAt: true, campaign: { select: { id: true, name: true } } },
+    }),
+    prisma.conversation.findMany({
+      where: { tenantId, clientId: null, waId: { in: waIds } },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, waId: true, contactName: true, status: true, createdAt: true, lastMessageAt: true, account: { select: { provider: true, displayPhone: true } } },
+    }),
+  ]);
+
+  const recipientIds = listas.map((r) => r.id);
+  const mensagens = recipientIds.length
+    ? await prisma.messageEvent.findMany({
+        where: { campaign: { tenantId }, recipientId: { in: recipientIds } },
+        orderBy: { queuedAt: "asc" },
+        select: { channel: true, provider: true, status: true, queuedAt: true, sentAt: true, deliveredAt: true, respondedAt: true, clickedAt: true, campaign: { select: { id: true, name: true } } },
+      })
+    : [];
+  const conversaIds = conversas.map((c) => c.id);
+  const waMensagens = conversaIds.length
+    ? await prisma.waMessage.findMany({
+        where: { tenantId, conversationId: { in: conversaIds } },
+        orderBy: { timestamp: "asc" },
+        select: { conversationId: true, direction: true, type: true, body: true, mediaMime: true, mediaFilename: true, status: true, automatic: true, timestamp: true },
+      })
+    : [];
+
+  return {
+    geradoEm: new Date().toISOString(),
+    controlador: {
+      nome: tenant?.controladorNome || tenant?.name || null,
+      encarregado: tenant?.encarregadoNome ?? null,
+      contatoEncarregado: tenant?.encarregadoContato ?? null,
+      avisoPrivacidade: tenant?.avisoPrivacidadeUrl ?? null,
+      baseLegalMarketing: tenant?.baseLegalMarketing ?? null,
+    },
+    contato: { telefone: variantes[0], clienteDaBase: false },
+    listasManuais: listas.map(({ id: _id, ...r }) => r),
+    mensagens,
+    conversas: conversas.map((c) => ({
+      telefone: c.waId,
+      nomePerfil: c.contactName,
+      status: c.status,
+      canal: c.account.provider,
+      numeroDaEmpresa: c.account.displayPhone,
+      inicio: c.createdAt,
+      ultimaMensagem: c.lastMessageAt,
+      mensagens: waMensagens.filter((m) => m.conversationId === c.id).map(({ conversationId: _c, ...m }) => m),
+    })),
+    compartilhamento: {
+      suboperadores: suboperadoresDe([
+        ...mensagens.map((m) => ({ provider: m.provider, channel: m.channel })),
+        ...conversas.map((c) => ({ provider: c.account.provider, channel: "WHATSAPP" })),
+      ]),
+      infraestrutura: INFRAESTRUTURA,
+    },
+  };
+}

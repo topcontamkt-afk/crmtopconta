@@ -10,7 +10,7 @@ import { limiteRange, isPerfilRenda, LIMITE_MAXIMO, LIMITE_TETO, PERFIL_LABELS, 
 import { Router } from "express";
 import { z } from "zod";
 import { prisma, tenantRaw } from "../config/db";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { maskPhone } from "../services/masking";
 import { FAIXA_LABELS } from "../services/usage";
@@ -242,7 +242,8 @@ router.get("/encerramentos", async (req, res) => {
  * ativo sem nenhum uso) sempre têm prioridade; entre os ativos com uso, 3 faixas (baixo/moderado/
  * alto), no mesmo corte de "uso intermediário" já usado em usage.ts (20% e 70%).
  */
-router.get("/engajamento", async (req, res) => {
+// LGPD 01-04: nome e dia de nascimento de clientes: mesma regra de papel da lista nominal (VIEWER fora)
+router.get("/engajamento", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
   const { tenantId, id: userId } = req.user!;
 
   const [niveisRaw, totalAniversariantes, aniversariantesRaw] = await Promise.all([

@@ -140,6 +140,8 @@ describe("POST /auth/login — tentativas no AuditLog (LGPD 05-03)", () => {
     expect(r.status).toBe(200);
     expect(logTentativaAcesso).not.toHaveBeenCalled();
     expect(logAudit.mock.calls[0][0].action).toBe("LOGIN");
+    // LGPD 05-03: o login certo também guarda de onde veio
+    expect(logAudit.mock.calls[0][0].details).toHaveProperty("ip");
   });
 });
 

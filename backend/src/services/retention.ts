@@ -193,46 +193,25 @@ export interface AnonymizeResult {
   copiasExternas: { provedor: "ZAPI"; conversas: number; aviso: string }[];
 }
 
-/** Meia-noite de Brasília (UTC-3, sem horário de verão) do dia de `d`. */
-export function inicioDoDiaBrasilia(d: Date): Date {
-  const brt = new Date(d.getTime() - 3 * 3_600_000);
-  return new Date(Date.UTC(brt.getUTCFullYear(), brt.getUTCMonth(), brt.getUTCDate(), 3));
-}
-
-/** Anonimiza um titular e tudo o que se liga a ele. Devolve null se o cliente não existe neste tenant. */
-export async function anonymizeClient(
+/**
+ * LGPD 03-01 / 03-09: limpa o que se liga a um contato pelo número (e, quando há, pelo cliente e pelo documento):
+ * conversas da Inbox (número pseudonimizado, texto, arquivo e mídia fora), destinatários de lista manual e o id na
+ * operadora/erro das mensagens de campanha. Usado pela eliminação de cliente e pela de contato fora da base.
+ */
+async function limparContato(
   prisma: AppPrismaClient,
   tenantId: string,
-  clientId: string,
-  opts: AnonymizeOptions
-): Promise<AnonymizeResult | null> {
-  const agora = opts.agora ?? new Date();
-  const client = await prisma.client.findFirst({ where: { id: clientId, tenantId } });
-  if (!client) return null;
-
-  // Já anonimizado (pela versão antiga da retenção): telefone e documento já são pseudônimos.
-  const dadosReais = !client.cpfHash.startsWith(ANON_PREFIX);
-  const variantes = dadosReais ? variantesTelefone(client.telefone) : [];
+  alvo: { clientId?: string | null; variantes: string[]; docHash?: string | null }
+) {
+  const { clientId, variantes, docHash } = alvo;
   const waIds = variantes.map((v) => v.replace("+", ""));
-
-  // 1) LGPD 03-01: supressão ANTES de sobrescrever os hashes reais. Sem o id do pedido e com a data reduzida ao
-  //    dia (art. 12): a controladora tem o CPF, e um elo com o pedido ou um horário que casa com a trilha levaria
-  //    do hash ao cliente anonimizado. A importação só compara a data com a abertura da conta, e o dia basta.
-  let supressaoGravada = false;
-  if (dadosReais) {
-    const sup = await suprimir(prisma, tenantId, {
-      telefone: client.telefone,
-      docHash: client.cpfHash,
-      motivo: "ELIMINACAO",
-      origem: `anonimizacao:${opts.origem}`,
-      createdAt: inicioDoDiaBrasilia(agora),
-    });
-    supressaoGravada = !!sup;
-  }
 
   // 2a) Inbox (LGPD 04-02): conversas do cliente ou do número dele, inclusive as sem vínculo
   const conversas = await prisma.conversation.findMany({
-    where: { tenantId, OR: [{ clientId }, ...(waIds.length ? [{ waId: { in: waIds } }] : [])] },
+    where: {
+      tenantId,
+      OR: [...(clientId ? [{ clientId }] : []), ...(waIds.length ? [{ waId: { in: waIds }, ...(clientId ? {} : { clientId: null }) }] : [])],
+    },
     select: { id: true, waId: true, account: { select: { provider: true } } },
   });
   const convIds = conversas.map((c) => c.id);
@@ -256,18 +235,13 @@ export async function anonymizeClient(
   }
   const conversasZapi = conversas.filter((c) => c.account?.provider === "ZAPI").length;
 
-  // 2b) listas manuais: o destinatário ligado ao cliente, ao número ou ao documento
+  // 2b) listas manuais: o destinatário ligado ao cliente, ao número ou ao documento. Pelo número só quando o
+  //     destinatário não tem documento ou tem o mesmo: com outro CPF é outra pessoa (número reaproveitado)
+  const porNumero = variantes.length
+    ? [{ telefone: { in: variantes }, OR: [{ cpfHash: null }, ...(docHash ? [{ cpfHash: docHash }] : [])], ...(clientId ? {} : { clientId: null }) }]
+    : [];
   const destinatarios = await prisma.campaignRecipient.findMany({
-    where: {
-      tenantId,
-      // pelo número só quando o destinatário não tem documento ou tem o mesmo: com outro CPF é outra pessoa
-      // (número reaproveitado) e a linha dela não pode ser apagada junto
-      OR: [
-        { clientId },
-        ...(variantes.length ? [{ telefone: { in: variantes }, OR: [{ cpfHash: null }, ...(dadosReais ? [{ cpfHash: client.cpfHash }] : [])] }] : []),
-        ...(dadosReais ? [{ cpfHash: client.cpfHash }] : []),
-      ],
-    },
+    where: { tenantId, OR: [...(clientId ? [{ clientId }] : []), ...porNumero, ...(docHash ? [{ cpfHash: docHash }] : [])] },
     select: { id: true, telefone: true },
   });
   for (const r of destinatarios) {
@@ -279,12 +253,56 @@ export async function anonymizeClient(
   }
 
   // 2c) mensagens de campanha: o resultado fica; o id na operadora e o erro (pode citar o número) saem
-  const mensagensCampanha = (
-    await prisma.messageEvent.updateMany({
-      where: { campaign: { tenantId }, OR: [{ clientId }, ...(destinatarios.length ? [{ recipientId: { in: destinatarios.map((r) => r.id) } }] : [])] },
-      data: { providerMsgId: null, error: null },
-    })
-  ).count;
+  const filtrosEvento = [...(clientId ? [{ clientId }] : []), ...(destinatarios.length ? [{ recipientId: { in: destinatarios.map((r) => r.id) } }] : [])];
+  const mensagensCampanha = filtrosEvento.length
+    ? (await prisma.messageEvent.updateMany({ where: { campaign: { tenantId }, OR: filtrosEvento }, data: { providerMsgId: null, error: null } })).count
+    : 0;
+
+  return { convIds, conversasZapi, midias, mensagensInbox, destinatarios, mensagensCampanha };
+}
+
+/** Meia-noite de Brasília (UTC-3, sem horário de verão) do dia de `d`. */
+export function inicioDoDiaBrasilia(d: Date): Date {
+  const brt = new Date(d.getTime() - 3 * 3_600_000);
+  return new Date(Date.UTC(brt.getUTCFullYear(), brt.getUTCMonth(), brt.getUTCDate(), 3));
+}
+
+/** Anonimiza um titular e tudo o que se liga a ele. Devolve null se o cliente não existe neste tenant. */
+export async function anonymizeClient(
+  prisma: AppPrismaClient,
+  tenantId: string,
+  clientId: string,
+  opts: AnonymizeOptions
+): Promise<AnonymizeResult | null> {
+  const agora = opts.agora ?? new Date();
+  const client = await prisma.client.findFirst({ where: { id: clientId, tenantId } });
+  if (!client) return null;
+
+  // Já anonimizado (pela versão antiga da retenção): telefone e documento já são pseudônimos.
+  const dadosReais = !client.cpfHash.startsWith(ANON_PREFIX);
+  const variantes = dadosReais ? variantesTelefone(client.telefone) : [];
+
+  // 1) LGPD 03-01: supressão ANTES de sobrescrever os hashes reais. Sem o id do pedido e com a data reduzida ao
+  //    dia (art. 12): a controladora tem o CPF, e um elo com o pedido ou um horário que casa com a trilha levaria
+  //    do hash ao cliente anonimizado. A importação só compara a data com a abertura da conta, e o dia basta.
+  let supressaoGravada = false;
+  if (dadosReais) {
+    const sup = await suprimir(prisma, tenantId, {
+      telefone: client.telefone,
+      docHash: client.cpfHash,
+      motivo: "ELIMINACAO",
+      origem: `anonimizacao:${opts.origem}`,
+      createdAt: inicioDoDiaBrasilia(agora),
+    });
+    supressaoGravada = !!sup;
+  }
+
+  // 2a–2c) Inbox, listas manuais e mensagens de campanha do cliente, do número e do documento
+  const { convIds, conversasZapi, midias, mensagensInbox, destinatarios, mensagensCampanha } = await limparContato(prisma, tenantId, {
+    clientId,
+    variantes,
+    docHash: dadosReais ? client.cpfHash : null,
+  });
 
   // 2d) compras: ficam para estatística (valor, lojista, tipo, mês), sem o id da transação (a controladora
   // reidentificaria pela própria planilha), sem a razão social e com a data reduzida ao mês. Um id por linha:
@@ -303,11 +321,21 @@ export async function anonymizeClient(
   const importChanges = (await prisma.importChange.deleteMany({ where: { tenantId, clientId } })).count;
   const notificacoes = (await prisma.notification.deleteMany({ where: { tenantId, relatedType: "Client", relatedId: clientId } })).count;
   // 2f) pedidos do titular: tipo, canal, datas e status ficam (prova do atendimento e do prazo); o texto livre, que
-  //     pode citar o titular, e o vínculo com o cliente saem (LGPD 03-01 / art. 16)
+  //     pode citar o titular, e o vínculo com o cliente saem (LGPD 03-01 / art. 16). Pedido de eliminação aberto
+  //     deste cliente fica atendido: sem o vínculo, ninguém mais saberia a quem ele se refere.
+  const eliminacoesAbertas = (
+    await prisma.pedidoTitular.findMany({ where: { tenantId, clientId, tipo: "ELIMINACAO", status: "ABERTO" }, select: { id: true } })
+  ).map((p) => p.id);
   await prisma.pedidoTitular.updateMany({
     where: { tenantId, clientId },
     data: { clientId: null, descricao: null, resposta: null, telefoneMasked: null },
   });
+  if (eliminacoesAbertas.length) {
+    await prisma.pedidoTitular.updateMany({
+      where: { tenantId, id: { in: eliminacoesAbertas } },
+      data: { status: "ATENDIDO", respondidoEm: agora, resposta: "Dados eliminados (anonimização) no CRM." },
+    });
+  }
 
   // 3) o próprio cliente (LGPD 04-01)
   await prisma.client.update({ where: { id: client.id }, data: dadosAnonimizados(client, agora) });
@@ -342,6 +370,62 @@ export async function anonymizeClient(
       anonimizados: result.anonimizados,
       auditoriaRedigida,
       // LGPD 04-08: o que o CRM não alcança fica registrado como pendência manual
+      copiasExternas: copiasExternas.map((c) => ({ provedor: c.provedor, conversas: c.conversas, apagarManualmente: true })),
+    },
+  });
+  return result;
+}
+
+export type AnonymizeContatoResult =
+  | { clienteDaBase: string }
+  | {
+      supressaoGravada: boolean;
+      removidos: { midias: number };
+      anonimizados: { conversas: number; mensagensInbox: number; destinatarios: number; mensagensCampanha: number };
+      copiasExternas: { provedor: "ZAPI"; conversas: number; aviso: string }[];
+    };
+
+/**
+ * LGPD 03-09: eliminação de quem NÃO é cliente da base (contato de lista manual, quem só escreveu no WhatsApp),
+ * pelo telefone. Grava a supressão ELIMINACAO só pelo número (o envio já sabe tratar eliminação sem documento) e
+ * limpa conversas sem cliente, destinatários sem cliente e os ids de envio. Se o número é de um cliente da base,
+ * não faz nada e devolve o id: a eliminação dele é a da ficha (anonymizeClient), que alcança compras e histórico.
+ * Devolve null para telefone inválido. Audita sem PII.
+ */
+export async function anonymizeContato(
+  prisma: AppPrismaClient,
+  tenantId: string,
+  telefone: string,
+  opts: { motivo: string; pedidoId?: string | null; userId?: string | null; agora?: Date }
+): Promise<AnonymizeContatoResult | null> {
+  const variantes = variantesTelefone(telefone);
+  if (variantes.length === 0) return null;
+  const cliente = await prisma.client.findFirst({ where: { tenantId, telefone: { in: variantes }, anonymizedAt: null }, select: { id: true } });
+  if (cliente) return { clienteDaBase: cliente.id };
+
+  const sup = await suprimir(prisma, tenantId, {
+    telefone,
+    motivo: "ELIMINACAO",
+    origem: "anonimizacao:CONTATO",
+    createdAt: inicioDoDiaBrasilia(opts.agora ?? new Date()),
+  });
+  const r = await limparContato(prisma, tenantId, { variantes });
+  const copiasExternas = r.conversasZapi ? [{ provedor: "ZAPI" as const, conversas: r.conversasZapi, aviso: AVISO_COPIA_ZAPI }] : [];
+  const result = {
+    supressaoGravada: !!sup,
+    removidos: { midias: r.midias },
+    anonimizados: { conversas: r.convIds.length, mensagensInbox: r.mensagensInbox, destinatarios: r.destinatarios.length, mensagensCampanha: r.mensagensCampanha },
+    copiasExternas,
+  };
+  await logAudit({
+    tenantId,
+    userId: opts.userId ?? undefined,
+    action: "ELIMINACAO_CONTATO",
+    target: "PedidoTitular",
+    targetId: opts.pedidoId ?? undefined,
+    details: {
+      motivo: opts.motivo.slice(0, 500),
+      ...result,
       copiasExternas: copiasExternas.map((c) => ({ provedor: c.provedor, conversas: c.conversas, apagarManualmente: true })),
     },
   });

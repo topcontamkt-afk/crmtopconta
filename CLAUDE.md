@@ -132,7 +132,9 @@ auditorias, plano de correções, rascunhos de artefatos); skills `/lgpd-audit` 
 - **Direitos do titular**: relatório completo (`GET /api/clients/:id/relatorio-titular`), correção que trava o campo contra
   reimportação (`Client.camposCorrigidos`), bloqueio (`/bloqueio`), eliminação (`POST /api/clients/:id/anonymize`, anonimiza
   cliente e dados ligados: Inbox, compras, snapshots, histórico de importação, destinatários) e registro de pedidos com prazo
-  de 15 dias (`/api/titular/pedidos`, tela `/clients/pedidos-titular`).
+  de 15 dias (`/api/titular/pedidos`, tela `/clients/pedidos-titular`). Quem não é cliente da base (lista manual, Inbox) tem
+  relatório e eliminação pelo telefone no próprio pedido (`/relatorio-contato`, `/eliminar-contato`, `anonymizeContato`);
+  pedido de eliminação só fica "atendido" depois de eliminar, e atender revogação/oposição aplica o opt-out pelo número.
 - **Retenção** (job diário `/api/cron/retention`): inativos, contas encerradas (`retentionDaysAfterClosure`), Inbox
   (`inboxRetentionDays`), mídias (`mediaRetentionDays`), `ImportChange` com mais de 30 dias. Redigir PII de `AuditLog` grava
   o evento encadeado `AUDIT_REDACAO_LGPD`, então a verificação continua ok.

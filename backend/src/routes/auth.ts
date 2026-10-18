@@ -102,7 +102,8 @@ router.post("/login", loginLimiter, async (req, res) => {
     }
 
     const token = signToken({ id: user.id, tenantId: user.tenantId, role: user.role, email: user.email });
-    await logAudit({ tenantId: user.tenantId, userId: user.id, action: "LOGIN", target: "User", targetId: user.id });
+    // LGPD 05-03: de onde veio o acesso que deu certo (para separar ataque de uso legítimo depois de um incidente)
+    await logAudit({ tenantId: user.tenantId, userId: user.id, action: "LOGIN", target: "User", targetId: user.id, details: origem });
 
     res.json({
       token,
@@ -158,7 +159,7 @@ router.post("/2fa/verify", twoFactorVerifyLimiter, async (req, res) => {
 
   await runWithTenantContextAsync(user.tenantId, async () => {
     const token = signToken({ id: user.id, tenantId: user.tenantId, role: user.role, email: user.email });
-    await logAudit({ tenantId: user.tenantId, userId: user.id, action: "LOGIN_2FA", target: "User", targetId: user.id });
+    await logAudit({ tenantId: user.tenantId, userId: user.id, action: "LOGIN_2FA", target: "User", targetId: user.id, details: origemRequisicao(req) });
 
     res.json({
       token,

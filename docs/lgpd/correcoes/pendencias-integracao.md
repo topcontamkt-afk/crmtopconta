@@ -18,6 +18,7 @@ que ficou de fora de propósito e o que depende de alguém fora do código.
 | Público de envio exclui bloqueado, encerrado e anonimizado (`ENVIAVEL_WHERE`); dashboard não conta anonimizado nem bloqueado | integração `9fcc163` + Lote 2 (`dashboardMetrics.ts`) |
 | Resposta automática da Inbox com o padrão do controlador; automação confere base legal; prévia de retenção = critério do job | integração `9fcc163` |
 | Pedido do titular perde texto livre e vínculo na eliminação e no "Limpar base"; supressão ELIMINACAO sem id do pedido e só com o dia (art. 12); número reaproveitado fora da anonimização e do relatório; motivo do export fora da URL | `/lgpd-check` `d83470d` |
+| Rodada pós-correção (`docs/lgpd/auditoria/2026-10-18-pos`): revogação/oposição atendida vira opt-out (02-09); relatório e eliminação de quem não é cliente pelo telefone, eliminação só "atendida" depois de eliminar (03-09); limite no login, fila de auditoria por tenant e verificador que reconhece bifurcação (05-08); lista de destinatários sem VIEWER e auditada (05-09) | `b92c223` e o commit seguinte |
 | Segmento ou regra antiga com filtro de renda é recusado (sem o filtro o público cresceria); template MARKETING pela Inbox exige base legal; e-mail só pode ser apagado; conta reaberta limpa `encerradoEm`; aviso de que consentimento exige prova fora do CRM | `/lgpd-check` (2ª parte) |
 
 ## Ficou de fora de propósito
@@ -48,6 +49,13 @@ que ficou de fora de propósito e o que depende de alguém fora do código.
 - Planilha Google: vale quem cadastra primeiro; prova de posse fica para a credencial por tenant (06-02).
 - Reduzir `retentionDaysAfterClosure`, `inboxRetentionDays` ou `mediaRetentionDays` não mostra prévia (só o prazo geral).
 - Opt-out por SMS e manual não criam `PedidoTitular` (o do WhatsApp cria); 403 `SEM_ACESSO_AREA` não é auditado.
+- 01-05: `sexo` e faixa etária só alimentam o card demográfico do dashboard, sem finalidade declarada. Recomendação: parar de
+  importar `sexo` e incluí-lo no SQL de minimização (decisão da controladora), ou declarar a finalidade no aviso.
+- Parciais da rodada pós-correção que seguem em aberto: lista de ids exportados (05-01), relatório do titular sem
+  `ImportChange` e busca por CPF (03-02), 06-04 e 08-07 (ver o relatório). Fechados depois da rodada: `/dashboard/engajamento`
+  sem VIEWER (01-04), compras de cliente bloqueado ignoradas (03-04), login certo com IP/User-Agent (05-03).
+- Bifurcação da cadeia entre instâncias diferentes da Vercel ainda pode ocorrer (a fila é por processo); o verificador a
+  reconhece. Lock no banco (`pg_advisory_xact_lock`) fica para quando houver como testar sob RLS.
 - Opt-outs antigos só em `Client.optOutAt` não foram copiados para `SupressaoTitular` (o envio ainda os lê pelo cadastro).
 
 ## Decisão: eliminação x reimportação

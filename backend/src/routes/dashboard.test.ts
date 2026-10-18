@@ -5,10 +5,10 @@ const rawQuery = jest.fn();
 jest.mock("../config/db", () => ({ prisma: {}, tenantRaw: { query: (...a: any[]) => rawQuery(...a), execute: jest.fn() } }));
 jest.mock("../middleware/auth", () => ({
   requireAuth: (req: any, _res: any, next: any) => {
-    req.user = { id: "u1", tenantId: "t1", role: "VIEWER" };
+    req.user = { id: "u1", tenantId: "t1", role: (req.headers["x-role"] as string) || "VIEWER" };
     next();
   },
-  requireRole: () => (_req: any, _res: any, next: any) => next(),
+  requireRole: (...roles: string[]) => (req: any, res: any, next: any) => (roles.includes(req.user.role) ? next() : res.status(403).json({ error: "Sem permissão" })),
 }));
 jest.mock("../middleware/audit", () => ({ logAudit: jest.fn(async () => undefined) }));
 
@@ -26,7 +26,9 @@ describe("LGPD 01-04: GET /dashboard/engajamento (aniversariantes)", () => {
       if (sql.includes("COUNT(*)")) return [{ count: BigInt(1) }];
       return [{ id: "c1", nome: "Maria", telefone: "+5584999998888", cidade: "Natal", dia: 5 }];
     });
-    const r = await request(app).get("/dashboard/engajamento");
+    // nome e dia de nascimento: VIEWER não lê (mesma regra da lista nominal)
+    expect((await request(app).get("/dashboard/engajamento")).status).toBe(403);
+    const r = await request(app).get("/dashboard/engajamento").set("x-role", "ANALYST");
     expect(r.status).toBe(200);
     expect(r.body.aniversariantes.itens[0].telefone).toBe("*********8888");
     expect(JSON.stringify(r.body)).not.toContain("+5584999998888");

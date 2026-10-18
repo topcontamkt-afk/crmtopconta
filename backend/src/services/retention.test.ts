@@ -86,7 +86,7 @@ const mockTenantRaw = { execute: jest.fn(async () => 3), query: jest.fn() };
 jest.mock("../config/db", () => ({ prisma: mockPrisma, tenantRaw: mockTenantRaw }));
 
 import { prisma } from "../config/db";
-import { anonymizeClient, ANON_NOME, dadosAnonimizados, inicioDoDiaBrasilia, REDACTED_MARKER, runRetentionSweep } from "./retention";
+import { anonymizeClient, anonymizeContato, ANON_NOME, dadosAnonimizados, inicioDoDiaBrasilia, REDACTED_MARKER, runRetentionSweep } from "./retention";
 import { resetAnchorCache, verifyAuditChain } from "./auditIntegrity";
 import { logAudit } from "../middleware/audit";
 import { runWithTenantContextAsync } from "../config/tenantGuard";
@@ -195,9 +195,12 @@ describe("anonymizeClient (LGPD 03-01 / 04-01 / 04-02 / 04-08)", () => {
     expect(inicioDoDiaBrasilia(new Date("2026-10-19T02:59:00Z"))).toEqual(new Date("2026-10-18T03:00:00Z"));
   });
 
-  it("pedidos do titular: tipo e status ficam; texto livre, telefone e vínculo com o cliente saem", async () => {
+  it("pedidos do titular: texto livre, telefone e vínculo saem; a eliminação aberta dele fica atendida (resposta fixa)", async () => {
     await emTenant(() => anonymizeClient(prisma as any, "t1", "c1", { motivo: "x", origem: "PEDIDO_TITULAR", agora: AGORA }));
-    expect(store.pedidoTitular[0]).toMatchObject({ id: "p1", tipo: "ELIMINACAO", status: "ABERTO", clientId: null, descricao: null, resposta: null, telefoneMasked: null });
+    expect(store.pedidoTitular[0]).toMatchObject({
+      id: "p1", tipo: "ELIMINACAO", status: "ATENDIDO", respondidoEm: AGORA, clientId: null, descricao: null,
+      resposta: "Dados eliminados (anonimização) no CRM.", telefoneMasked: null,
+    });
     expect(store.pedidoTitular[1]).toMatchObject({ clientId: "c2", descricao: "Maria pediu cópia" });
   });
 
@@ -246,6 +249,51 @@ describe("anonymizeClient (LGPD 03-01 / 04-01 / 04-02 / 04-08)", () => {
     const r = await runWithTenantContextAsync("t2", () => anonymizeClient(prisma as any, "t2", "c1", { motivo: "x", origem: "PEDIDO_TITULAR" }));
     expect(r).toBeNull();
     expect(store.client[0].nome).toBe("João Silva");
+  });
+});
+
+describe("anonymizeContato (LGPD 03-09): quem não é cliente da base", () => {
+  const FORA = "+5584977776666";
+  function contatoForaDaBase() {
+    store.conversation.push({ id: "conv3", tenantId: "t1", clientId: null, waId: "5584977776666", contactName: "Zé", lastPreview: "apaga meus dados", lastMessageAt: diasAntes(1), account: { provider: "META" } });
+    store.waMessage.push({ id: "m3", tenantId: "t1", conversationId: "conv3", body: "apaga meus dados", mediaFilename: "doc.pdf", mediaId: "mid3", errorText: null, wamid: "w3", timestamp: diasAntes(1) });
+    store.waMediaBlob.push({ id: "b3", tenantId: "t1", messageId: "m3", createdAt: diasAntes(1) });
+    store.campaignRecipient.push(
+      { id: "r5", tenantId: "t1", clientId: null, nome: "Zé da lista", telefone: FORA, cpfHash: null, cpfMasked: null, limiteDisponivel: 100, createdAt: diasAntes(3) },
+      { id: "r6", tenantId: "t1", clientId: null, nome: "Outro dono", telefone: FORA, cpfHash: "hash-outro", cpfMasked: "x", limiteDisponivel: 50, createdAt: diasAntes(3) },
+    );
+    store.messageEvent.push({ id: "e5", clientId: null, recipientId: "r5", providerMsgId: "wamid.Z", error: "falhou para +5584977776666", status: "ENTREGUE" });
+  }
+
+  it("grava supressão só pelo número, limpa conversa, mídia, lista e ids de envio, e audita sem PII", async () => {
+    contatoForaDaBase();
+    const r: any = await emTenant(() => anonymizeContato(prisma as any, "t1", "(84) 97777-6666", { motivo: "pedido", pedidoId: "p9", agora: AGORA }));
+    expect(r).toMatchObject({ supressaoGravada: true, removidos: { midias: 1 }, anonimizados: { conversas: 1, destinatarios: 1, mensagensCampanha: 1 } });
+    const sup = store.supressaoTitular.at(-1)!;
+    expect(sup).toMatchObject({ motivo: "ELIMINACAO", phoneHash: phoneHash(SALT, FORA), docHash: null, createdAt: new Date("2026-10-18T03:00:00Z") });
+    expect(store.conversation.find((c) => c.id === "conv3")).toMatchObject({ waId: "anon-conv3", contactName: null, lastPreview: null });
+    expect(store.waMessage.find((m) => m.id === "m3")).toMatchObject({ body: null, mediaFilename: null, wamid: null });
+    expect(store.waMediaBlob.find((b) => b.id === "b3")).toBeUndefined();
+    expect(store.campaignRecipient.find((x) => x.id === "r5")).toMatchObject({ nome: "Contato anonimizado", telefone: "anon-r5" });
+    // mesmo número com OUTRO documento é outra pessoa (número reaproveitado)
+    expect(store.campaignRecipient.find((x) => x.id === "r6")).toMatchObject({ nome: "Outro dono", telefone: FORA });
+    expect(store.messageEvent.find((e) => e.id === "e5")).toMatchObject({ providerMsgId: null, error: null, status: "ENTREGUE" });
+    // o resto da base não muda
+    expect(store.conversation.find((c) => c.id === "conv1")!.waId).toBe("5584999998888");
+    const evento = store.auditLog.find((a) => a.action === "ELIMINACAO_CONTATO")!;
+    expect(evento.targetId).toBe("p9");
+    expect(JSON.stringify(evento)).not.toMatch(/7777|Zé/);
+  });
+
+  it("número de cliente da base: não mexe em nada e devolve o id (a eliminação é a da ficha)", async () => {
+    const r = await emTenant(() => anonymizeContato(prisma as any, "t1", "+5584999998888", { motivo: "x" }));
+    expect(r).toEqual({ clienteDaBase: "c1" });
+    expect(store.supressaoTitular ?? []).toHaveLength(0);
+    expect(store.conversation.find((c) => c.id === "conv1")!.waId).toBe("5584999998888");
+  });
+
+  it("telefone inválido: null", async () => {
+    expect(await emTenant(() => anonymizeContato(prisma as any, "t1", "123", { motivo: "x" }))).toBeNull();
   });
 });
 

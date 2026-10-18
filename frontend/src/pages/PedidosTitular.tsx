@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { api } from "../api/client";
+import { api, downloadFile } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 
 /**
@@ -78,6 +78,40 @@ export default function PedidosTitular() {
       });
       setCriando(false);
       setNovo({ tipo: "ACESSO", canal: "WHATSAPP", telefone: "", descricao: "", recebidoEm: "" });
+      carregar();
+    } catch (e) {
+      setErro((e as Error).message);
+    }
+  }
+
+  // LGPD 03-09: quem não é cliente da base é achado pelo telefone, digitado na hora (não fica guardado no pedido)
+  async function relatorioDoContato(p: Pedido) {
+    const telefone = window.prompt("Telefone do titular (com DDD):");
+    if (!telefone) return;
+    setErro(null);
+    try {
+      await downloadFile(`/titular/pedidos/${p.id}/relatorio-contato`, `contato-${p.id.slice(0, 8)}.json`, { method: "POST", body: { telefone } });
+    } catch (e) {
+      setErro((e as Error).message);
+    }
+  }
+
+  async function eliminarContato(p: Pedido) {
+    const telefone = window.prompt("Telefone do titular (com DDD):");
+    if (!telefone) return;
+    const confirmacao = window.prompt(
+      "Isto apaga do CRM as conversas, as listas e os dados de envio deste número (não dá para desfazer). Para confirmar, digite: ELIMINAR DADOS"
+    );
+    if (!confirmacao) return;
+    setErro(null);
+    try {
+      const r = await api<{ copiasExternas?: { conversas: number }[] }>(`/titular/pedidos/${p.id}/eliminar-contato`, {
+        method: "POST",
+        body: { telefone, confirmacao },
+      });
+      if (r.copiasExternas?.length) {
+        window.alert("Feito. Há conversas pela Z-API: apague também a cópia no aparelho conectado.");
+      }
       carregar();
     } catch (e) {
       setErro((e as Error).message);
@@ -225,11 +259,19 @@ export default function PedidosTitular() {
                   {p.resposta && <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{p.resposta}</div>}
                 </td>
                 <td>
-                  {admin && p.status === "ABERTO" && (
-                    <button className="btn secondary" onClick={() => setFechando({ id: p.id, status: "ATENDIDO", resposta: "", telefone: "", pedeTelefone: !p.clientId && (p.tipo === "REVOGACAO" || p.tipo === "OPOSICAO") })}>
-                      Fechar
-                    </button>
-                  )}
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {admin && !p.clientId && (
+                      <button className="btn secondary" onClick={() => relatorioDoContato(p)}>Relatório</button>
+                    )}
+                    {admin && !p.clientId && p.tipo === "ELIMINACAO" && p.status === "ABERTO" && (
+                      <button className="btn danger" onClick={() => eliminarContato(p)}>Eliminar contato</button>
+                    )}
+                    {admin && p.status === "ABERTO" && (
+                      <button className="btn secondary" onClick={() => setFechando({ id: p.id, status: "ATENDIDO", resposta: "", telefone: "", pedeTelefone: !p.clientId && (p.tipo === "REVOGACAO" || p.tipo === "OPOSICAO") })}>
+                        Fechar
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}

@@ -16,6 +16,10 @@ jest.mock("../middleware/auth", () => ({
 jest.mock("../middleware/audit", () => ({ logAudit: jest.fn(async () => undefined) }));
 const registrarOptOutTelefone = jest.fn(async (..._a: any[]) => ({ clientIds: ["c1"], telefoneMasked: "*********8888" }));
 jest.mock("../services/privacy", () => ({ registrarOptOutTelefone: (...a: any[]) => registrarOptOutTelefone(...a) }));
+const anonymizeContato = jest.fn();
+jest.mock("../services/retention", () => ({ anonymizeContato: (...a: any[]) => anonymizeContato(...a) }));
+const relatorioContato = jest.fn();
+jest.mock("../services/titular", () => ({ ...jest.requireActual("../services/titular"), relatorioContato: (...a: any[]) => relatorioContato(...a) }));
 
 import router from "./titular";
 import { logAudit } from "../middleware/audit";
@@ -117,3 +121,61 @@ describe("LGPD 02-09: atender revogação ou oposição descadastra o número", 
     expect(registrarOptOutTelefone).not.toHaveBeenCalled();
   });
 });
+
+describe("LGPD 03-09: pedido de quem não é cliente da base", () => {
+  const pedido = (over: any = {}) => ({ id: "p1", status: "ABERTO", tipo: "ELIMINACAO", canal: "WHATSAPP", clientId: null, prazoEm: new Date(Date.now() + 86_400_000), ...over });
+  const resultado = { supressaoGravada: true, removidos: { midias: 1 }, anonimizados: { conversas: 1, mensagensInbox: 2, destinatarios: 1, mensagensCampanha: 1 }, copiasExternas: [] };
+  beforeEach(() => db.pedidoTitular.update.mockImplementation(async ({ data }: any) => ({ id: "p1", ...data })));
+
+  it("fechar eliminação como atendida sem eliminar: 409 (fora da base e cliente ainda não anonimizado)", async () => {
+    db.pedidoTitular.findFirst.mockResolvedValue(pedido());
+    const fora = await request(app).post("/titular/pedidos/p1/fechar").set("x-role", "ADMIN").send({ status: "ATENDIDO", resposta: "Apagado" });
+    expect(fora.status).toBe(409);
+    expect(fora.body.code).toBe("USE_ELIMINAR_CONTATO");
+    db.pedidoTitular.findFirst.mockResolvedValue(pedido({ clientId: "c1" }));
+    db.client.findFirst.mockResolvedValue({ anonymizedAt: null });
+    const ficha = await request(app).post("/titular/pedidos/p1/fechar").set("x-role", "ADMIN").send({ status: "ATENDIDO", resposta: "Apagado" });
+    expect(ficha.body.code).toBe("USE_ELIMINACAO_FICHA");
+    expect(db.pedidoTitular.update).not.toHaveBeenCalled();
+    // negar continua possível (ex.: obrigação legal de guarda)
+    db.pedidoTitular.findFirst.mockResolvedValue(pedido());
+    expect((await request(app).post("/titular/pedidos/p1/fechar").set("x-role", "ADMIN").send({ status: "NEGADO", resposta: "Obrigação legal" })).status).toBe(200);
+  });
+
+  it("eliminar-contato: só ADMIN, exige a frase; elimina pelo telefone do corpo e fecha o pedido sem texto livre", async () => {
+    db.pedidoTitular.findFirst.mockResolvedValue(pedido());
+    expect((await request(app).post("/titular/pedidos/p1/eliminar-contato").send({ telefone: "84977776666", confirmacao: "ELIMINAR DADOS" })).status).toBe(403);
+    expect((await request(app).post("/titular/pedidos/p1/eliminar-contato").set("x-role", "ADMIN").send({ telefone: "84977776666" })).status).toBe(400);
+    anonymizeContato.mockResolvedValue(resultado);
+    const r = await request(app).post("/titular/pedidos/p1/eliminar-contato").set("x-role", "ADMIN").send({ telefone: "84977776666", confirmacao: "ELIMINAR DADOS" });
+    expect(r.status).toBe(200);
+    expect(anonymizeContato.mock.calls[0][1]).toBe("t1");
+    expect(anonymizeContato.mock.calls[0][2]).toBe("84977776666");
+    expect(db.pedidoTitular.update.mock.calls[0][0].data).toMatchObject({ status: "ATENDIDO", descricao: null, telefoneMasked: null });
+  });
+
+  it("eliminar-contato: número de cliente da base → 409 com o id; pedido de cliente ou de outro tipo → 409", async () => {
+    db.pedidoTitular.findFirst.mockResolvedValue(pedido());
+    anonymizeContato.mockResolvedValue({ clienteDaBase: "c7" });
+    const r = await request(app).post("/titular/pedidos/p1/eliminar-contato").set("x-role", "ADMIN").send({ telefone: "84999998888", confirmacao: "ELIMINAR DADOS" });
+    expect(r.status).toBe(409);
+    expect(r.body).toMatchObject({ code: "CONTATO_E_CLIENTE", clientId: "c7" });
+    expect(db.pedidoTitular.update).not.toHaveBeenCalled();
+    db.pedidoTitular.findFirst.mockResolvedValue(pedido({ clientId: "c1" }));
+    expect((await request(app).post("/titular/pedidos/p1/eliminar-contato").set("x-role", "ADMIN").send({ telefone: "84999998888", confirmacao: "ELIMINAR DADOS" })).status).toBe(409);
+    db.pedidoTitular.findFirst.mockResolvedValue(pedido({ tipo: "ACESSO" }));
+    expect((await request(app).post("/titular/pedidos/p1/eliminar-contato").set("x-role", "ADMIN").send({ telefone: "84999998888", confirmacao: "ELIMINAR DADOS" })).status).toBe(409);
+  });
+
+  it("relatorio-contato: telefone no corpo, só ADMIN, auditado só com contagens", async () => {
+    db.pedidoTitular.findFirst.mockResolvedValue(pedido({ tipo: "ACESSO" }));
+    relatorioContato.mockResolvedValue({ listasManuais: [{}], mensagens: [{}, {}], conversas: [] });
+    expect((await request(app).post("/titular/pedidos/p1/relatorio-contato").send({ telefone: "84977776666" })).status).toBe(403);
+    const r = await request(app).post("/titular/pedidos/p1/relatorio-contato").set("x-role", "ADMIN").send({ telefone: "84977776666" });
+    expect(r.status).toBe(200);
+    expect(relatorioContato.mock.calls[0].slice(1)).toEqual(["t1", "84977776666"]);
+    expect(audit.mock.calls.at(-1)[0]).toMatchObject({ action: "RELATORIO_CONTATO", targetId: "p1", details: { listas: 1, mensagens: 2, conversas: 0 } });
+    expect(JSON.stringify(audit.mock.calls.at(-1)[0])).not.toContain("7777");
+  });
+});
+

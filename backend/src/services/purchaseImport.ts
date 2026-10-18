@@ -51,6 +51,7 @@ export interface PurchaseImportResult {
   duplicateCount: number; // já existiam (mesmo idTransacaoCartao)
   unmatchedRows: number; // transações de documentos que não estão na base de clientes
   unmatchedClients: number; // quantos documentos distintos
+  bloqueadasLgpd: number; // LGPD 03-04: transações de cliente com tratamento suspenso, ignoradas
   merchantsCreated: number;
   errorCount: number;
   errors: RowError[];
@@ -112,16 +113,22 @@ export async function runPurchaseImport(
 
   // Fase 2: clientes (uma consulta para o lote inteiro).
   const clientByHash = new Map<string, string>();
+  const bloqueadosHash = new Set<string>();
   if (prepared.length > 0) {
     const hashes = Array.from(new Set(prepared.map((p) => p.cpfHash)));
     const clients = await prisma.client.findMany({
       where: { tenantId, cpfHash: { in: hashes } },
-      select: { id: true, cpfHash: true },
+      select: { id: true, cpfHash: true, bloqueadoLgpdAt: true },
     });
-    for (const c of clients) clientByHash.set(c.cpfHash, c.id);
+    for (const c of clients) {
+      // LGPD 03-04: tratamento suspenso a pedido do titular: a compra não entra nem mexe no último uso
+      if (c.bloqueadoLgpdAt) bloqueadosHash.add(c.cpfHash);
+      else clientByHash.set(c.cpfHash, c.id);
+    }
   }
   const matched = prepared.filter((p) => clientByHash.has(p.cpfHash));
-  const unmatched = prepared.filter((p) => !clientByHash.has(p.cpfHash));
+  const bloqueadas = prepared.filter((p) => bloqueadosHash.has(p.cpfHash)).length;
+  const unmatched = prepared.filter((p) => !clientByHash.has(p.cpfHash) && !bloqueadosHash.has(p.cpfHash));
   const unmatchedClients = new Set(unmatched.map((p) => p.cpfHash)).size;
 
   // Fase 3: lojistas (só de compras no comércio). Categoria automática para os novos; os que já
@@ -203,6 +210,9 @@ export async function runPurchaseImport(
   await refreshUsageColumns(tenantId).catch((e) => console.error('[purchaseImport] uso real:', e));
 
   const storedErrors: RowError[] = errors.slice(0, MAX_ERRORS_STORED);
+  if (bloqueadas > 0) {
+    storedErrors.unshift({ row: 0, motivo: `Aviso: ${bloqueadas} transação(ões) de cliente(s) com tratamento suspenso a pedido do titular (LGPD) foram ignoradas.` });
+  }
   if (unmatched.length > 0) {
     storedErrors.unshift({
       row: 0,
@@ -231,6 +241,7 @@ export async function runPurchaseImport(
       duplicateCount,
       unmatchedRows: unmatched.length,
       unmatchedClients,
+      bloqueadasLgpd: bloqueadas,
       merchantsCreated,
       errorCount: errors.length,
       errors: storedErrors,
