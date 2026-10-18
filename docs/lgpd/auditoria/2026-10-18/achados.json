@@ -1,0 +1,1711 @@
+[
+ {
+  "id": "01-01",
+  "titulo": "Importação de \"Cartões e contas\" grava campos pessoais que nenhuma tela, segmento, template ou rota consumida pelo produto lê",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 224,
+    "trecho": "email: raw.email?.trim() || undefined,"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 245,
+    "trecho": "lotacao: raw.lotacao?.trim() || undefined,"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 251,
+    "trecho": "bonus: parseNumber(raw.bonus),"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 252,
+    "trecho": "saldoLiquidoSaque: parseNumber(raw.saldo_liquido_saque),"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 243,
+    "trecho": "obsEncerramento: raw.obs_encerramento?.trim() || undefined,"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 239,
+    "trecho": "vinculoEmpregaticio: raw.vinculo_empregaticio?.trim() || undefined,"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 203,
+    "trecho": "// convênio (ex.: \"só servidores efetivos da Prefeitura de Lagarto\"). Preenchidos apenas"
+   },
+   {
+    "arquivo": "frontend/src/utils/importFields.ts",
+    "linha": 80,
+    "trecho": "export function autoMapColumns(headers: string[], fields: ImportFieldDef[] = IMPORT_FIELDS): Record<string, number> {"
+   },
+   {
+    "arquivo": "backend/src/routes/dashboard.ts",
+    "linha": 190,
+    "trecho": "by: [\"motivoEncerramento\"],"
+   }
+  ],
+  "cenario": "O operador sobe a planilha \"SaldoCartao\" na tela de importação; autoMapColumns casa os cabeçalhos por sinônimo (importFields.ts:49, 53, 62, 63, 73, 75, 76) e prepareRow grava, para cada titular, e-mail, lotação (unidade de trabalho do servidor), bônus, saldo líquido para saque, vínculo empregatício, cidade da empresa conveniada, observação e motivo de encerramento, razão social e status de validação do cadastro. Busca feita com `grep -rln \"\\b<campo>\\b\" backend/src frontend/src | grep -v .test.ts`: email (de Client), lotacao, bonus, saldoLiquidoSaque, vinculoEmpregaticio, cidadeEmpresaConveniada, statusValidacaoCadastro, obsEncerramento e razaoSocial só aparecem em cardAccountImport.ts (e, no frontend, em importFields.ts/importFormat.ts, que tratam só do mapeamento e da detecção de formato). Nenhuma tela, segmento (segments.ts não tem filtro de vínculo, embora o comentário do schema diga que o campo serve para segmentar), template (templateVariables.ts aceita só nome, cidade, percentual, saldo, limite) ou automação os lê. motivoEncerramento é lido apenas por GET /api/dashboard/encerramentos, que o frontend nunca chama (o grep de '/dashboard/' em frontend/src acha só overview, perfil, frescor, perfis-renda, oportunidades e audiencia). Esses dados só saem pela resposta integral de GET /api/clients (achado 01-04). É exatamente o caso de campo \"guardado porque veio na planilha\": dado financeiro e funcional de milhares de servidores fica retido sem finalidade, o que contraria a necessidade do art. 6º, III.",
+  "papel": "ambos",
+  "correcao": "Decisão da controladora sobre quais campos têm finalidade. Opção A, recomendada: parar de coletar o que não tem leitor. Remover de CARD_ACCOUNT_FIELDS (frontend/src/utils/importFields.ts) e de prepareRow (backend/src/services/cardAccountImport.ts:224-252) as chaves email, lotacao, bonus, saldo_liquido_saque, obs_encerramento, cidade_empresa_conveniada, razao_social e status_cadastro como coluna gravada (o status_cadastro continua sendo lido para inferir statusConta, mas não precisa ser persistido). Depois, um script em backend/prisma/sql/ que zera essas colunas nos clientes existentes e, por fim, as remove do model Client. Opção B: para cada campo que a controladora quiser manter (ex.: vinculoEmpregaticio para segmentar por convênio), implementar o leitor que justifica a coleta (filtro em services/segments.ts), registrar a finalidade e corrigir o comentário do schema. Em qualquer opção, motivoEncerramento só se justifica se GET /api/dashboard/encerramentos ganhar uma tela; caso contrário, sai junto.",
+  "tipo": "decisao_negocio",
+  "multi_tenant": "Lista de campos opcionais de importação habilitados por Tenant (ex.: Tenant.camposImportacao). autoMapColumns e prepareRow ignoram colunas fora da lista, para que cada controladora decida o que coleta.",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "cardAccountImport.ts:224-252 grava email, lotacao, bonus, saldoLiquidoSaque, vinculoEmpregaticio, cidadeEmpresaConveniada, statusValidacaoCadastro, obsEncerramento e razaoSocial. O grep em backend/src e frontend/src (sem os testes) acha esses campos de Client só em cardAccountImport.ts e no mapeamento importFields/importFormat. As outras ocorrências de email são de User/integração, e o razaoSocial de purchaseImport.ts:172 pertence a outro model. segments.ts não filtra por vinculoEmpregaticio, embora schema.prisma:201-203 diga que serve para segmentar. motivoEncerramento só aparece em dashboard.ts:189 (GET /encerramentos), e nenhum arquivo do frontend chama essa rota: a aba 'Encerramentos' do Dashboard.tsx:581 usa overview/encerradosNoDia. Âncora art-6 existe (lei-13709.md:141) e o inciso III (necessidade) sustenta o achado. Não encontrei mitigação.",
+  "tambem": []
+ },
+ {
+  "id": "01-02",
+  "titulo": "`ImportChange.before` copia o cadastro inteiro do cliente (renda, nascimento, sexo, lotação, e-mail) e não só as colunas que a importação grava",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 323,
+    "trecho": "const update: Prisma.ClientUpdateInput = { ...p.data };"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 369,
+    "trecho": "for (const key of Object.keys(update)) {"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 370,
+    "trecho": "if (key in existing) before[key] = (existing as any)[key];"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 437,
+    "trecho": "const existing = await prisma.client.findMany({ where: { tenantId, cpfHash: { in: [...new Set(prepared.map((p) => p.cpfHash))] } } });"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 571,
+    "trecho": "before: snapshotBefore(existing, planned.update)"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 280,
+    "trecho": "/// (services/importUndo.ts). `before` guarda só as colunas que a importação gravou. Expira em 30 dias."
+   }
+  ],
+  "cenario": "O operador importa uma planilha \"Cartões e contas\" que traz só documento, nome, telefone e limite. prepareRow monta p.data com todas as ~40 chaves do Client, e as colunas ausentes ficam com valor undefined (ex.: remuneracaoBruta: parseNumber(undefined)). planUpdate copia esse objeto, e Object.keys mantém as chaves com valor undefined. snapshotBefore então copia de `existing`, que vem de findMany sem select, ou seja, a linha inteira: remuneração bruta e líquida, data de nascimento, sexo, lotação, e-mail, cpfHash, motivo de encerramento etc. O Prisma ignora undefined no update, então essas colunas nem são alteradas. Mesmo assim, uma segunda cópia do perfil completo de cada cliente tocado vai para ImportChange.before, sem necessidade para o \"desfazer\". O teste de cardAccountImport.test.ts:117-121 só cobre chaves com valor definido e não pega esse caso. A cópia também passa ao largo da anonimização de retention.ts, mas isso é tema da dimensão 04.",
+  "papel": "operador",
+  "correcao": "Em snapshotBefore (backend/src/services/cardAccountImport.ts:367-373), copiar só as chaves cujo valor em `update` é diferente de undefined: `if (key in existing && (update as any)[key] !== undefined)`. Isso alinha o código ao comentário do schema. O mesmo vale para o caminho genérico (importService.ts:237), que já reusa a função. Acrescentar ao teste um caso com chave de valor undefined, garantindo que ela não entre em `before`.",
+  "tipo": "codigo",
+  "multi_tenant": "n/a",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Em planUpdate (cardAccountImport.ts:323), o spread de p.data mantém as chaves com valor undefined, e só as do grupo status/limite/saldo são apagadas (linhas 330-358). Assim remuneracaoBruta, dataNascimento, sexo, lotacao, email etc. ficam em Object.keys. snapshotBefore (369-370) copia de existing, que vem de findMany sem select (437), então a linha inteira vai para ImportChange.before (571). importService.ts:237 reusa a função. O teste cardAccountImport.test.ts:120 não cobre chave com valor undefined. Isso contradiz schema.prisma:280. A expiração de 30 dias citada no schema não tem job: o grep só acha deleteMany no undo (importUndo.ts:96), o que agrava o caso. Âncora art-6 válida (inciso III).",
+  "tambem": []
+ },
+ {
+  "id": "01-03",
+  "titulo": "Data de nascimento e renda vindas da folha alimentam campanhas de aniversário e perfis de renda sem finalidade registrada",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/opportunities.ts",
+    "linha": 135,
+    "trecho": "{ key: \"aniversariantes\", grupo: \"Relacionamento\", titulo: \"Aniversariantes do mês\", desc: \"Mensagem de relacionamento com o cartão no centro.\", impacto: \"Baixo\", status: \"campanha\","
+   },
+   {
+    "arquivo": "backend/src/services/opportunities.ts",
+    "linha": 279,
+    "trecho": "`SELECT \"id\" FROM \"Client\" WHERE \"tenantId\" = $1 AND \"dataNascimento\" IS NOT NULL"
+   },
+   {
+    "arquivo": "backend/src/routes/dashboard.ts",
+    "linha": 227,
+    "trecho": "* aniversariantes do mês corrente, pensado para alimentar disparo de campanhas de reengajamento."
+   },
+   {
+    "arquivo": "backend/src/routes/dashboard.ts",
+    "linha": 329,
+    "trecho": "WHEN COALESCE(\"remuneracaoBruta\", \"remuneracaoLiquida\") IS NULL THEN 'desconhecida'"
+   },
+   {
+    "arquivo": "backend/src/services/rendaPerfil.ts",
+    "linha": 2,
+    "trecho": "* Perfil de renda PF1–PF4, estimado a partir do LIMITE do cartão (decisão do cliente, 2026-10-10)."
+   },
+   {
+    "arquivo": "backend/src/services/segments.ts",
+    "linha": 93,
+    "trecho": "if (filters.perfilRenda?.length) {"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 23,
+    "trecho": "*    razão social, lotação, dados de RH (salário, nascimento, sexo) e dois flags de bloqueio"
+   }
+  ],
+  "cenario": "A data de nascimento chega ao CRM pela aba \"SaldoCartao\", que o próprio código descreve como \"dados de RH\" do convênio de folha. No Dashboard, a oportunidade \"Aniversariantes do mês\" gera, via GET /api/dashboard/audiencia, um público de até 5.000 clientes com mensagem sugerida pronta, e o operador dispara uma campanha de marketing por WhatsApp para esse público. Na mesma linha, a renda real (remuneração) alimenta a distribuição por faixa de renda em GET /api/dashboard/perfil, e a renda estimada pelo limite (limite ÷ 0,40) vira segmentos prontos PF1–PF4 para disparo. Nenhum artefato do repositório registra que essas finalidades foram informadas ao titular ou avaliadas como compatíveis com a coleta original: docs/lgpd/ não tem registro de operações nem LIA (busca por 'aniversari|dataNascimento|finalidade' em docs/ fora de fontes/ só encontrou o README), e o README diz que a base legal dos disparos \"ainda não [foi] formalizada\". Pelo art. 6º, I–II, o tratamento posterior precisa ser compatível com a finalidade informada. Avaliar essa compatibilidade cabe à controladora.",
+  "papel": "controladora",
+  "correcao": "Decisão da controladora, com três opções. (A) Declarar as finalidades \"relacionamento por aniversário\" e \"segmentação por faixa de renda\" no registro de operações (docs/lgpd/artefatos/) e no aviso ao titular; se a base for legítimo interesse, fazer a LIA. (B) Manter o perfil de renda só como estatística agregada no dashboard e retirar perfilRenda dos filtros de público (services/segments.ts) e a oportunidade \"aniversariantes\" (services/opportunities.ts). (C) Parar de importar data de nascimento e remuneração (ver 01-01). Recomendo (A) para o aniversário, que é uso de baixo impacto, desde que fique declarado. Para renda, recomendo (B) até que a finalidade de segmentar por renda esteja documentada.",
+  "tipo": "decisao_negocio",
+  "multi_tenant": "Flags por Tenant para habilitar as finalidades \"aniversariantes\" e \"perfil de renda em público de campanha\". A oportunidade e o filtro só aparecem quando a controladora daquele tenant registrou a finalidade.",
+  "severidade_original": "media",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "O código confere: opportunities.ts:135 e 279 montam o público de aniversariantes a partir de dataNascimento (LIMIT 5000), dashboard.ts:329 agrega remuneração e segments.ts:93 filtra perfilRenda. docs/lgpd/README.md:29 diz que a base legal 'ainda não [foi] formalizada', e docs/lgpd não tem registro de operações nem LIA. Fica PLAUSIBLE porque a compatibilidade com a finalidade informada depende de aviso, contrato ou política fora do repositório. Ressalva: o filtro perfilRenda usa só limiteTotal (segments.ts:93-99, rendaPerfil.ts:2), um dado do próprio produto, e não a remuneração vinda da folha. A parte de 'renda' é mais fraca. O núcleo do achado é o uso de dataNascimento de RH para marketing. Âncora art-6 válida (I-II).",
+  "tambem": []
+ },
+ {
+  "id": "01-04",
+  "titulo": "GET /api/clients, /api/clients/:id e /api/dashboard/engajamento entregam a qualquer papel, inclusive VIEWER, a linha inteira do cliente com telefone em claro, e essas leituras em volume não deixam trilha no AuditLog",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-6",
+   "docs/lgpd/fontes/lei-13709.md#art-46",
+   "docs/lgpd/fontes/lei-13709.md#art-49",
+   "docs/lgpd/fontes/lei-13709.md#art-37"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 29,
+    "trecho": "prisma.client.findMany({\n      where,\n      orderBy: { updatedAt: \"desc\" },"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 92,
+    "trecho": "const client = await prisma.client.findFirst({\n    where: { id: req.params.id, tenantId },\n    include: {"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 9,
+    "trecho": "router.use(requireAuth);"
+   },
+   {
+    "arquivo": "frontend/src/pages/Clients.tsx",
+    "linha": 106,
+    "trecho": "<td>{c.telefone}</td>"
+   },
+   {
+    "arquivo": "frontend/src/pages/ClientProfile.tsx",
+    "linha": 46,
+    "trecho": "<p>CPF: {client.cpfMasked}</p>"
+   },
+   {
+    "arquivo": "backend/src/routes/dashboard.ts",
+    "linha": 263,
+    "trecho": "`SELECT \"id\", \"nome\", \"telefone\", \"cidade\", EXTRACT(DAY FROM \"dataNascimento\")::int AS dia"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 12,
+    "trecho": "router.get(\"/\", async (req, res) => {"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 15,
+    "trecho": "const pageSize = Math.min(100, Number(req.query.pageSize) || 25);"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 45,
+    "trecho": "router.get(\"/export.csv\", requireRole(\"ADMIN\", \"OPERATOR\", \"ANALYST\"), async (req, res) => {"
+   },
+   {
+    "arquivo": "frontend/src/pages/Users.tsx",
+    "linha": 77,
+    "trecho": "<option value=\"VIEWER\">Visualizador</option>"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 90,
+    "trecho": "router.get(\"/:id\", async (req, res) => { ... prisma.client.findFirst({ where: { id: req.params.id, tenantId }, include: {...} })"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 163,
+    "trecho": "model Client {  (... dataNascimento DateTime? sexo String? remuneracaoBruta Decimal? remuneracaoLiquida Decimal? lotacao String? obsEncerramento String? cpfHash String email String? ... }"
+   },
+   {
+    "arquivo": "backend/src/routes/inbox.ts",
+    "linha": 77,
+    "trecho": "telefone: maskPhone(c.waId),"
+   },
+   {
+    "arquivo": "backend/src/routes/dashboard.ts",
+    "linha": 18,
+    "trecho": "router.use(requireAuth);"
+   },
+   {
+    "arquivo": "backend/src/routes/dashboard.ts",
+    "linha": 294,
+    "trecho": "itens: aniversariantesRaw.map((a) => ({ id: a.id, nome: a.nome, telefone: a.telefone, cidade: a.cidade, dia: a.dia })),"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 73,
+    "trecho": "await logAudit({ tenantId, userId, action: \"EXPORT_CLIENTS\", target: \"Client\", details: { count: clients.length } });"
+   },
+   {
+    "arquivo": "backend/src/routes/inbox.ts",
+    "linha": 91,
+    "trecho": "router.get(\"/conversations/:id/messages\", async (req, res) => {"
+   },
+   {
+    "arquivo": "backend/src/routes/inbox.ts",
+    "linha": 246,
+    "trecho": "router.get(\"/media/:messageId\", async (req, res) => {"
+   }
+  ],
+  "cenario": "Um usuário com papel VIEWER (o router de clients.ts só aplica requireAuth, sem requireRole) abre \"Base de clientes\". O navegador recebe até 100 objetos Client completos por página, sem select: remuneração bruta e líquida, bônus, saldo líquido para saque, data de nascimento, sexo, lotação, vínculo, e-mail, motivo e observação de encerramento, cpfHash e o telefone E.164 em claro. Clients.tsx usa só nome, telefone, cidade, percentualUtilizado, faixaUso, statusConta e autorizacaoComunicacao, e ClientProfile.tsx acrescenta cpfMasked, tags, limiteTotal, valorUtilizado e saldoDisponivel; o resto fica visível no DevTools sem finalidade de tela. A própria lista mostra o telefone sem máscara (Clients.tsx:106), enquanto a Inbox e a lista de destinatários de campanha já usam maskPhone. Paginando GET /api/clients?pageSize=100&page=1..N, cerca de 36 requisições bastam para levar a base inteira (~3,5 mil clientes, contagem de metadado não conferida), sem nenhuma entrada no AuditLog. O export CSV da mesma base, com menos campos, exige ADMIN/OPERATOR/ANALYST e grava EXPORT_CLIENTS, então a restrição de papel do export fica inócua e uma conta de visualização (ou o token roubado dela) vira canal de extração sem trilha. Na mesma linha, GET /api/dashboard/engajamento devolve nome, telefone completo, cidade e dia de aniversário de até 100 clientes a qualquer papel, e nenhuma tela chama essa rota. A leitura de conversas e o download de mídia da inbox também não chamam logAudit. PATCH /api/clients/:id devolve a linha inteira. Se a credencial de um usuário vazar, a controladora não consegue demonstrar quem leu o quê (art. 6º, X) nem reconstruir o escopo do incidente. A exposição é a usuários autenticados do mesmo tenant, por isso a severidade é media (minimização e trilha), não crítica.",
+  "papel": "ambos",
+  "correcao": "(1) Em backend/src/routes/clients.ts, trocar findMany/findFirst/update sem select por um select explícito por papel. Lista (GET /, l.29): id, nome, cidade, percentualUtilizado, faixaUso, statusConta, autorizacaoComunicacao e telefone mascarado com maskPhone (services/masking.ts). Detalhe (GET /:id, l.92) e PATCH (l.129): esses campos mais cpfMasked, tags, limiteTotal, valorUtilizado, saldoDisponivel, movements e messageEvents; telefone completo e campos financeiros só para ADMIN/OPERATOR; nunca devolver cpfHash. Clients.tsx e ClientProfile.tsx passam a exibir o valor que vier mascarado. (2) Em backend/src/routes/dashboard.ts, remover a lista nominal de GET /engajamento (manter só níveis e totais) ou devolver só ids, como /audiencia, com requireRole(\"ADMIN\",\"OPERATOR\"). (3) Registrar via logAudit as leituras em volume, sem PII em details: GET /api/clients com filtros e quantidade retornada; GET /api/inbox/conversations/:id/messages (READ_CONVERSATION) e /media/:messageId (DOWNLOAD_MEDIA) com targetId; opcionalmente limitar a paginação acumulada por sessão. (4) Se a controladora mantiver os campos de RH (01-01), expô-los só num endpoint próprio com requireRole e auditoria. Recomenda-se que VIEWER não veja telefone completo nem renda; a decisão final de need-to-know é da controladora.",
+  "tipo": "codigo",
+  "multi_tenant": "Matriz de campos visíveis por papel (telefone completo, CPF mascarado, limite/saldo, campos financeiros) e política de quais leituras auditar (limiar de linhas) configuráveis por Tenant; o default seguro (mascarado, sem renda, leituras em volume auditadas) fica no código.",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "clients.ts:29 (findMany), :92 (findFirst com include) e :129 (update do PATCH, devolvido em res.json) não têm select nem omit. db.ts aplica só tenantGuardExtension, sem omit global. O router só usa requireAuth (clients.ts:9), e VIEWER existe (schema.prisma:28). Clients.tsx:106 e ClientProfile.tsx:46 usam um subconjunto pequeno de campos. dashboard.ts:263 (GET /engajamento, com requireAuth em :18) devolve nome, telefone, cidade e dia de nascimento, e o frontend não chama a rota (o grep de '/dashboard' só acha frescor, overview, perfil, oportunidades, audiencia e perfis-renda). Exposição só a usuários autenticados do mesmo tenant: a severidade fica em media (minimização), não sobe para crítica. Âncora art-6 válida (III). | Verificação de 05-02: backend/src/routes/clients.ts:12 GET / só passa por requireAuth (router.use na l.9), sem requireRole; pageSize vai até 100 (l.15) e o findMany (l.29) não tem select, então devolve telefone, cpfHash e cpfMasked. Não há logAudit nessa rota, enquanto o export (l.45) exige ADMIN/OPERATOR/ANALYST. O app.ts:77 monta a rota sem outro filtro. maskPhone existe (masking.ts:103) e é usado em campaigns.ts:181 e inbox.ts:77. A contagem de ~3,5 mil clientes em produção não foi conferida, mas não altera o achado. Minimização e falta de trilha, com o dado exposto a um usuário interno do próprio controlador: media. | Verificação de 07-01: backend/src/routes/clients.ts:9 só aplica requireAuth; :29-34 findMany e :92-99 findFirst sem select devolvem o registro inteiro a qualquer papel, VIEWER incluído. Os campos dataNascimento, sexo, lotacao, remuneracaoBruta/Liquida, obsEncerramento e cpfHash existem em Client (schema.prisma:163-224, não na linha 1 citada). Não há omit nem $extends em config/db.ts, e o app.ts não tem middleware que filtre a resposta. No frontend, esses campos aparecem só nos mapeadores de importação (utils/importFields.ts, importFormat.ts). Clients.tsx:106 mostra c.telefone sem máscara, enquanto inbox.ts:77 e campaigns.ts:181 usam maskPhone. As âncoras art-6, art-46 e art-49 existem. É minimização e segurança parcial, por isso fica em media. | Verificação de 07-02: dashboard.ts:18 só aplica requireAuth; a rota /engajamento (:234) não tem requireRole. O SELECT em :263 traz nome, telefone, cidade e dia do nascimento, e :294 devolve tudo isso sem maskPhone. grep 'engajamento' em frontend/src não acha nada; o Dashboard.tsx:85/481 usa só a contagem de aniversariantes que vem de /overview. Âncoras art-6 e art-46 existem. Esses mesmos dados já chegam ao VIEWER por /api/clients (07-01). Mesmo assim, este é um caminho próprio que sobra depois da correção do 07-01, então a severidade media se mantém. | Verificação de 08-02: GET /api/clients (clients.ts:12-38) só exige requireAuth, então VIEWER também acessa. Ele faz findMany sem select, devolve até 100 linhas por página com remuneração, nascimento e telefone (schema.prisma:219-224) e não chama logAudit. Já o export CSV registra EXPORT_CLIENTS (clients.ts:73). A lista de aniversariantes (dashboard.ts:234-272) também não registra. Em inbox.ts não há nenhuma chamada a logAudit (rotas em :91 e :246). Não existe middleware global de auditoria (app.ts:75-94). O art. 37 trata de registro das operações e não de log de acesso, mas o art. 46 e o art. 6º, X sustentam o achado.",
+  "tambem": [
+   "05-02",
+   "07-01",
+   "07-02",
+   "08-02"
+  ]
+ },
+ {
+  "id": "02-01",
+  "titulo": "Base legal dos disparos de marketing não é declarada nem registrada: o sistema assume uma base implícita",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-7",
+   "docs/lgpd/fontes/lei-13709.md#art-8",
+   "docs/lgpd/fontes/lei-13709.md#art-10",
+   "docs/lgpd/fontes/anpd-guia-legitimo-interesse.md#p-25",
+   "docs/lgpd/fontes/anpd-guia-legitimo-interesse.md#p-26",
+   "docs/lgpd/fontes/anpd-guia-legitimo-interesse.md#p-52"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 99,
+    "trecho": "retentionDays     Int      @default(1095) // 3 anos default (LGPD)  (Tenant não tem nenhum campo de base legal, finalidade ou versão de LIA/termo)"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 361,
+    "trecho": "objective    String?  (Campaign só tem objetivo em texto livre; não há baseLegal/finalidade)"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 461,
+    "trecho": "trigger   String // NOVO_CLIENTE_SEM_USO | INATIVO_30_DIAS | LIMITE_RENOVADO | ESTIMULO_FAIXA | ... | CICLO_ABERTO  (AutomationRule sem base/finalidade)"
+   },
+   {
+    "arquivo": "backend/src/routes/tenant.ts",
+    "linha": 22,
+    "trecho": "const settingsSchema = z.object({ retentionDays: ..., maxMsgsPerMinute: ... })  (única configuração LGPD por tenant)"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 253,
+    "trecho": "// Base legal: aceite no contrato/abertura de conta (confirmado com o cliente) — todo cadastro aprovado é considerado autorizado por padrão"
+   }
+  ],
+  "cenario": "Busca `grep -rn -i 'baseLegal|base_legal|legalBasis|legitimoInteresse|finalidade' backend/src backend/prisma/schema.prisma` não retorna nenhum campo. A controladora (TopConta) não formalizou a base, mas o importador do formato real 'Cartões e contas' já decide sozinho, num comentário de código, que a base é 'aceite no contrato' e marca todo cadastro aprovado como autorizado. A partir daí campanhas de segmento, listas manuais e automações (NOVO_CLIENTE_SEM_USO, INATIVO_30_DIAS, LIMITE_RENOVADO, ESTIMULO_FAIXA, ETAPA_PERFIL, CICLO_ABERTO) disparam WhatsApp/SMS de marketing, sem ação humana no caso das automações, para milhares de titulares. Se a ANPD pedir a hipótese do art. 7º usada, não há registro: na rota de consentimento o ônus da prova (art. 8º, §2º) não se cumpre com um booleano inferido; na rota de legítimo interesse faltam a finalidade concreta, o teste de balanceamento e as salvaguardas de transparência e opt-out (art. 10; Guia LI, p. 25, 26 e 52). Um segundo tenant herdaria a mesma suposição.",
+  "papel": "ambos",
+  "correcao": "Decisão da controladora, com o código preparado para as duas rotas. ROTA A, consentimento (art. 7º, I; art. 8º): (1) tabela `ConsentRecord` (tenantId, clientId|telefone, finalidade, canal, textoVersao, origem, coletadoEm, revogadoEm, evidência) gravada na coleta; (2) `autorizacaoComunicacao` passa a ser derivada de haver um ConsentRecord ativo para a finalidade 'marketing' e o canal; (3) cardAccountImport.ts deixa de setar `!isReprovado` e só autoriza com coluna de aceite com data/versão vinda da origem; (4) a base atual, sem prova, fica bloqueada até uma campanha de recoleta. ROTA B, legítimo interesse (art. 7º, IX; art. 10): (1) documento LIA versionado por tenant (Tenant.lgpdBaseMarketing = 'LEGITIMO_INTERESSE', Tenant.liaVersao/liaAprovadaEm), referenciado em Campaign e AutomationRule; (2) bloquear envio se o tenant não tiver base declarada; (3) exigir identificação do controlador e instrução de opt-out na mensagem (ver 02-05); (4) opt-out por qualquer canal e por telefone (ver 02-03/02-04); (5) restringir os campos usados nos filtros ao mínimo necessário (art. 10, §1º): renda, lotação e vínculo para segmentar marketing precisam constar do teste. RECOMENDAÇÃO: rota B, legítimo interesse, para clientes ativos da própria TopConta com relação contratual prévia, mensagens sobre o próprio cartão (limite renovado, ciclo aberto, uso), que é o cenário do Guia LI, exemplo 5 (p. 17–18: promoção a quem tem relação prévia, com descadastro na própria mensagem). Contatos de lista manual fora da base não têm relação prévia: para eles, consentimento com prova ou não enviar. Automações entram na mesma LIA, desde que a finalidade (estímulo de uso do cartão contratado) seja a mesma da campanha. Se a finalidade for outra, o teste precisa cobri-la à parte.",
+  "tipo": "decisao_negocio",
+  "multi_tenant": "Tenant.baseLegalMarketing (enum CONSENTIMENTO | LEGITIMO_INTERESSE | null = envio bloqueado), Tenant.liaVersao/liaAprovadaEm, texto de identificação do controlador e de opt-out por tenant; Campaign/AutomationRule guardam a base e a finalidade vigentes no momento do disparo.",
+  "severidade_original": "alta",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Código conferido: schema.prisma:95-99 (Tenant) só tem cpfSalt/retentionDays/maxMsgsPerMinute; Campaign.objective texto livre (l.361); AutomationRule sem base/finalidade (l.461); tenant.ts:22 settingsSchema só retentionDays/maxMsgsPerMinute; grep por baseLegal/legalBasis/finalidade/ConsentRecord em src e schema vazio; cardAccountImport.ts:253-257 assume 'aceite no contrato' e seta !isReprovado. Âncoras art-7/8/10 e p-25/26/52 existem e o texto sustenta (art. 8 §2 ônus da prova, §4 autorização genérica nula; art. 10 §1/§2; Guia p-26 registro e teste de balanceamento). Mas a existência e a prova da base (cláusula de consentimento no contrato, LIA feita fora do sistema) é fato da controladora fora do repo. Severidade desce para media: há hipótese plausível (legítimo interesse com relação prévia), então não é 'sem base possível'; o que falta é registro/documentação e vínculo da base ao disparo, obrigação parcialmente atendida.",
+  "tambem": []
+ },
+ {
+  "id": "02-02",
+  "titulo": "`autorizacaoComunicacao` é um booleano sem prova, inferido do status de cadastro, e o papel OPERATOR pode religá-lo por API apagando o opt-out",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-8",
+   "docs/lgpd/fontes/lei-13709.md#art-18",
+   "docs/lgpd/fontes/lei-13709.md#art-39",
+   "docs/lgpd/fontes/lei-13709.md#art-6",
+   "docs/lgpd/fontes/lei-13709.md#art-46"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 198,
+    "trecho": "autorizacaoComunicacao Boolean      @default(false)"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 257,
+    "trecho": "autorizacaoComunicacao: !isReprovado,"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 125,
+    "trecho": "if (parsed.data.autorizacaoComunicacao === true) {\n    data.optOutAt = null;"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 139,
+    "trecho": "details: { fieldsChanged: Object.keys(parsed.data) },"
+   }
+  ],
+  "cenario": "(1) Na importação 'Cartões e contas', o formato real da base, nenhuma coluna de aceite é lida: todo titular com cadastro não reprovado vira `autorizacaoComunicacao=true`, e um reprovado que depois é aprovado passa a true numa reimportação. Não existe data, canal, texto ou versão do aceite (grep por consentAt/consentVersion/ConsentRecord no schema: vazio). Se um titular contestar, a controladora não tem como provar o consentimento (art. 8º, §2º). (2) Um OPERATOR envia `PATCH /api/clients/:id {autorizacaoComunicacao:true}` para um cliente que respondeu 'PARAR' no WhatsApp: a rota apaga `optOutAt`, o cliente volta ao público de campanhas e automações, e o AuditLog guarda só `fieldsChanged:[\"autorizacaoComunicacao\"]`, sem motivo nem evidência do novo consentimento. A regra OPT_OUT_TELEFONE_INVALIDO não pega o caso, porque só procura autorização true com optOutAt preenchido. Não há botão na UI que chame essa rota, mas ela está exposta à role OPERATOR. (Também 08-03.) OPERATOR é o único papel além de ADMIN que dispara campanhas, então o contratado que opera os disparos recebe junto o poder de desfazer o opt-out de um titular sem instrução da controladora, e a controladora não tem como garantir tecnicamente que o operador siga as instruções dela (art. 39).",
+  "papel": "ambos",
+  "correcao": "Em routes/clients.ts, recusar `autorizacaoComunicacao:true` quando `existing.optOutAt` estiver preenchido, a menos que venha um objeto de evidência (origem, data, canal, texto/versão) gravado em um registro de consentimento e no AuditLog. Nunca zerar `optOutAt`: registrar a re-autorização como evento novo. Em cardAccountImport.ts, trocar a inferência `!isReprovado` pelo que a base legal do tenant definir (02-01): com legítimo interesse, gravar a origem 'relação contratual' e a versão da LIA; com consentimento, exigir coluna de aceite com data. Incluir na prévia da importação (summarizeChange.autorizacaoConcedida) o motivo da concessão. Restringir a reautorização (autorizacaoComunicacao=true com optOutAt preenchido) a ADMIN, com motivo e evidência gravados em details do logAudit (08-03).",
+  "tipo": "codigo",
+  "multi_tenant": "Regra de origem da autorização na importação conforme Tenant.baseLegalMarketing; exigência de evidência para re-autorização configurável por tenant, mas sempre ligada quando há opt-out anterior.",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "schema.prisma:198 Boolean sem data/versão/origem; cardAccountImport.ts:257 autorizacaoComunicacao: !isReprovado sem coluna de aceite; clients.ts:112 PATCH liberado a ADMIN/OPERATOR e l.125-126 zera optOutAt quando autorizacaoComunicacao=true, sem exigir evidência; l.139 audit só fieldsChanged. Nenhuma mitigação: automationEngine.ts:178 só pega autorização=true com optOutAt não nulo, caso que a rota elimina; frontend não chama a rota (só exibe), mas a API está exposta. Art. 8 §2/§5 e art. 18 IX conferidos. Media adequada: depende de ação de operador via API. | Verificação de 08-03 (parte da reautorização): Os exports estão liberados para OPERATOR: clients.ts:45 (take 50000 na :55) e campaigns.ts:617. O PATCH de clients.ts:112 aceita ADMIN e OPERATOR e zera optOutAt quando autorizacaoComunicacao=true (clients.ts:125-127), sem exigir evidência de novo consentimento. O enum Role tem só 4 papéis fixos (schema.prisma:24) e não existe permissão fina. A reautorização exige ação deliberada de um usuário, por isso mantive media e não subi para alta.",
+  "tambem": [
+   "08-03"
+  ]
+ },
+ {
+  "id": "02-03",
+  "titulo": "Opt-out vale por registro, não por telefone: contato fora da base e telefone compartilhado continuam recebendo depois de pedir para parar",
+  "severidade": "alta",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-8",
+   "docs/lgpd/fontes/lei-13709.md#art-18"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/campaignQueue.ts",
+    "linha": 324,
+    "trecho": "if (client && (!client.autorizacaoComunicacao || client.optOutAt)) {"
+   },
+   {
+    "arquivo": "backend/src/services/campaignQueue.ts",
+    "linha": 328,
+    "trecho": "if (!client && !evt.recipient) {  (nenhuma checagem de evt.recipient.optOutAt no envio)"
+   },
+   {
+    "arquivo": "backend/src/services/campaignQueue.ts",
+    "linha": 270,
+    "trecho": "data: novos.slice(i, i + 500).map((r) => ({ campaignId: campaign.id, clientId: r.clientId, recipientId: r.id, channel: campaign.channel, status: \"FILA\" as const })),"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappInbox.ts",
+    "linha": 171,
+    "trecho": "await prisma.campaignRecipient.updateMany({ where: { tenantId, telefone: { in: candidates } }, data: { optOutAt: new Date() } });"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappInbox.ts",
+    "linha": 66,
+    "trecho": "? await prisma.client.findFirst({ where: { tenantId, telefone: { in: candidates } }, orderBy: { updatedAt: \"desc\" }, ..."
+   },
+   {
+    "arquivo": "backend/src/services/whatsappReply.ts",
+    "linha": 168,
+    "trecho": "if (conversation.client && (!conversation.client.autorizacaoComunicacao || conversation.client.optOutAt)) {"
+   }
+  ],
+  "cenario": "(a) O operador sobe a lista manual A e, no mesmo dia, a lista B (ou guarda B como rascunho), ambas com um contato que não é cliente da base. No preparo de B, matchManualAudience o aceita porque ele ainda não tinha pedido para parar. O contato recebe A e responde 'PARAR'. whatsappInbox marca `optOutAt` em todas as linhas CampaignRecipient desse telefone, inclusive a de B. Quando B é agendada (enqueueManualCampaign não refiltra) e despachada (processQueueBatch só confere `client`, que é nulo), a mensagem sai mesmo assim. No Vercel Hobby o despacho roda uma vez por dia, então a janela entre A e B é de horas. Também não há bloqueio para envio de template pela inbox a esse contato (whatsappReply só confere `conversation.client`). (b) Dois registros Client do mesmo tenant com o mesmo telefone, por exemplo CPF e CNPJ do mesmo titular (o schema não exige telefone único: dedupe é por cpfHash): o 'PARAR' marca só o `findFirst` mais recente. As próximas campanhas e automações continuam mandando para o mesmo número pelo outro registro, e listas manuais que casem por CPF com o outro registro também passam. Não verifiquei no banco quantos telefones são compartilhados (leitura de dados fora do escopo).",
+  "papel": "ambos",
+  "correcao": "Criar uma supressão por telefone por tenant (ex.: tabela `OptOut {tenantId, telefone E.164, canal, origem, createdAt}` ou reaproveitar CampaignRecipient.optOutAt mais Client.optOutAt consultando por `phoneCandidates`). Gravar nela em whatsappInbox.ts (cliente ou não), em clients.ts (bulk OPT_OUT/PATCH) e no futuro inbound SMS. Consultar no envio, em campaignQueue.processQueueBatch, para todo evento (client ou recipient), por telefone e variantes do nono dígito; em enqueueManualCampaign; em buildAudience e nas consultas do automationEngine; e em whatsappReply.sendTemplateReply também quando `conversation.client` for nulo. No opt-out de cliente, usar `updateMany` por telefone (todas as variantes), não só o `findFirst`.",
+  "tipo": "codigo",
+  "multi_tenant": "Lista de supressão isolada por tenantId (cada controlador mantém a sua); escopo da supressão (todos os canais ou só o canal do pedido) configurável por tenant, com padrão 'todos os canais'.",
+  "severidade_original": "alta",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "campaignQueue.ts:324-331 só bloqueia por client.autorizacaoComunicacao/optOutAt e por ausência de client+recipient; evt.recipient.optOutAt nunca é lido no envio (grep optOutAt em campaignQueue: só l.186 e l.324), apesar do comentário em l.259-260 dizer que opt-out posterior é barrado. enqueueManualCampaign (l.262-274) não refiltra; routes/campaigns.ts:101-135 cria recipients e enfileira na criação da lista, então opt-out entre criação e despacho (diário no Hobby) não impede o envio. whatsappInbox.ts:171 marca CampaignRecipient.optOutAt mas ninguém consulta no dispatch; l.66 findFirst marca só um Client por telefone; whatsappReply.ts:168 só confere conversation.client. Parte (b) depende de dados (telefones compartilhados), parte (a) é estrutural. Envio a quem fez opt-out = alta pelo schema.",
+  "tambem": []
+ },
+ {
+  "id": "02-04",
+  "titulo": "Revogação só funciona por palavra-chave exata no WhatsApp: SMS não tem canal de retorno e a UI não tem como registrar opt-out manual",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-8",
+   "docs/lgpd/fontes/lei-13709.md#art-18",
+   "docs/lgpd/fontes/anpd-guia-legitimo-interesse.md#p-52"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/whatsappPayload.ts",
+    "linha": 138,
+    "trecho": "const OPT_OUT_FIRST_WORDS = new Set([\"parar\", \"pare\", \"sair\", \"stop\", \"cancelar\", \"cancela\", \"descadastrar\", \"remover\", \"unsubscribe\"]);"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappPayload.ts",
+    "linha": 168,
+    "trecho": "return words.length <= 4 && OPT_OUT_FIRST_WORDS.has(words[0]);"
+   },
+   {
+    "arquivo": "backend/src/routes/integrations.ts",
+    "linha": 461,
+    "trecho": "const { MessageSid, MessageStatus, sid, status } = req.body;  (webhook SMS só trata status; corpo da resposta do titular é ignorado)"
+   },
+   {
+    "arquivo": "backend/src/routes/campaigns.ts",
+    "linha": 301,
+    "trecho": "channel: z.enum([\"WHATSAPP\", \"SMS\"]),"
+   }
+  ],
+  "cenario": "(1) Um titular responde no WhatsApp 'Não quero mais', 'Por favor parar de mandar', 'Me tira dessa lista' ou 'Não quero receber mais mensagens'. Nenhuma dessas casa com isOptOutMessage: a primeira palavra não está na lista e as frases exigem igualdade exata. A mensagem fica na inbox e o operador vê o pedido, mas a UI não tem botão para registrar o opt-out. `grep -rn 'clients/bulk|OPT_OUT' frontend/src` só acha o rótulo de automação, e ClientProfile/Inbox só exibem o status. O titular continua nas campanhas e automações. (2) Uma campanha SMS (rota POST /api/campaigns aceita channel SMS; automações aceitam action.channel) chega ao titular, que responde 'PARAR' por SMS. O webhook /webhooks/sms/:provider só atualiza status de entrega e descarta o corpo. Para revogar, o titular teria de descobrir o WhatsApp do controlador. A revogação deveria ser gratuita e facilitada (art. 8º, §5º; art. 18, IX e §2º; Guia LI p. 52, 'canal de fácil acesso... descadastrar'). Não verifiquei se há SMS configurado em produção (ChannelConfig é dado do banco).",
+  "papel": "ambos",
+  "correcao": "(a) whatsappPayload.ts: ampliar a detecção para pedidos usuais em pt-BR (ex.: frases começando com 'nao quero', 'me tira/tire', 'para de', 'chega', 'bloquear', 'descadastre', 'remova', 'nao tenho interesse') ou sinalizar como 'possível opt-out' na inbox para confirmação humana, sem falso positivo silencioso. (b) UI: botão 'Registrar descadastro' em Inbox.tsx, ClientProfile.tsx e na lista de clientes, chamando a rota de opt-out (POST /api/clients/bulk action OPT_OUT, que já existe) e gravando a origem (telefone, e-mail, presencial). (c) integrations.ts: no webhook SMS, ler o corpo inbound (Twilio `Body`/`From`, Zenvia equivalente), aplicar isOptOutMessage e gravar na supressão por telefone de 02-03, com AuditLog OPT_OUT_SMS. Enquanto isso não existir, bloquear campanhas SMS ou exigir no texto uma instrução de opt-out por outro canal.",
+  "tipo": "codigo",
+  "multi_tenant": "Lista de palavras/frases de opt-out extensível por tenant (padrão pt-BR no código); canal de opt-out SMS por ChannelConfig do tenant.",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "whatsappPayload.ts:138-168: frases exatas em OPT_OUT_PHRASES e primeira palavra em OPT_OUT_FIRST_WORDS com até 4 palavras; 'nao quero mais', 'me tira dessa lista', 'nao quero receber mais mensagens' não casam. integrations.ts:434-464 webhook SMS só lê MessageSid/MessageStatus e descarta o corpo. Frontend sem chamada a /clients/bulk OPT_OUT nem PATCH de cliente (grep em frontend/src: só exibição em ClientProfile.tsx:49, Clients.tsx:115, Inbox.tsx:459). campaigns.ts:301 aceita SMS. Art. 8 §5 (procedimento gratuito e facilitado), art. 18 IX/§2 e Guia p-52 conferidos. Uso real de SMS em produção depende de ChannelConfig, mas a falha do WhatsApp e da UI é de código.",
+  "tambem": []
+ },
+ {
+  "id": "02-05",
+  "titulo": "Nada garante que a mensagem identifique o controlador e diga como parar: rodapé e botão SAIR são opcionais e SMS/automação aceitam texto livre",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-9",
+   "docs/lgpd/fontes/lei-13709.md#art-10",
+   "docs/lgpd/fontes/anpd-guia-legitimo-interesse.md#p-18",
+   "docs/lgpd/fontes/anpd-guia-legitimo-interesse.md#p-52"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/whatsappTemplates.ts",
+    "linha": 92,
+    "trecho": "if (t.footer) {  (rodapé só é validado se existir; nenhuma regra exige instrução de opt-out ou nome do controlador)"
+   },
+   {
+    "arquivo": "backend/src/routes/campaigns.ts",
+    "linha": 305,
+    "trecho": "messageTemplate: z.string().optional(), // texto livre — usado quando não há templateId"
+   },
+   {
+    "arquivo": "frontend/src/pages/TemplateEditor.tsx",
+    "linha": 357,
+    "trecho": "Ofereça um jeito de recusar (ex.: um botão “SAIR”).  (apenas dica; o rodapé é marcado como opcional na l.362)"
+   }
+  ],
+  "cenario": "Um operador cria um template de marketing sem rodapé e sem botão SAIR (validateTemplate aceita), ou importa da Meta um template já aprovado sem essas partes, ou dispara SMS/automação com `messageTemplate` livre. O titular recebe uma oferta sobre o cartão sem saber quem trata seus dados nem como parar, e o opt-out por palavra-chave existe mas não é anunciado. Na rota de legítimo interesse, a transparência (art. 10, §2º; art. 9º, III e IV) e o descadastro na própria mensagem são a salvaguarda que o Guia LI usa para validar o caso de promoções (exemplo 5, p. 17–18; p. 52). Hoje essa salvaguarda depende só do texto digitado. Severidade baixa porque é transparência e a correção depende da base escolhida (02-01).",
+  "papel": "ambos",
+  "correcao": "Em campaignWizard.ts (validação do wizard) e no automationEngine.executeAction: quando a categoria do template for MARKETING ou o canal for SMS, exigir que o corpo, o rodapé ou um quick reply contenha a instrução de opt-out configurada no tenant (ex.: botão SAIR ou rodapé 'Responda SAIR para não receber') e o nome do controlador. Sem isso, nível 'erro' no checklist do wizard e recusa no automationEngine. Para SMS livre, anexar automaticamente o rodapé do tenant no renderTemplate (campaignQueue.ts). Em whatsappTemplates.validateTemplate, emitir aviso quando não houver rodapé nem botão de saída.",
+  "tipo": "codigo",
+  "multi_tenant": "Tenant.nomeControladorExibicao e Tenant.textoOptOut (rodapé padrão), usados na validação e no SMS; obrigatoriedade ligada quando Tenant.baseLegalMarketing = LEGITIMO_INTERESSE.",
+  "severidade_original": "baixa",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "whatsappTemplates.ts:92-95 só valida tamanho/variáveis do rodapé se existir; nenhuma regra exige botão SAIR ou nome do controlador; campaigns.ts:305 messageTemplate livre; TemplateEditor.tsx:357 é só dica e l.362 marca rodapé 'opcional'; campaignWizard.ts sem checagem de opt-out no texto. Âncoras art-9, art-10, p-18, p-52 existem; art. 9 III e art. 10 §2 exigem transparência e identificação do controlador, e o Guia p-18 usa o descadastro na própria mensagem como salvaguarda. Mas a lei não exige essa informação em cada mensagem (pode estar na política de privacidade) e só vale se a base escolhida for legítimo interesse (decisão da controladora, 02-01). Mantida baixa.",
+  "tambem": []
+ },
+ {
+  "id": "03-01",
+  "titulo": "Não existe eliminação de um titular sob pedido, e nenhuma anonimização (pedido ou retenção) resiste à reimportação: o titular volta completo, autorizado e sem o opt-out",
+  "severidade": "alta",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-18",
+   "docs/lgpd/fontes/lei-13709.md#art-16",
+   "docs/lgpd/fontes/lei-13709.md#art-15",
+   "docs/lgpd/fontes/lei-13709.md#art-8",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 186,
+    "trecho": "router.post(\"/purge\", requireRole(\"ADMIN\"), async (req, res) => {  // apaga TODOS os clientes do tenant; não há router.delete(\"/:id\") nem ação de anonimizar 1 cliente (lista de rotas: grep 'router\\.(delete|post|patch)' routes/clients.ts -> só /:id PATCH, /bulk, /purge)"
+   },
+   {
+    "arquivo": "backend/src/services/retention.ts",
+    "linha": 107,
+    "trecho": "telefone: `anon-${client.id}`,\n            cpfHash: `anon-${client.id}`,"
+   },
+   {
+    "arquivo": "backend/src/services/dedupe.ts",
+    "linha": 35,
+    "trecho": "const byCpf = await prisma.client.findUnique({ where: { tenantId_cpfHash: { tenantId, cpfHash: row.cpfHash } } });"
+   },
+   {
+    "arquivo": "backend/src/services/importService.ts",
+    "linha": 254,
+    "trecho": "const created = await prisma.client.create({ data, select: { id: true } });"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 257,
+    "trecho": "autorizacaoComunicacao: !isReprovado,"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 551,
+    "trecho": "const createData = { ...p.data, autorizacaoComunicacao: existing?.optOutAt ? false : p.data.autorizacaoComunicacao };"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 232,
+    "trecho": "dataUltimaUtilizacao: statusConta === \"ATIVO\" ? parseDate(raw.data_ativacao) : undefined,"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 323,
+    "trecho": "const update: Prisma.ClientUpdateInput = { ...p.data };"
+   },
+   {
+    "arquivo": "backend/src/services/retention.ts",
+    "linha": 94,
+    "trecho": "{ dataUltimaUtilizacao: { lte: cutoff } },"
+   },
+   {
+    "arquivo": "backend/src/services/retention.ts",
+    "linha": 108,
+    "trecho": "cpfHash: `anon-${client.id}`,"
+   },
+   {
+    "arquivo": "backend/src/services/importService.ts",
+    "linha": 214,
+    "trecho": "autorizacaoComunicacao: existing?.optOutAt ? false : incoming.autorizacaoComunicacao,"
+   },
+   {
+    "arquivo": "backend/src/services/retention.ts",
+    "linha": 142,
+    "trecho": "data: { nome: \"Contato anonimizado\", telefone: `anon-${r.id}`, cpfHash: null, ..."
+   }
+  ],
+  "cenario": "Um cliente escreve no WhatsApp pedindo que apaguem seus dados. O operador não tem no sistema nenhuma ação para anonimizar ou excluir só esse cliente: a única exclusão é o 'Limpar base' (apaga todos os clientes do tenant) e a anonimização só acontece no job de retenção, para quem está inativo há mais de Tenant.retentionDays (padrão 1095 dias). Mesmo se o cliente fosse anonimizado (pela retenção ou por um script), o job troca cpfHash e telefone por 'anon-<id>'. A próxima sincronização da planilha (scheduler, 2x/semana) não encontra ninguém pelo hash real do CPF nem pelo telefone e cria um Client novo com nome, telefone, CPF mascarado e dados financeiros. No formato 'Cartões e contas' esse cliente novo entra com autorizacaoComunicacao=true (cadastro aprovado). O opt-out anterior fica preso à linha anonimizada e não vale para a nova, então o titular volta a receber campanhas. (Também 04-03.) O mesmo ciclo atinge a retenção automática, agravado pelo critério de inatividade: a importação de \"Cartões e contas\" grava `dataUltimaUtilizacao` = data de ativação e, no update, passa por cima da data de uso real que a importação de compras tinha avançado. Um cliente ATIVO com cartão ativado há mais de 3 anos, e que pediu SAIR no WhatsApp, é anonimizado às 03:00 embora use o cartão; na importação seguinte volta como Client novo com nome, telefone, CPF, e-mail e dados de RH, `optOutAt` nulo e autorizado; a varredura seguinte cria mais um \"Cliente anonimizado\", e o ciclo se repete. Com contatos de lista manual a supressão em `CampaignRecipient.optOutAt` some quando o telefone vira `anon-<id>`. Resultado: a eliminação nunca é efetiva e a oposição/revogação do titular é desfeita (art. 18, §2º; art. 8º, §5º).",
+  "papel": "ambos",
+  "correcao": "(1) Criar POST /api/clients/:id/anonymize (ADMIN), extraindo de services/retention.ts uma função anonymizeClient(prisma, tenantId, clientId) usada pelo endpoint e pela varredura. Ela cobre Client (todos os campos, ver 04-01), Purchase, AccountSnapshot, Conversation/WaMessage/WaMediaBlob, CampaignRecipient e ImportChange.before do cliente, além de cascadeAuditLogRedaction, e registra AuditLog com targetId. (2) Criar uma tabela de supressão por tenant (ex.: SupressaoTitular {tenantId, docHash (HMAC real com Tenant.cpfSalt), phoneHash, optOut, motivo, pedidoId, anonymizedAt, createdAt}) e gravar nela o hash REAL antes de sobrescrever cpfHash e telefone. A mesma tabela pode atender a supressão por telefone de 02-03. (3) Em services/importService.ts (antes de findExistingClient), services/cardAccountImport.ts (antes do upsert) e services/manualCampaign.ts, consultar a supressão: titular que pediu eliminação não é reimportado (linha contada no ImportJob como 'suprimida (pedido LGPD)'); titular com opt-out nasce com optOutAt preenchido; titular anonimizado só por retenção segue a regra do tenant (não reimportar ou reimportar marcado). (4) Critério de inatividade: em cardAccountImport.ts (prepareRow e planUpdate), parar de usar a data de ativação como dataUltimaUtilizacao, ou nunca regredir o valor existente (mesma regra de purchaseImport.ts); em retention.ts, medir inatividade pelo maior valor entre dataUltimaUtilizacao, ultimoUsoReal e a última mensagem. Guardar só o hash para respeitar a oposição se apoia no art. 16, I e no art. 6º, III. Quais dados ficam guardados por obrigação legal (art. 16, I) é decisão da controladora; recomenda-se manter só agregados.",
+  "tipo": "codigo",
+  "multi_tenant": "Tabela de supressão sempre escopada por tenantId e hash com o salt do tenant. A regra \"reimportar ou não um titular anonimizado por retenção\" e os campos guardados sob o art. 16 podem ser configuração por Tenant.",
+  "severidade_original": "alta",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "routes/clients.ts só tem GET /, /export.csv, /:id, PATCH /:id, POST /bulk e /purge (l.186, que apaga todos os clientes do tenant). Não há anonimização de um cliente só: grep anonymiz em src encontra só retention.ts. retention.ts:105-108 troca telefone e cpfHash por anon-<id>. Assim, dedupe.ts:35/41 não acha o titular pelo hash real nem pelo telefone, e importService.ts:254 cria um Client novo. Em cardAccountImport.ts:551 o upsert por cpfHash cria o cliente com autorizacaoComunicacao=!isReprovado (l.257), e o optOutAt da linha anonimizada não vale para a nova. Não existe lista de supressão: grep supress/suprim vazio. As âncoras art-18, art-16 e art-15 existem, e o art. 18, VI exige a eliminação. | Verificação de 04-03: Retention sets cpfHash to anon-<id> and telefone to anon-<id> (retention.ts:107-108). Dedupe looks up by cpfHash and then by phone (dedupe.ts:35-45; cardAccountImport.ts:437 fetchExisting by cpfHash only), so reimporting the same row matches nobody and creates a new Client. createData only stays opted out if `existing` was found (cardAccountImport.ts:551; importService.ts:214); otherwise autorizacaoComunicacao is !isReprovado (:257), so true. The code has no tombstone or suppression table (grep for anon-/Suppression returns nothing). planUpdate copies dataUltimaUtilizacao = activation date (:232, :323) and never removes it, which overwrites the more recent date written by purchaseImport.ts:195. The data subject's opt-out is lost (art. 18 §2, art. 8 §5).",
+  "tambem": [
+   "04-03"
+  ]
+ },
+ {
+  "id": "03-02",
+  "titulo": "Não há relatório completo por titular (acesso/confirmação) nem export estruturado dele; a ficha do cliente omite compras, histórico de saldo, conversas e listas manuais",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-18",
+   "docs/lgpd/fontes/lei-13709.md#art-19",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 94,
+    "trecho": "include: {\n      movements: { orderBy: { data: \"desc\" }, take: 50 },\n      messageEvents: { where: { status: { not: \"CONTROLE\" } }, orderBy: { queuedAt: \"desc\" }, take: 50, include: { campaign: true } },"
+   },
+   {
+    "arquivo": "backend/src/services/segments.ts",
+    "linha": 118,
+    "trecho": "{ nome: { contains: filters.search, mode: \"insensitive\" } },\n        { telefone: { contains: filters.search } },"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 57,
+    "trecho": "const header = \"nome,telefone,cpf_mascarado,cidade,percentual_utilizado,faixa_uso,status,autorizacao_comunicacao\\n\";"
+   },
+   {
+    "arquivo": "backend/src/routes/purchases.ts",
+    "linha": 87,
+    "trecho": "FROM \"Purchase\" p JOIN \"Merchant\" m ON m.\"id\" = p.\"merchantId\" JOIN \"Client\" cl ON cl.\"id\" = p.\"clientId\"  (só agregados por lojista/cidade; nenhuma rota lista compras de um cliente)"
+   }
+  ],
+  "cenario": "Um cliente pede 'que dados vocês têm de mim'. O operador busca por nome ou telefone (não há busca por CPF, embora o hash por tenant permitisse) e abre GET /api/clients/:id. Recebe a linha Client, as 50 últimas Movement e as 50 últimas MessageEvent. Ficam de fora as transações do cartão em Purchase (lojista, valor, data), que nenhuma rota mostra por cliente, o histórico de saldo/limite em AccountSnapshot, as conversas e mídias do WhatsApp (Conversation/WaMessage/WaMediaBlob, só pela inbox), as linhas de CampaignRecipient de listas manuais, os estados anteriores em ImportChange.before e as entradas de AuditLog. Também não há botão para gerar o arquivo. A declaração clara e completa do art. 19, II (origem, critérios, finalidade) não sai do sistema em 15 dias sem consultas manuais ao banco, e não há cópia eletrônica em formato reutilizável (art. 19, §3º).",
+  "papel": "ambos",
+  "correcao": "Criar GET /api/clients/:id/dados-titular (ADMIN/OPERATOR, com logAudit 'DSAR_EXPORT'). Ele agrega, filtrando por tenantId: Client (todos os campos, CPF só mascarado), Movement, AccountSnapshot, Purchase (com merchantName), MessageEvent (canal, provider, datas), Conversation+WaMessage (sem blobs, só metadados), CampaignRecipient com mesmo cpfHash/telefone, ImportChange e AuditLog com targetId do cliente, mais um bloco fixo de origem (planilha/ImportJob), finalidade e com quem foi compartilhado (provider). Devolver JSON e, com ?formato=csv, um ZIP/CSV. Adicionar busca por documento: aplicar hashDocument(cpf, tenant.cpfSalt) no servidor e buscar por cpfHash, sem gravar o CPF digitado. Botão 'Exportar dados do titular' em frontend/src/pages/ClientProfile.tsx.",
+  "tipo": "codigo",
+  "multi_tenant": "O texto de finalidade e de origem que vai no relatório deve ser configurável por Tenant (cada controlador declara a sua finalidade).",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "clients.ts:90-99 inclui só movements (take 50) e messageEvents (take 50). Em purchases.ts as rotas (/categories, /merchants, /cidades, /audiencia) só devolvem agregados e nenhuma filtra por clientId. Em inbox.ts as conversas são acessadas por conversationId. segments.ts:116-119 busca só por nome e telefone, e o export (clients.ts:57) traz só 8 colunas. Não há rota de DSAR. O art. 19, II exige declaração completa em 15 dias e o §3º (l.457 da fonte) a cópia integral em formato reutilizável. O acesso é atendido em parte, então a severidade fica media.",
+  "tambem": []
+ },
+ {
+  "id": "03-03",
+  "titulo": "Correção feita no CRM a pedido do titular é sobrescrita sem aviso na próxima importação; telefone e e-mail nem podem ser corrigidos",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-18",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 104,
+    "trecho": "const updateSchema = z.object({\n  nome: z.string().optional(),\n  cidade: z.string().optional(),\n  statusConta: ...,\n  autorizacaoComunicacao: z.boolean().optional(),\n  tags: ..."
+   },
+   {
+    "arquivo": "backend/src/services/importService.ts",
+    "linha": 197,
+    "trecho": "nome: incoming.nome,\n        telefone: incoming.telefone,"
+   },
+   {
+    "arquivo": "backend/src/services/importService.ts",
+    "linha": 201,
+    "trecho": "cidade: incoming.cidade,"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 219,
+    "trecho": "nome: raw.nome!.trim(),\n    telefone: phone,"
+   }
+  ],
+  "cenario": "Um titular avisa pelo WhatsApp que seu nome está grafado errado e a cidade desatualizada. O operador corrige via PATCH /api/clients/:id. Na próxima sincronização da planilha (scheduler) ou num upload de 'Cartões e contas', o merge 'última atualização ganha' grava de novo nome e cidade da planilha. planUpdate só protege limite, saldo e status, e PROTEGIDOS em importService só protege colunas numéricas, status e autorização. A correção some sem aviso ao operador nem ao titular. Se o pedido for de telefone ou e-mail errados, o schema do PATCH nem aceita esses campos, e as campanhas continuam indo para o número errado (possivelmente de outra pessoa).",
+  "papel": "ambos",
+  "correcao": "Opções para a controladora: (a) a correção é feita só na fonte (planilha/sistema do cartão), e o CRM, ao receber pedido de correção, mostra aviso e registra a pendência; (b) o CRM guarda uma trava por campo (ex.: Client.camposCorrigidos String[] + data) que importService.ts e cardAccountImport.ts respeitam, como já fazem com optOutAt, e a tela de impacto da importação mostra o conflito. Recomenda-se (b) com notificação ao responsável pela planilha, porque cumpre também o art. 18, §6º (repassar a correção a quem tem a cópia). Em ambos os casos, incluir telefone e email no updateSchema de routes/clients.ts, normalizando com normalizePhone.",
+  "tipo": "decisao_negocio",
+  "multi_tenant": "A política 'fonte vence' ou 'correção manual vence' por campo vira configuração por Tenant.",
+  "severidade_original": "media",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Código conferido. O updateSchema em clients.ts:104-110 não aceita telefone nem email. importService.ts:197/201 regrava nome e cidade, e PROTEGIDOS (l.102-109) só protege colunas numéricas, status e autorização. cardAccountImport.ts:219-220 e planUpdate (l.322-361) não protegem nome, cidade nem telefone. Porém a importação atualiza telefone e nome a partir da fonte, então a correção do art. 18, III pode ser feita na planilha. A conformidade depende do processo da controladora (corrigir na fonte ou no CRM), e o achado já está classificado como decisao_negocio.",
+  "tambem": []
+ },
+ {
+  "id": "03-04",
+  "titulo": "Não há bloqueio (suspensão do tratamento) de um titular: BLOQUEADO é status da conta vindo da planilha, revertido pela importação, e não tira o cliente de listagem, export e segmentos",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-18",
+   "docs/lgpd/fontes/lei-13709.md#art-5"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/importService.ts",
+    "linha": 211,
+    "trecho": "statusConta: incoming.statusConta,"
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 349,
+    "trecho": "if (presence.status) {\n    status = p.statusConta;"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 55,
+    "trecho": "const clients = await prisma.client.findMany({ where, orderBy: { nome: \"asc\" }, take: 50000 });"
+   },
+   {
+    "arquivo": "backend/src/services/campaignQueue.ts",
+    "linha": 187,
+    "trecho": "statusConta: { not: \"BLOQUEADO\" },"
+   }
+  ],
+  "cenario": "Um titular contesta o tratamento e pede que parem de usar seus dados enquanto a controladora analisa. O máximo que o operador consegue é marcar statusConta=BLOQUEADO (PATCH ou bulk BLOCK) ou fazer opt-out. BLOQUEADO só exclui o cliente de campanhas. Ele continua na listagem, no export CSV de até 50 mil linhas, nos segmentos, no dashboard e nos cálculos de perfil de renda. Como statusConta é o status da conta do cartão vindo da fonte, a próxima importação com coluna de status (o mapeamento padrão do Google Sheets inclui status_conta) volta o cliente para ATIVO sem aviso. Não existe a 'suspensão temporária de qualquer operação de tratamento' do art. 5º, XIII.",
+  "papel": "ambos",
+  "correcao": "Adicionar Client.tratamentoSuspensoEm DateTime? (e motivo/pedidoId), separado de statusConta. Excluí-lo em buildSegmentWhere/ENVIAVEL_WHERE (services/segments.ts), no export de routes/clients.ts, em dashboardMetrics e no envio (campaignQueue, manualCampaign, automationEngine). Fazer importService.ts e cardAccountImport.ts não atualizarem o cliente suspenso (só registrar no ImportJob que a linha foi ignorada). Criar POST /api/clients/:id/suspender e /reativar com logAudit.",
+  "tipo": "codigo",
+  "multi_tenant": "n/a",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "importService.ts:211 grava statusConta da planilha sempre que a coluna status_conta está presente (PROTEGIDOS l.107). cardAccountImport.ts:349-350 aplica p.statusConta quando presence.status, revertendo um BLOQUEADO manual. BLOQUEADO só filtra o envio (campaignQueue.ts:187), e o export em clients.ts:55 usa buildSegmentWhere sem excluí-lo. Não existe campo de suspensão do tratamento separado, e o art. 18, IV (bloqueio) com a definição do art. 5º, XIII fica sem mecanismo. Ressalva: o direito de bloqueio da lei cobre dados desnecessários, excessivos ou em desconformidade, e o cenário de 'pausa durante análise' é uma leitura ampliada.",
+  "tambem": []
+ },
+ {
+  "id": "03-05",
+  "titulo": "Pedidos de titular não são registrados como pedidos (entrada, canal, tipo, data de resposta), então não há como provar o prazo de 15 dias",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-19",
+   "docs/lgpd/fontes/lei-13709.md#art-18",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 470,
+    "trecho": "model AuditLog { ... action String target String? targetId String? details Json? createdAt DateTime  (não há model de pedido de titular; grep -rniE 'titular|solicita|dsar' backend/src backend/prisma -> só um comentário em cardAccountImport.ts)"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappInbox.ts",
+    "linha": 163,
+    "trecho": "action: \"OPT_OUT_WHATSAPP\",\n      target: \"Client\",\n      targetId: client.id,\n      details: { conversationId: conversation.id, wamid: m.wamid },"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 136,
+    "trecho": "action: \"UPDATE_CLIENT\",\n    target: \"Client\",\n    targetId: existing.id,\n    details: { fieldsChanged: Object.keys(parsed.data) },"
+   }
+  ],
+  "cenario": "Um titular pede acesso e eliminação pelo WhatsApp. A mensagem fica na inbox como qualquer outra. Se o operador tirar a autorização manualmente, o AuditLog registra só 'UPDATE_CLIENT' com fieldsChanged, sem saber que foi pedido do titular, por qual canal, quando entrou e quando foi atendido. Só o descadastro automático por palavra-chave gera OPT_OUT_WHATSAPP, e mesmo ele não tem data de resposta. Se a ANPD ou o titular questionarem o prazo do art. 19, II (15 dias), a controladora não tem registro que prove quando o pedido entrou e quando foi respondido, nem quais pedidos estão em aberto.",
+  "papel": "ambos",
+  "correcao": "Criar o model PedidoTitular {id, tenantId, clientId?, cpfHash?, telefone?, tipo (CONFIRMACAO|ACESSO|CORRECAO|ELIMINACAO|BLOQUEIO|PORTABILIDADE|COMPARTILHAMENTO|REVOGACAO|OPOSICAO|REVISAO_DECISAO), canal (WHATSAPP|EMAIL|TELEFONE|OUTRO), recebidoEm, prazoEm (recebidoEm+15d), status, respondidoEm, respostaResumo, atendidoPor}. Criar rotas CRUD em routes/pedidosTitular.ts com logAudit e um card no dashboard com pedidos vencendo. Em services/whatsappInbox.ts, o opt-out automático passa a criar também um PedidoTitular tipo REVOGACAO já atendido (recebidoEm = respondidoEm), e um botão na inbox abre o pedido a partir da conversa. As ações de 03-01 a 03-04 recebem pedidoId.",
+  "tipo": "codigo",
+  "multi_tenant": "O prazo de resposta (padrão 15 dias, art. 19, II) e os responsáveis pelo atendimento são configuração por Tenant.",
+  "severidade_original": "media",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Código conferido. O AuditLog (schema.prisma:470) não tem tipo, canal nem prazo de pedido, e grep titular/dsar não encontra nenhum model de pedido. whatsappInbox.ts:163 registra só OPT_OUT_WHATSAPP, e clients.ts:136 registra UPDATE_CLIENT com fieldsChanged. Mas a lei não exige que o registro de pedidos fique no CRM. O art. 19, II fixa o prazo, e a prova cabe à responsabilização do art. 6º, X, que pode ser cumprida fora do sistema (helpdesk, e-mail). Pelo finding-schema, documentação e prestação de contas são severidade baixa.",
+  "tambem": []
+ },
+ {
+  "id": "03-06",
+  "titulo": "Tenant não guarda a configuração LGPD do controlador (encarregado ou canal do titular, aviso de privacidade, texto e palavras de opt-out), e o titular nunca vê esse contato na mensagem",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-41",
+   "docs/lgpd/fontes/anpd-res-02-2022-pequeno-porte.md#anexo-i-art-11",
+   "docs/lgpd/fontes/lei-13709.md#art-9",
+   "docs/lgpd/fontes/anpd-res-18-2024-encarregado.md#anexo-art-8",
+   "docs/lgpd/fontes/anpd-res-18-2024-encarregado.md#anexo-art-9",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 95,
+    "trecho": "model Tenant {\n  id String @id ...\n  name String\n  cpfSalt String ...\n  retentionDays Int ...  (sem campo de encarregado/canal; grep -rni 'encarregado|dpo|privacidade' backend/src -> vazio)"
+   },
+   {
+    "arquivo": "backend/src/services/templateVariables.ts",
+    "linha": 2,
+    "trecho": "export const TEMPLATE_VARIABLES = [\"nome\", \"cidade\", \"percentual\", \"saldo\", \"limite\", \"limite_disponivel\"] as const;"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappInbox.ts",
+    "linha": 156,
+    "trecho": "if (client && [\"text\", \"button\", \"interactive\"].includes(m.type) && isOptOutMessage(m.body)) {  // única reação automática a mensagem recebida; nada para 'privacidade'/'LGPD'/'meus dados'"
+   },
+   {
+    "arquivo": "backend/src/routes/tenant.ts",
+    "linha": 22,
+    "trecho": "const settingsSchema = z.object({\n  retentionDays: z.number().int().positive().optional(),\n  maxMsgsPerMinute: z.number().int().positive().optional(),\n});"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappPayload.ts",
+    "linha": 138,
+    "trecho": "const OPT_OUT_FIRST_WORDS = new Set([\"parar\", \"pare\", \"sair\", \"stop\", ...]);"
+   },
+   {
+    "arquivo": "backend/src/routes/ciclos.ts",
+    "linha": 17,
+    "trecho": "export const MENSAGEM_CICLO_ABERTO =\n  \"Olá, {{nome}}! Seu limite do Cartão Top Conta renovou ...\""
+   }
+  ],
+  "cenario": "Um titular recebe uma campanha e responde 'LGPD, quem é o responsável pelos meus dados?'. Não há resposta automática, e a mensagem cai na inbox sem destaque. As mensagens não trazem rodapé nem variável com o contato do encarregado ou do canal de privacidade, porque o Tenant não guarda essa informação. Num cenário multi-controlador, cada tenant precisaria divulgar o próprio canal, e o sistema não tem onde configurá-lo. A divulgação do encarregado pode estar fora do CRM (site da controladora), por isso a severidade é baixa. Mas o único ponto de contato do titular com a controladora, aqui, é a própria mensagem. (Também 08-04.) O README de docs/lgpd exige que base legal, encarregado, aviso de privacidade, retenção e texto de opt-out sejam por tenant, mas o Tenant guarda só retentionDays e maxMsgsPerMinute (tenant.ts:22 aceita só esses dois). Nenhuma mensagem sugerida (ciclos.ts:17, merchantCategories.ts), rodapé padrão ou confirmação de opt-out leva a identidade do controlador nem o canal do titular, e as palavras de opt-out são fixas no código, iguais para todo controlador. Se a TopConta não tiver site (Res. 18/2024, art. 9º, §3º) ou for pequeno porte sem encarregado (Res. 2/2022, art. 11, §1º), o WhatsApp é justamente o meio usual de contato, e o produto não tem onde guardar nem como exibir essa informação.",
+  "papel": "ambos",
+  "correcao": "Adicionar ao model Tenant os campos encarregadoNome, encarregadoContato, canalTitular (URL/e-mail/telefone), avisoPrivacidadeUrl, optOutTexto e optOutPalavras, editáveis em routes/tenant.ts (settingsSchema, com o logAudit que já existe) e em frontend/src/pages/Settings.tsx. A base legal por finalidade fica em 02-01 e a justificativa de retenção em 04-07. Expor a variável {{canal_privacidade}} em templateVariables.ts/messageContext.ts e no rodapé padrão dos templates. Em services/whatsappInbox.ts: responder à confirmação de opt-out com o canal do tenant e, ao reconhecer 'privacidade', 'lgpd', 'meus dados', 'apagar meus dados' (função irmã de isOptOutMessage em whatsappPayload.ts), responder dentro da janela de 24h com o canal e abrir um PedidoTitular (03-05). Ler as palavras de opt-out do tenant, com o padrão pt-BR do código como fallback. Nomear o encarregado ou definir o canal é ato da controladora (ver fora-do-codigo.md).",
+  "tipo": "codigo",
+  "multi_tenant": "Encarregado, canal do titular, URL do aviso de privacidade, texto e palavras de opt-out ficam por Tenant, nunca fixos para a TopConta.",
+  "severidade_original": "baixa",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Código conferido. O Tenant (schema.prisma:95-105) não tem campo de encarregado ou de canal, templateVariables.ts:2 não tem variável de privacidade, e whatsappInbox.ts:156 reage só ao opt-out; grep encarregado/dpo/privacidade em backend/src só encontra falsos positivos ('endpoint'). O art. 41, §1º exige divulgação pública, de preferência no site da controladora. O art. 11, §1º da Res. 2/2022 exige um canal, mas não que ele esteja na mensagem. Se a obrigação está cumprida depende da divulgação fora do repositório. | Verificação de 08-04: No código, Tenant guarda só retentionDays, maxMsgsPerMinute e campos de custo (schema.prisma:95-105). settingsSchema aceita só esses dois campos (tenant.ts:22-25). As palavras de opt-out são fixas (whatsappPayload.ts:138). A mensagem sugerida não identifica o controlador (ciclos.ts:17-18). O grep por encarregado/privacidade/baseLegal não acha nada relevante. A exigência de mostrar o encarregado no WhatsApp depende de fato fora do repositório: a Res. 18/2024, art. 9º, §3º só desloca a divulgação para outros meios se a TopConta não tiver site, e a Res. 2/2022, art. 11, §1º só se aplica se ela for pequeno porte sem encarregado.",
+  "tambem": [
+   "08-04"
+  ]
+ },
+ {
+  "id": "04-01",
+  "titulo": "Retenção anonimiza só nome, telefone, CPF, cidade e tags de `Client` e mantém identificadores diretos e quase-identificadores",
+  "severidade": "alta",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-16",
+   "docs/lgpd/fontes/lei-13709.md#art-12",
+   "docs/lgpd/fontes/lei-13709.md#art-5",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/retention.ts",
+    "linha": 105,
+    "trecho": "data: { nome: \"Cliente anonimizado\", telefone: `anon-${client.id}`, cpfHash: `anon-${client.id}`, cpfMasked: \"***.***.***-**\", cidade: null, autorizacaoComunicacao: false, optOutAt: new Date(), tags: [], anonymizedAt: new Date() }"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 168,
+    "trecho": "externalId    String? // id_cliente da planilha de origem"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 171,
+    "trecho": "email         String?"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 205,
+    "trecho": "empresaConveniada       String?"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 219,
+    "trecho": "lotacao            String? // departamento/unidade de trabalho do titular (servidor público)"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 221,
+    "trecho": "dataNascimento     DateTime?"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 223,
+    "trecho": "remuneracaoBruta   Decimal?  @db.Decimal(14, 2)"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 657,
+    "trecho": "externalId     String   (Purchase: idTransacaoCartao)"
+   },
+   {
+    "arquivo": "backend/src/services/retention.ts",
+    "linha": 92,
+    "trecho": "anonymizedAt: null,"
+   }
+  ],
+  "cenario": "Passado o prazo de 1095 dias, o job das 03:00 marca o cliente como anonimizado, mas a linha continua com e-mail, `externalId` (id do cartão na planilha da controladora), data de nascimento, sexo, remuneração bruta/líquida, bônus, empresa conveniada, lotação, vínculo, razão social, datas de cadastro/abertura/validade e motivo/observação de encerramento. Qualquer usuário que abra `GET /api/clients/:id` vê esses campos. A TopConta, com a própria planilha (meios próprios, art. 12), reidentifica o titular pelo `externalId` ou pelo e-mail. Como o registro continua identificável, as compras (`Purchase`, com `externalId` = id da transação), os `Movement` e os `AccountSnapshot` ligados a ele também continuam sendo dado pessoal. E, com `anonymizedAt` preenchido, a varredura nunca mais volta a esse cliente, então a retenção desses campos fica sem prazo.",
+  "papel": "ambos",
+  "correcao": "Em `backend/src/services/retention.ts`, ampliar o `prisma.client.update` para zerar todos os campos pessoais de `Client`: `externalId`, `email`, `documentoTipo`, `dataNascimento`, `sexo`, `remuneracaoBruta`, `remuneracaoLiquida`, `bonus`, `saldoLiquidoSaque`, `empresaConveniada`, `cidadeEmpresaConveniada`, `vinculoEmpregaticio`, `lotacao`, `razaoSocial`, `motivoEncerramento`, `obsEncerramento` e `statusValidacaoCadastro`. As datas exatas (cadastro, abertura, validade e encerramento) devem ser truncadas ou generalizadas (por exemplo, para o mês). Também zerar `Purchase.externalId` e `Purchase.razaoSocial` dos clientes anonimizados. Ampliar `PII_DETAIL_KEYS` com os mesmos nomes. Atualizar `retention.test.ts` para afirmar campo a campo o que sobra.",
+  "tipo": "codigo",
+  "multi_tenant": "A lista de campos que podem sobreviver de forma agregada para estatística (faixa etária, cidade generalizada) pode virar configuração por Tenant. O padrão deve ser eliminar.",
+  "severidade_original": "alta",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "retention.ts:103-115 only overwrites nome/telefone/cpfHash/cpfMasked/cidade/tags. Client keeps email (schema.prisma:171), externalId (:168), dataNascimento (:221), remuneracao (:223), lotacao (:219), empresaConveniada (:205) and the rest. The filter anonymizedAt:null (retention.ts:92) means the record is never swept again. GET /clients/:id (clients.ts:90-101) returns the whole row. PII_DETAIL_KEYS (:10) has the same gap. Art. 16 IV allows keeping data only if it is anonymized. Art. 12 says data that can be reidentified by the controller's own means is not anonymized. With email and externalId still there, the record is effectively personal data kept forever, so the severity stays alta and is not the 'campo esquecido' case of media.",
+  "tambem": []
+ },
+ {
+  "id": "04-02",
+  "titulo": "Inbox do WhatsApp (`Conversation`, `WaMessage`, `WaMediaBlob`) não tem prazo de retenção nem anonimização",
+  "severidade": "alta",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-15",
+   "docs/lgpd/fontes/lei-13709.md#art-16",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 728,
+    "trecho": "waId           String // telefone do cliente como a Meta informa (só dígitos, com DDI)"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 729,
+    "trecho": "contactName    String? // nome do perfil do WhatsApp"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 755,
+    "trecho": "body           String? // texto, legenda ou descrição"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 778,
+    "trecho": "data      Bytes"
+   },
+   {
+    "arquivo": "backend/src/routes/inbox.ts",
+    "linha": 53,
+    "trecho": "...(/\\d{4,}/.test(t) ? [{ waId: { contains: t.replace(/\\D/g, \"\") } }] : []),"
+   },
+   {
+    "arquivo": "backend/src/routes/inbox.ts",
+    "linha": 74,
+    "trecho": "nome: c.client?.nome ?? c.contactName ?? \"Contato sem cadastro\","
+   }
+  ],
+  "cenario": "Um cliente troca mensagens com a TopConta pelo WhatsApp, inclusive com fotos ou documentos que ficam copiados em `WaMediaBlob`, e depois fica inativo. Três anos depois a retenção anonimiza o `Client`, mas a conversa continua com o telefone em claro (`waId`), o nome do perfil, a prévia da última mensagem, o texto de todas as mensagens e a mídia binária. A inbox ainda lista essa conversa, mostra o nome do perfil e encontra o contato pela busca por número. Conversas de contatos que nunca entraram na base (`clientId` nulo) não são alcançadas por nenhuma rotina. Prova da ausência: `grep -rn \"conversation\\|waMessage\\|waMediaBlob\" backend/src/services/retention.ts` volta vazio, e não há job de limpeza em `services/whatsappMedia.ts`, `services/whatsappInbox.ts` nem `services/scheduler.ts`.",
+  "papel": "ambos",
+  "correcao": "Em `services/retention.ts`, para cada cliente anonimizado: em `Conversation`, trocar `waId` por um pseudônimo e zerar `contactName` e `lastPreview`; em `WaMessage`, zerar `body`, `mediaFilename` e `errorText`; apagar os `WaMediaBlob` das mensagens. Acrescentar um prazo próprio para conversas e mídias, contado da última mensagem (`lastMessageAt` mais antigo que o corte), que também cubra conversas sem `clientId`. Considerar um prazo bem mais curto para `WaMediaBlob`, que é cópia de conveniência.",
+  "tipo": "codigo",
+  "multi_tenant": "Os prazos de conversa e de mídia (por exemplo, `Tenant.inboxRetentionDays` e `Tenant.mediaRetentionDays`) devem ser por tenant.",
+  "severidade_original": "alta",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "schema.prisma:728/729/755/778 hold waId in clear, contactName, body and binary media. No code anywhere deletes or anonymizes Conversation, WaMessage or WaMediaBlob: retention.ts has none, the scheduler has no cleanup job, and grepping for conversation/waMessage/waMediaBlob .delete* in backend/src finds nothing. Search by number works on waId (inbox.ts:53). One nuance: for a linked client that was anonymized, the list shows client.nome first (inbox.ts:74), so contactName only appears when the conversation has no client. The finding still holds as indefinite retention.",
+  "tambem": []
+ },
+ {
+  "id": "04-04",
+  "titulo": "`ImportChange.before` guarda cópias de dados pessoais sem job de expiração, e desfazer uma importação reidentifica cliente anonimizado",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-15",
+   "docs/lgpd/fontes/lei-13709.md#art-16",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 280,
+    "trecho": "/// (services/importUndo.ts). `before` guarda só as colunas que a importação gravou. Expira em 30 dias."
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 524,
+    "trecho": ".deleteMany({ where: { tenantId, createdAt: { lt: new Date(Date.now() - CHANGE_TTL_DAYS * 86_400_000) } } })"
+   },
+   {
+    "arquivo": "backend/src/services/importService.ts",
+    "linha": 266,
+    "trecho": "await prisma.importChange.createMany({"
+   },
+   {
+    "arquivo": "backend/src/services/importUndo.ts",
+    "linha": 81,
+    "trecho": "await prisma.client.update({ where: { id: c.clientId }, data: reviveBefore(c.before as Record<string, unknown>) as any });"
+   },
+   {
+    "arquivo": "backend/src/services/retention.ts",
+    "linha": 92,
+    "trecho": "anonymizedAt: null,"
+   }
+  ],
+  "cenario": "Cada importação grava, para cada cliente tocado, o estado anterior das colunas que alterou: nome, telefone, cpfHash/cpfMasked, e-mail, `externalId`, cidade, data de nascimento, remuneração etc. A \"expiração em 30 dias\" só existe como `deleteMany` oportunista dentro de `runCardAccountImport`. Não há job em `scheduler.ts` nem em `routes/cron.ts`, e a importação genérica/Google Sheets (`importService.ts`) grava `ImportChange` sem nunca limpar. Um tenant que só sincroniza pelo Sheets acumula cópias diárias de toda a base sem prazo. A retenção também não toca `ImportChange`. Pior: se o admin importa um lote no dia 0, a varredura do dia 1 anonimiza um cliente desse lote e o admin clica em \"Desfazer\" no dia 2, `undoLoteBatch` regrava nome, telefone, CPF e demais campos de antes. Como `anonymizedAt` não está em `before`, ele continua preenchido, e a varredura nunca revisita o registro, que volta a ser pessoal por prazo indefinido. Metadado de produção (Supabase `list_tables`): 14.067 linhas em `ImportChange` para 3.560 clientes.",
+  "papel": "ambos",
+  "correcao": "(1) Criar um job de expiração de `ImportChange` com mais de 30 dias para todos os tenants em `services/scheduler.ts` e `routes/cron.ts`. Pode ir no próprio `runRetentionSweep`, e deve sair da importação de cartões. (2) Em `retention.ts`, apagar os `ImportChange` dos clientes anonimizados (ou zerar `before`). (3) Em `importUndo.ts`, pular a restauração (ou só restaurar campos não pessoais) quando o cliente tiver `anonymizedAt` preenchido.",
+  "tipo": "codigo",
+  "multi_tenant": "O prazo do histórico de desfazer (hoje a constante `CHANGE_TTL_DAYS = 30`) pode virar campo por Tenant, com teto.",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "The only expiry is the per-tenant deleteMany inside runCardAccountImport (cardAccountImport.ts:497/524). scheduler.ts and cron.ts never touch ImportChange. importService.ts:263-266 always writes ImportChange, including for google_sheets (formato set at :133), and that format cannot even be undone (importUndo.ts:12). undoLoteBatch restores `before` with no anonymizedAt check (importUndo.ts:81). `before` only has the columns the import wrote (snapshotBefore, cardAccountImport.ts:366-372), so it never includes anonymizedAt, and the restored record is never swept again. The production figure of 14,067 rows could not be checked and is not needed for the finding.",
+  "tambem": []
+ },
+ {
+  "id": "04-05",
+  "titulo": "\"Limpar base\" (`/clients/purge`) falha por FK RESTRICT e, quando passa, deixa órfãos com dado pessoal",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-16",
+   "docs/lgpd/fontes/lei-13709.md#art-5"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 195,
+    "trecho": "prisma.client.deleteMany({ where: { tenantId } }),"
+   },
+   {
+    "arquivo": "backend/prisma/sql/2026-10-merchant-purchase.sql",
+    "linha": 36,
+    "trecho": "CONSTRAINT \"Purchase_clientId_fkey\" FOREIGN KEY (\"clientId\") REFERENCES \"Client\"(\"id\") ON DELETE RESTRICT"
+   },
+   {
+    "arquivo": "backend/prisma/sql/2026-10-add-account-snapshot.sql",
+    "linha": 33,
+    "trecho": "\"AccountSnapshot_clientId_fkey\" FOREIGN KEY (\"clientId\") REFERENCES \"Client\"(\"id\") ON DELETE RESTRICT"
+   },
+   {
+    "arquivo": "backend/prisma/sql/2026-10-whatsapp-inbox.sql",
+    "linha": 98,
+    "trecho": "\"Conversation_clientId_fkey\" FOREIGN KEY (\"clientId\") REFERENCES \"Client\"(\"id\") ON DELETE SET NULL"
+   },
+   {
+    "arquivo": "backend/prisma/sql/2026-10-campanha-manual.sql",
+    "linha": 30,
+    "trecho": "\"CampaignRecipient_clientId_fkey\" ... ON DELETE SET NULL"
+   }
+  ],
+  "cenario": "O admin usa \"Limpar base\" para eliminar todos os clientes do tenant, por exemplo ao encerrar o tratamento (art. 15). A transação apaga `MessageEvent` e `Movement`, mas não `Purchase` nem `AccountSnapshot`. Essas tabelas têm FK RESTRICT para `Client`, então o `client.deleteMany` falha e tudo é revertido. Em produção há 8.426 `Purchase` e 4.341 `AccountSnapshot` (metadado de `list_tables`), logo a eliminação é impossível hoje. Num tenant sem compras ou snapshots o purge passa, mas `Conversation` (telefone em claro, nome do perfil) e `CampaignRecipient` (nome, telefone) só perdem o `clientId` (SET NULL), e `WaMessage`, `WaMediaBlob` e `ImportChange.before` (sem FK) ficam intactos.",
+  "papel": "ambos",
+  "correcao": "Em `routes/clients.ts`, incluir na transação `purchase.deleteMany`, `accountSnapshot.deleteMany` e `importChange.deleteMany` do tenant. Para os vínculos SET NULL, anonimizar `Conversation`/`WaMessage`/`WaMediaBlob` e `CampaignRecipient` (reusar a rotina de anonimização de `retention.ts`, extraída para uma função `anonymizeClientFootprint`). Cobrir com teste que afirme que nada com dado pessoal sobra.",
+  "tipo": "codigo",
+  "multi_tenant": "n/a",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "The purge transaction (clients.ts:192-196) deletes only MessageEvent, Movement and Client. Purchase and AccountSnapshot have FK RESTRICT to Client (2026-10-merchant-purchase.sql:36; 2026-10-add-account-snapshot.sql:33), so the delete fails whenever any of those rows exist. Conversation and CampaignRecipient are SET NULL (whatsapp-inbox.sql:98; campanha-manual.sql:30) and keep phone and name. No other bulk or per-subject deletion path exists: the only client.delete* calls are clients.ts:195 and importUndo.ts:86. Caveat: the stated purpose of the purge (comment at clients.ts:179-182) is throwing away a mistaken import, not ending processing, but as an elimination mechanism it is still incomplete.",
+  "tambem": []
+ },
+ {
+  "id": "04-06",
+  "titulo": "Encerramento de conta não marca o término do tratamento e `encerradoEm` é regravado a cada importação",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-15",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 241,
+    "trecho": "encerradoEm: encerrado ? new Date() : undefined,"
+   },
+   {
+    "arquivo": "backend/src/services/retention.ts",
+    "linha": 93,
+    "trecho": "OR: [ { dataUltimaUtilizacao: { lte: cutoff } }, { AND: [{ dataUltimaUtilizacao: null }, { createdAt: { lte: cutoff } }] } ],"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 212,
+    "trecho": "encerradoEm        DateTime?"
+   }
+  ],
+  "cenario": "Um titular encerra a conta do cartão. A finalidade comercial do CRM, estimular o uso do cartão, deixa de ser alcançável (art. 15, I). Mesmo assim a retenção o trata como inativo comum, contando 1095 dias a partir da última utilização, que pode ser recente, e mantém nome, telefone, dados de RH e o motivo e a observação do encerramento por até 3 anos. Além disso, a data do encerramento não é guardada: toda importação em que a linha vem com Encerramento=sim regrava `encerradoEm` com a data da importação. Mesmo que a controladora decida contar o prazo a partir do encerramento, o dado necessário não existe.",
+  "papel": "ambos",
+  "correcao": "Decisão da controladora. Opções: (a) prazo curto e específico a partir do encerramento (ex.: `Tenant.retentionDaysAfterClosure`), seguido de anonimização. (b) Manter o prazo geral, mas bloquear qualquer uso comercial de clientes encerrados. (c) Eliminar já no encerramento, salvo obrigação legal (art. 16, I). Recomendação: (a) somada ao bloqueio de (b). Em código, independentemente da opção: em `cardAccountImport.ts`, só preencher `encerradoEm` quando ele ainda for nulo (não regravar no update); em `retention.ts`, acrescentar o ramo `encerradoEm <= corte_encerramento`.",
+  "tipo": "decisao_negocio",
+  "multi_tenant": "Prazo pós-encerramento como campo por Tenant (ex.: `retentionDaysAfterClosure`).",
+  "severidade_original": "media",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Code checked: encerradoEm is set to new Date() on every import where the row comes with Encerramento=sim (cardAccountImport.ts:241). planUpdate removes it only when !presence.status (:355), so on update it is rewritten and the real closure date is lost. The retention sweep has no branch for closed accounts (retention.ts:93-96). Whether account closure ends the purpose of processing under art. 15 I, or whether data must be kept for collections or a legal obligation, is the controller's decision (decisao_negocio). Hence PLAUSIBLE.",
+  "tambem": []
+ },
+ {
+  "id": "04-07",
+  "titulo": "`Tenant.retentionDays` aceita qualquer inteiro positivo, sem teto nem justificativa registrada",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-6",
+   "docs/lgpd/fontes/lei-13709.md#art-37",
+   "docs/lgpd/fontes/lei-13709.md#art-15"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/routes/tenant.ts",
+    "linha": 23,
+    "trecho": "retentionDays: z.number().int().positive().optional(),"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 99,
+    "trecho": "retentionDays     Int      @default(1095) // 3 anos default (LGPD)"
+   }
+  ],
+  "cenario": "O prazo é por tenant, só ADMIN altera e a mudança é auditada (`UPDATE_TENANT_SETTINGS` com o valor novo), o que está correto. Mas um admin pode gravar 36500 dias (retenção de fato indefinida) ou 1 dia (anonimiza a base inteira na madrugada seguinte, sem prévia), e não há onde registrar o fundamento do prazo (obrigação legal, prazo prescricional, finalidade). O padrão de 1095 dias não tem justificativa documentada. É boa prática de prestação de contas (art. 6º, X) e de registro das operações (art. 37), não uma proibição expressa.",
+  "papel": "controladora",
+  "correcao": "Decisão da controladora sobre o prazo e o fundamento. Recomendação: definir o prazo com base em obrigação legal ou prazo prescricional aplicável e registrá-lo. Em código, colocar limites em `routes/tenant.ts` (ex.: `.min(30).max(1825)`), acrescentar `Tenant.retentionBasis` (texto obrigatório quando o prazo mudar) e mostrar, antes de salvar, quantos clientes seriam anonimizados com o novo valor.",
+  "tipo": "decisao_negocio",
+  "multi_tenant": "`retentionDays` já é por tenant. Acrescentar `retentionBasis` e limites mínimo e máximo como configuração da plataforma.",
+  "severidade_original": "baixa",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "tenant.ts:23 accepts any positive integer, so both 1 and 36500 are valid. The change is restricted to ADMIN and audited with UPDATE_TENANT_SETTINGS (tenant.ts:28-35), which the finding already acknowledges. Nowhere stores the basis for the chosen period (schema.prisma:99 has only the default). The finding itself treats this as good practice (art. 6 X / art. 37 recordkeeping), not an express obligation, so baixa is correct.",
+  "tambem": []
+ },
+ {
+  "id": "05-01",
+  "titulo": "Export de clientes sai com até 50 mil linhas e telefone completo, liberado a OPERATOR e ANALYST, e o AuditLog guarda só a contagem (sem filtros nem quais titulares saíram no arquivo)",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-48",
+   "docs/lgpd/fontes/anpd-res-15-2024-incidentes.md#anexo-art-6",
+   "docs/lgpd/fontes/anpd-res-15-2024-incidentes.md#anexo-art-9",
+   "docs/lgpd/fontes/lei-13709.md#art-6",
+   "docs/lgpd/fontes/lei-13709.md#art-46",
+   "docs/lgpd/fontes/lei-13709.md#art-37",
+   "docs/lgpd/fontes/lei-13709.md#art-39"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 47,
+    "trecho": "const where = buildSegmentWhere(tenantId, { cidade: req.query.cidade ? ... search: req.query.search ? String(req.query.search) : undefined, ..."
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 55,
+    "trecho": "const clients = await prisma.client.findMany({ where, orderBy: { nome: \"asc\" }, take: 50000 });"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 73,
+    "trecho": "await logAudit({ tenantId, userId, action: \"EXPORT_CLIENTS\", target: \"Client\", details: { count: clients.length } });"
+   },
+   {
+    "arquivo": "backend/src/middleware/audit.ts",
+    "linha": 29,
+    "trecho": "await prisma.auditLog.create({ data: { ...entry, details: entry.details as any, prevHash, hash } });"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 45,
+    "trecho": "router.get(\"/export.csv\", requireRole(\"ADMIN\", \"OPERATOR\", \"ANALYST\"), async (req, res) => {"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 62,
+    "trecho": "c.telefone,"
+   },
+   {
+    "arquivo": "backend/src/routes/campaigns.ts",
+    "linha": 649,
+    "trecho": "e.client?.telefone ?? e.recipient?.telefone ?? \"\","
+   },
+   {
+    "arquivo": "backend/src/routes/campaigns.ts",
+    "linha": 617,
+    "trecho": "router.get(\"/:id/report/export.csv\", requireRole(\"ADMIN\", \"OPERATOR\", \"ANALYST\"), async (req, res) => {"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 24,
+    "trecho": "enum Role {\n  ADMIN\n  OPERATOR\n  ANALYST\n  VIEWER\n}"
+   }
+  ],
+  "cenario": "Um usuário ANALYST, ou uma conta comprometida, baixa /api/clients/export.csv filtrando por cidade e convênio. O arquivo leva nome, telefone em claro, CPF mascarado, percentual de uso e situação de autorização de até 50 mil clientes. Depois o controlador descobre o vazamento do CSV. O AuditLog guarda só EXPORT_CLIENTS {count: N}, sem cidade, convênio, busca nem ids. Como a base muda a cada importação, refazer a consulta dias depois não devolve o mesmo conjunto. Dentro dos 3 dias úteis, a TopConta consegue informar o número de titulares afetados (art. 6º, §2º, II), mas não consegue identificar quem são para a comunicação direta e individualizada do art. 9º, §1º, II, nem confirmar a categoria exata dos dados. Restaria o aviso público do art. 9º, §3º. Comparação: o export do relatório de campanha (campaigns.ts:671) guarda targetId=campaign.id, e a lista se reconstrói pelos MessageEvent. (Também 07-04 e 08-03.) O export de clientes está liberado a ANALYST, papel de análise que não dispara campanhas, e a OPERATOR, que é o perfil do contratado que opera os disparos: os dois baixam o CSV sem filtro com telefone E.164 completo. O relatório nominal de cada campanha (campaigns.ts:617) também sai com telefone completo para os mesmos papéis, embora seja auditado com targetId da campanha. Como o enum Role tem só quatro papéis fixos, a controladora não consegue dar ao operador apenas o necessário para disparar (art. 6º, III; art. 39).",
+  "papel": "ambos",
+  "correcao": "Em backend/src/routes/clients.ts: (1) gravar em details do EXPORT_CLIENTS os filtros normalizados (cidade, faixaUso, statusConta, empresaConveniada), um indicador hasSearch no lugar do termo de busca (para não pôr nome ou telefone no AuditLog), as colunas exportadas e a lista de client.id exportados; se o JSON ficar grande, criar ExportLog(tenantId, userId, createdAt, filtros, clientIds[]) ligado ao AuditLog. (2) Telefone mascarado por padrão via maskPhone, com versão completa só para os papéis que a controladora definir e com motivo informado na requisição e gravado no audit. (3) Tirar OPERATOR (e, se a controladora decidir, ANALYST) de /clients/export.csv e /campaigns/:id/report/export.csv, ou criar uma permissão 'pode exportar' concedida explicitamente pelo ADMIN; evolução: matriz de permissões por papel guardada por tenant. (4) Aplicar o mesmo critério ao export de campanha (campaigns.ts:617-675) e a qualquer export futuro.",
+  "tipo": "codigo",
+  "multi_tenant": "Papéis autorizados a exportar e a ver telefone completo, limite de linhas por export e prazo de guarda do registro de exports por Tenant, com default restritivo (só ADMIN) e nunca abaixo do necessário para responder a um incidente.",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "backend/src/routes/clients.ts:73 grava só details:{count}; filtros (cidade, faixaUso, statusConta, search, empresaConveniada, linhas 47-53) e ids não entram no AuditLog, e o findMany com take:50000 (l.55) exporta telefone em claro. O contraste com campaigns.ts:671 (targetId=campaign.id) procede. As âncoras anexo-art-6/9/10 e art-48/art-6 existem. O art. 9º §1º II da Res. 15 pede comunicação individualizada 'caso seja possível identificá-los', e o §3º prevê aviso público como alternativa. Por isso a obrigação fica atendida em parte (export com trilha incompleta), o que corresponde a media. | Verificação de 07-04: clients.ts:45 deixa ANALYST usar requireRole no export.csv. :55 tem take 50000, :62 sai com c.telefone completo e :73 grava no logAudit só details {count}, sem filtros nem busca. Assim a trilha do art. 37 não permite reconstruir quem estava no arquivo, o que é export com trilha parcial (media no schema). campaigns.ts:649 também exporta telefone completo, mas o audit grava targetId da campanha. Quais papéis veem o telefone completo é decisão da controladora; a falha da auditoria se verifica só pelo código. Âncoras art-46, art-37 e art-6 existem. | Verificação de 08-03 (parte dos exports): Os exports estão liberados para OPERATOR: clients.ts:45 (take 50000 na :55) e campaigns.ts:617. O PATCH de clients.ts:112 aceita ADMIN e OPERATOR e zera optOutAt quando autorizacaoComunicacao=true (clients.ts:125-127), sem exigir evidência de novo consentimento. O enum Role tem só 4 papéis fixos (schema.prisma:24) e não existe permissão fina. A reautorização exige ação deliberada de um usuário, por isso mantive media e não subi para alta.",
+  "tambem": [
+   "07-04",
+   "08-03"
+  ]
+ },
+ {
+  "id": "05-03",
+  "titulo": "Tentativas de acesso indevido não ficam registradas de forma consultável: login falho, bloqueio, 2FA inválido e 403 não vão para o AuditLog, que também não guarda IP",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-46",
+   "docs/lgpd/fontes/lei-13709.md#art-49",
+   "docs/lgpd/fontes/lei-13709.md#art-6",
+   "docs/lgpd/fontes/anpd-res-15-2024-incidentes.md#anexo-art-10"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/routes/auth.ts",
+    "linha": 40,
+    "trecho": "if (!user || !user.active) return res.status(401).json({ error: \"Credenciais inválidas\" });"
+   },
+   {
+    "arquivo": "backend/src/routes/auth.ts",
+    "linha": 53,
+    "trecho": "await registerFailedLogin(prisma, user.id, user.failedLoginCount);"
+   },
+   {
+    "arquivo": "backend/src/routes/auth.ts",
+    "linha": 105,
+    "trecho": "if (!verifyTotpToken(parsed.data.code, secret)) { return res.status(401).json({ error: \"Código inválido\" });"
+   },
+   {
+    "arquivo": "backend/src/services/authSecurity.ts",
+    "linha": 33,
+    "trecho": "await prisma.user.update({ where: { id: userId }, data: { failedLoginCount: 0, lockedUntil: null } });"
+   },
+   {
+    "arquivo": "backend/src/middleware/auth.ts",
+    "linha": 36,
+    "trecho": "return res.status(403).json({ error: \"Permissão insuficiente para esta ação\" });"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 470,
+    "trecho": "model AuditLog { id ... userId ... action ... target ... targetId ... details ... createdAt ... prevHash ... hash  (sem ip/userAgent)"
+   }
+  ],
+  "cenario": "Um atacante testa senhas contra a conta de um OPERATOR. Cada erro só incrementa User.failedLoginCount, que é sobrescrito e volta a zero no próximo login certo (authSecurity.ts:33). O bloqueio de 15 min não gera evento, e o e-mail inexistente sai com 401 sem rastro. Se o atacante tem a senha e erra o TOTP, nada fica registrado. Um usuário autenticado que tenta rotas de outro papel (403) ou ids de outro tenant (404 por verify-then-act) também não deixa marca. A única fonte seria o log de runtime da Vercel, que a auditoria anterior registrou como retido por ~1 h no plano Hobby, e o MCP mostra o express-rate-limit sem identificar o IP do cliente (ERR_ERL_UNEXPECTED_X_FORWARDED_FOR, 37 ocorrências em 7 dias, trust proxy desligado). Quando o controlador desconfia de um acesso indevido, não tem como saber desde quando houve tentativas, de onde vieram e se tiveram sucesso. Faltam a data e as circunstâncias que o registro do art. 10, §1º, I e II, e a comunicação do art. 48 pedem.",
+  "papel": "ambos",
+  "correcao": "Reaproveitar logAudit (middleware/audit.ts) para os eventos LOGIN_FAILED (com userId quando o e-mail existe), ACCOUNT_LOCKED (em registerFailedLogin, quando count >= MAX_FAILED_ATTEMPTS), LOGIN_2FA_FAILED e ACCESS_DENIED_ROLE (em requireRole). Acrescentar ao model AuditLog as colunas ip e userAgent, preenchidas a partir de req (com app.set('trust proxy', 1) em app.ts, que também corrige o keying do express-rate-limit). Para e-mail inexistente não há tenant, então gravar em log estruturado do servidor com retenção maior, por exemplo um log drain. Opcional: uma Notification ao ADMIN do tenant quando a conta for bloqueada.",
+  "tipo": "codigo",
+  "multi_tenant": "O limiar de alerta (tentativas ou 403 por janela) e quem recebe a notificação podem ser por Tenant.",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "auth.ts:40 (401 sem rastro), auth.ts:53 registerFailedLogin e auth.ts:105 (TOTP inválido) não chamam logAudit; o logAudit só aparece no sucesso (l.65, l.111). authSecurity.ts:22-34 sobrescreve o contador e o reseta (l.33). requireRole (middleware/auth.ts:36) devolve 403 sem log, e rateLimit.ts:22 jsonRateLimitHandler também não registra nada. O model AuditLog (schema.prisma:470) não tem ip nem userAgent, e 'trust proxy' não aparece em backend/src. A retenção de log na Vercel e os erros ERR_ERL são fatos externos e não foram conferidos. A citação de anexo-art-10 está um pouco forçada (registro de incidente, não de tentativas), mas art. 46 e art. 49 sustentam o achado.",
+  "tambem": []
+ },
+ {
+  "id": "05-04",
+  "titulo": "Não existe registro de incidentes (model, documento ou procedimento) nem rotina de resposta para cumprir os 3 dias úteis",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/anpd-res-15-2024-incidentes.md#anexo-art-10",
+   "docs/lgpd/fontes/anpd-res-15-2024-incidentes.md#anexo-art-6",
+   "docs/lgpd/fontes/anpd-res-15-2024-incidentes.md#anexo-art-9",
+   "docs/lgpd/fontes/lei-13709.md#art-48",
+   "docs/lgpd/fontes/lei-13709.md#art-39"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 470,
+    "trecho": "model AuditLog {  (os 26 models do schema; nenhum Incident/SecurityIncident)"
+   },
+   {
+    "arquivo": "backend/src/services/importFormat.test.ts",
+    "linha": 27,
+    "trecho": "it(\"o erro do incidente: compras importadas como cartões e contas\", () => {"
+   },
+   {
+    "arquivo": "docs/security-audit/infra-snapshot.md",
+    "linha": 123,
+    "trecho": "(mesma senha antiga) — corrigido no mesmo lote de mudanças, sem incidente registrado"
+   },
+   {
+    "arquivo": "docs/lgpd/README.md",
+    "linha": 22,
+    "trecho": "artefatos/           rascunhos (registro de operações, aviso de privacidade, LIA)"
+   }
+  ],
+  "cenario": "Rodei `grep -rli \"incidente\\|incident\" backend/src backend/prisma docs frontend/src`, excluindo docs/lgpd/fontes. As únicas ocorrências são um teste de importação, o README desta pasta e duas menções de passagem na auditoria de segurança. Não há model, tela, documento em docs/ nem procedimento de resposta, e docs/lgpd/artefatos/ nem existe. Mesmo assim, já houve eventos que precisavam de avaliação e registro: a importação de compras no formato de cartões alterou dados financeiros de clientes (o teste o chama de \"o incidente\", e o commit 27a0b1c trata de \"não zerar colunas ausentes\" e \"desfazer\"), e a auditoria de 2026-08/09 achou a SUPABASE_SERVICE_ROLE_KEY órfã em produção e Preview público apontando para o banco real. Nenhum desses casos tem registro com data de conhecimento, circunstâncias, categoria de dados, número de titulares, avaliação de risco e motivo de não comunicar (Res. 15, Anexo, art. 10, §1º, I a VIII), guardado por 5 anos. No próximo incidente também não há roteiro dizendo quem decide, quem consulta o quê no sistema e como notificar a ANPD em 3 dias úteis. O operador (desenvolvedor/hospedagem) não tem canal definido para avisar a controladora.",
+  "papel": "ambos",
+  "correcao": "Mínimo fora do código: criar docs/lgpd/artefatos/procedimento-incidentes.md com papéis (controladora decide e comunica, operadores avisam em prazo curto, art. 39), o checklist de triagem dos arts. 4º e 5º do Anexo, as consultas a rodar no CRM (AuditLog por período/usuário, exports) e um modelo de registro com os 8 campos do art. 10, §1º. Abrir o registro com os eventos já conhecidos (importação de 2026-10, service role key órfã, Preview público), mesmo os que se conclua não serem comunicáveis (inciso VIII). No código, opcional mas recomendado: model SecurityIncident(tenantId, conhecidoEm, descricao, categorias, titularesAfetados, avaliacaoRisco, medidas, comunicacao, motivoNaoComunicacao, createdAt) sem anonimização pela retenção, guardado no mínimo 5 anos, com tela só para ADMIN e escrita via logAudit.",
+  "tipo": "fora_do_codigo",
+  "multi_tenant": "O registro e o procedimento são por Tenant (cada controlador mantém o seu). O contato do encarregado e o canal de aviso operador→controlador também ficam por Tenant.",
+  "severidade_original": "media",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Conferido: grep -rli incidente fora de fontes/ só acha os testes de importação (importFormat.test.ts:27, cardAccountImport.test.ts), docs/lgpd/README.md e docs/security-audit; entre os 26 models do schema não há Incident, e docs/lgpd/ só tem fontes/ e README.md, sem artefatos/. O trecho citado do README está na l.22, não na l.17. O art. 10 do Anexo da Res. 15 exige o registro de incidentes por 5 anos, inclusive dos não comunicados. Não dá para saber se a controladora mantém esse registro ou um procedimento fora do repositório. A frase sobre o Preview 'apontando para o banco real' exagera: findings.md:278-286 diz que o Preview estava sem as env vars de banco e em crash-loop.",
+  "tambem": []
+ },
+ {
+  "id": "05-05",
+  "titulo": "O webhook de SMS só verifica assinatura para Twilio; para qualquer outro :provider (Zenvia) aceita status sem autenticação e grava cross-tenant",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-46",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/routes/integrations.ts",
+    "linha": 435,
+    "trecho": "if (req.params.provider === \"twilio\") {"
+   },
+   {
+    "arquivo": "backend/src/routes/integrations.ts",
+    "linha": 461,
+    "trecho": "const { MessageSid, MessageStatus, sid, status } = req.body;"
+   },
+   {
+    "arquivo": "backend/src/routes/integrations.ts",
+    "linha": 464,
+    "trecho": "if (providerMsgId) await applyStatusUpdate(providerMsgId, providerStatus);"
+   },
+   {
+    "arquivo": "backend/src/services/channels/sms.ts",
+    "linha": 74,
+    "trecho": "return { providerMessageId: json.id, status: \"SENT\" };"
+   }
+  ],
+  "cenario": "Um tenant configura a Zenvia como provedor SMS, que o código prevê como failover (ChannelConfig.priority). Qualquer pessoa na internet pode então fazer POST /api/integrations/webhooks/sms/zenvia com {sid, status:\"failed\"} ou \"replied\". Não há verificação de assinatura nem de segredo, e applyStatusUpdate roda em withCrossTenantAccess, alterando o MessageEvent de qualquer tenant cujo providerMsgId bata. Isso corrompe o histórico de entrega e resposta do titular, que alimenta relatórios e decisões de reenvio. O impacto é baixo: hoje ChannelConfig tem 0 linhas em produção (list_tables) e o atacante precisa conhecer o id da mensagem no provedor. A auditoria de 2026-08-21 registrou os webhooks como corrigidos sem mencionar esse caminho.",
+  "papel": "operador",
+  "correcao": "Em routes/integrations.ts, rejeitar com 401 qualquer :provider sem verificação implementada (allow-list explícita ['twilio']), ou validar para a Zenvia o ChannelConfig.webhookSecret, que já é gerado na criação do canal (integrations.ts:123) e nunca é lido, comparando com timingSafeEqual em services/webhookAuth.ts. Além disso, restringir applyStatusUpdate ao tenant do canal autenticado em vez de buscar o providerMsgId no banco inteiro.",
+  "tipo": "codigo",
+  "multi_tenant": "O segredo do webhook já é por ChannelConfig (por tenant e provedor), então basta usá-lo.",
+  "severidade_original": "baixa",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "integrations.ts:435 só verifica assinatura quando provider==='twilio'; para qualquer outro valor de :provider (não só zenvia) cai direto nas l.461-464. applyStatusUpdate (l.468-472) busca providerMsgId com withCrossTenantAccess, sem filtrar canal nem tenant, então em tese altera também eventos de WhatsApp. webhookSecret é gerado em integrations.ts:123 e nunca é lido em backend/src. O impacto é limitado porque o atacante precisa conhecer o id da mensagem no provedor, e o webhookLimiter ajuda pouco. Integridade com exploração difícil: baixa.",
+  "tambem": []
+ },
+ {
+  "id": "05-06",
+  "titulo": "O sistema não registra o aceite de termo de confidencialidade por quem acessa dados de clientes (inclusive o operador contratado)",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-47",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 133,
+    "trecho": "model User { id ... email ... passwordHash ... role ... failedLoginCount ... mustChangePassword ... twoFactorSecret ... twoFactorEnabled  (sem campo de aceite de termo)"
+   },
+   {
+    "arquivo": "frontend/src/pages/Users.tsx",
+    "linha": 77,
+    "trecho": "<option value=\"VIEWER\">Visualizador</option>"
+   }
+  ],
+  "cenario": "O art. 47 obriga qualquer pessoa que intervenha no tratamento a garantir a segurança dos dados, mesmo depois do término. O contratado que opera os disparos e os demais usuários do CRM têm acesso a nome, telefone, limite e saldo de milhares de clientes, mas o sistema não exige nem guarda o aceite de um termo de sigilo (sem campo no User, sem tela, sem evento no AuditLog). Se houver vazamento por um usuário, a controladora não consegue demonstrar (art. 6º, X) que ele conhecia e aceitou o dever de sigilo. É boa prática de demonstração, não exigência literal de um termo.",
+  "papel": "controladora",
+  "correcao": "Fora do código: a controladora redige o termo de confidencialidade e o inclui no contrato do operador contratado. No código, opcional: User.confidentialityAcceptedAt e User.confidentialityVersion, uma tela de aceite no primeiro login (mesmo padrão de mustChangePassword em auth.ts e no frontend) e logAudit ACCEPT_CONFIDENTIALITY.",
+  "tipo": "fora_do_codigo",
+  "multi_tenant": "O texto e a versão do termo ficam por Tenant (cada controlador tem o seu).",
+  "severidade_original": "baixa",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "O model User (schema.prisma:133-160) não tem campo de aceite de termo, e Users.tsx:77 confirma o papel VIEWER. O art. 47 impõe o dever de segurança a quem intervém no tratamento, mas não exige termo; o próprio achado o trata como boa prática de demonstração (art. 6º, X), e a severidade baixa está correta. Pode ser que o sigilo já esteja coberto em contrato ou termo fora do repositório (contrato do operador, vínculo de trabalho), o que este verificador não consegue conferir.",
+  "tambem": []
+ },
+ {
+  "id": "06-01",
+  "titulo": "Tenant sem provedor próprio envia pela credencial global (env) de WhatsApp/Twilio, sem instrução da controladora",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-39",
+   "docs/lgpd/fontes/lei-13709.md#art-42",
+   "docs/lgpd/fontes/lei-13709.md#art-33",
+   "docs/lgpd/fontes/lei-13709.md#art-46",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/campaignQueue.ts",
+    "linha": 76,
+    "trecho": "if (resolved.length > 0) return resolved;"
+   },
+   {
+    "arquivo": "backend/src/services/campaignQueue.ts",
+    "linha": 85,
+    "trecho": "// Fallback env-based (Fase 1)"
+   },
+   {
+    "arquivo": "backend/src/services/campaignQueue.ts",
+    "linha": 92,
+    "trecho": "const sid = process.env.TWILIO_ACCOUNT_SID;"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappAccount.ts",
+    "linha": 33,
+    "trecho": "accessToken: accessToken ?? (process.env.WHATSAPP_ACCESS_TOKEN || undefined),"
+   },
+   {
+    "arquivo": "frontend/src/pages/Settings.tsx",
+    "linha": 112,
+    "trecho": "Nenhum provedor configurado (usando variáveis de ambiente/mock)"
+   },
+   {
+    "arquivo": "backend/src/routes/integrations.ts",
+    "linha": 372,
+    "trecho": "prisma.whatsAppAccount.findFirst({ where: { phoneNumberId: m.phoneNumberId, active: true } }) ... if (!account) { ... mensagem ignorada"
+   }
+  ],
+  "cenario": "Um segundo controlador (Tenant B) é criado e ainda não cadastrou ChannelConfig nem WhatsAppAccount, ou o ADMIN da TopConta apaga o provedor SMS via DELETE /api/integrations/channels/:id querendo desligar o SMS. Ao disparar uma campanha, resolveProviders não acha config ativa (ou todas falham ao decifrar, linhas 64-73, só logando o erro) e cai em process.env.TWILIO_*/WHATSAPP_*: nome, telefone e texto da mensagem dos clientes saem para Twilio/Meta (EUA) pela conta e pelo contrato do operador que hospeda o CRM, não por um provedor escolhido pela controladora. O mesmo vale para credentialsOf(), que usa o token global quando a WhatsAppAccount do tenant não tem credencial própria. A controladora não tem como desligar um canal: remover o último provedor faz o sistema voltar sozinho à credencial global. Hoje, com um único tenant, o risco depende de as variáveis estarem preenchidas em produção (não verificado, ler env é proibido no escopo). Com um segundo tenant, porém, o envio acontece sem instrução da controladora e sem um mecanismo do art. 33 que ela tenha escolhido. (Também 08-01, parte dos canais.) O titular do tenant B recebe a mensagem identificada com o remetente de outro controlador, e a resposta (inclusive \"SAIR\") é roteada pelo phone_number_id para o tenant dono desse número ou é descartada (integrations.ts:372-377): o opt-out do cliente de B não chega a B, e B continua enviando.",
+  "papel": "operador",
+  "correcao": "Em backend/src/services/campaignQueue.ts (resolveProviders), remover o fallback para process.env.WHATSAPP_*/TWILIO_* em produção: sem provedor configurado pelo tenant, devolver lista vazia, para que a campanha falhe com mensagem clara (\"Nenhum provedor configurado pela controladora\") em vez de usar a conta global. Manter o mock só quando NODE_ENV !== 'production'. Fazer o mesmo em backend/src/services/whatsappAccount.ts (credentialsOf), sem cair em WHATSAPP_ACCESS_TOKEN/WHATSAPP_APP_SECRET. Quando a decifração de um ChannelConfig falhar, não seguir para a reserva global: registrar uma notificação ao tenant. Em routes/integrations.ts, aceitar active:false no PUT /channels (hoje o upsert sempre força active:true) para que a controladora desligue um provedor sem apagá-lo, e expor isso em Settings.tsx. Se o fallback de ambiente precisar continuar existindo, restringi-lo a um tenant nomeado explicitamente (ex.: PLATFORM_DEFAULT_TENANT_ID); os demais caem no mock e a UI avisa (hasRealWhatsApp já existe) (08-01).",
+  "tipo": "codigo",
+  "multi_tenant": "Provedores e credenciais por canal passam a ser obrigatoriamente do Tenant (ChannelConfig/WhatsAppAccount, com flag active editável). Nenhuma credencial global é usada para tráfego de tenant.",
+  "severidade_original": "media",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Código conferido: em campaignQueue.ts:64-73 a falha de decifrar só faz console.error, :76 retorna só se houver provedor do tenant, :85-97 cai em WHATSAPP_*/TWILIO_* do env sem nenhum guard de NODE_ENV. whatsappAccount.ts:33-34 usa WHATSAPP_ACCESS_TOKEN/APP_SECRET como reserva. integrations.ts PUT /channels força active:true no upsert, e o DELETE remove a config, o que reativa o fallback. Settings.tsx:112 assume o uso do env/mock. As âncoras art-39/42/33 existem. Fica PLAUSIBLE porque o envio real pela conta global depende de as variáveis estarem preenchidas em produção (env não pode ser lido) e, com um tenant só, de a TopConta não ter autorizado essa conta. O art. 33 está um pouco forçado (a transferência à Meta/Twilio acontece com qualquer credencial); o núcleo é o art. 39 junto com a falta de controle do tenant sobre o canal. | Verificação de 08-01 (parte dos canais): O Google Sheets usa uma única credencial global, GOOGLE_SERVICE_ACCOUNT_JSON (googleSheets.ts:16). PUT /sheets (integrations.ts:57-69) grava qualquer sheetId sem checar se outro tenant já usa a mesma planilha, ao contrário do PUT /whatsapp, que faz essa checagem (integrations.ts:191-193). Quando o tenant não tem canal próprio, o envio cai nas credenciais de ambiente WHATSAPP_*/TWILIO_* (campaignQueue.ts:84-96), e credentialsOf também recorre a elas (whatsappAccount.ts:33-34). Mensagem recebida para um phone_number_id sem WhatsAppAccount é descartada (integrations.ts:372-377). Não achei mitigação. Os riscos de troca de envio e de opt-out perdido dependem de haver um segundo tenant e de as variáveis de ambiente estarem preenchidas em produção. A parte do Sheets não depende disso.",
+  "tambem": [
+   "08-01"
+  ]
+ },
+ {
+  "id": "06-02",
+  "titulo": "Service Account Google única para todos os tenants permite importar planilha de outro controlador por sheetId arbitrário",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-46",
+   "docs/lgpd/fontes/lei-13709.md#art-39",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/googleSheets.ts",
+    "linha": 16,
+    "trecho": "const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;"
+   },
+   {
+    "arquivo": "backend/src/routes/imports.ts",
+    "linha": 163,
+    "trecho": "sheetId: z.string(),"
+   },
+   {
+    "arquivo": "backend/src/routes/imports.ts",
+    "linha": 175,
+    "trecho": "const rows = await fetchSheetRows(sheetId, range, columnMapping || DEFAULT_COLUMN_MAPPING);"
+   },
+   {
+    "arquivo": "backend/src/routes/integrations.ts",
+    "linha": 40,
+    "trecho": "const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;"
+   },
+   {
+    "arquivo": "backend/src/routes/integrations.ts",
+    "linha": 51,
+    "trecho": "sheetId: z.string(),"
+   },
+   {
+    "arquivo": "backend/src/routes/integrations.ts",
+    "linha": 57,
+    "trecho": "router.put(\"/sheets\", requireRole(\"ADMIN\"), async (req, res) => { ... const data = { tenantId, ...parsed.data ... }"
+   }
+  ],
+  "cenario": "Todo tenant recebe de GET /api/integrations/sheets/service-account o mesmo e-mail de Service Account e é orientado a compartilhar sua planilha com ele. Essa Service Account pertence ao projeto GCP do operador e tem escopo de leitura e escrita (spreadsheets). Um usuário OPERATOR ou ADMIN do Tenant A chama POST /api/imports/google-sheets com o sheetId da planilha do Tenant B (o id aparece em qualquer link da planilha). Nada confere se a planilha pertence ao tenant que pede, então nome, telefone, CPF e limites dos clientes do controlador B são importados para dentro do Tenant A. Pelo PUT /sheets, o Tenant A também pode apontar o export BI agendado para a planilha de B e sobrescrever a aba CRM_Export. Hoje há um único tenant (TopConta). O vazamento se concretiza quando houver um segundo controlador e alguém do outro tenant obtiver o sheetId. (Também 08-01, parte do Sheets.) O risco não depende de má-fé: o operador que administra os dois tenants cola por engano o ID da planilha da TopConta no tenant B, o sync agendado (scheduler.ts runSheetSyncJob) importa a base da TopConta para dentro do controlador B e o export BI escreve o resumo de B na planilha da TopConta. Nada no sistema impede ou detecta.",
+  "papel": "operador",
+  "correcao": "Opção recomendada: credencial Google por tenant, com OAuth2 da própria controladora (refresh token cifrado com services/crypto.ts na SheetConnection, como googleSheets.ts já prevê no comentário) ou uma Service Account por tenant guardada cifrada, em vez de GOOGLE_SERVICE_ACCOUNT_JSON global. Mínimo imediato: em routes/imports.ts, deixar de aceitar sheetId no body e usar só o SheetConnection.sheetId do tenant, configurado por ADMIN. Ao configurar, registrar o sheetId em uso por um tenant e recusar o mesmo sheetId em outro tenant. Restringir o escopo a spreadsheets.readonly onde só há leitura. A checagem de unicidade do sheetId entre tenants pode seguir o padrão já usado para phoneNumberId no PUT /whatsapp (withCrossTenantAccess em integrations.ts:191-193) (08-01).",
+  "tipo": "codigo",
+  "multi_tenant": "Credencial Google (OAuth ou Service Account) e sheetId passam a ser por Tenant, sem compartilhamento de identidade de acesso entre controladores.",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "googleSheets.ts:16 usa uma GOOGLE_SERVICE_ACCOUNT_JSON global com escopo spreadsheets de leitura e escrita (:28). imports.ts:163/175 aceita sheetId arbitrário no body (ADMIN/OPERATOR) e o importa no tenant de quem chama sem checar posse. integrations.ts:40 expõe a todos os tenants o mesmo client_email e :51 (PUT /sheets) aceita qualquer sheetId, que o biExport.ts:52 usa para escrever na aba CRM_Export. schema.prisma:492-504 (SheetConnection) não tem unicidade de sheetId entre tenants e nenhum outro filtro mitiga o problema. As âncoras art-46/39/6 existem. Severidade media mantida porque, hoje, há um único tenant e o ataque depende de um segundo controlador e de alguém obter o sheetId. | Verificação de 08-01 (parte do Sheets): O Google Sheets usa uma única credencial global, GOOGLE_SERVICE_ACCOUNT_JSON (googleSheets.ts:16). PUT /sheets (integrations.ts:57-69) grava qualquer sheetId sem checar se outro tenant já usa a mesma planilha, ao contrário do PUT /whatsapp, que faz essa checagem (integrations.ts:191-193). Quando o tenant não tem canal próprio, o envio cai nas credenciais de ambiente WHATSAPP_*/TWILIO_* (campaignQueue.ts:84-96), e credentialsOf também recorre a elas (whatsappAccount.ts:33-34). Mensagem recebida para um phone_number_id sem WhatsAppAccount é descartada (integrations.ts:372-377). Não achei mitigação. Os riscos de troca de envio e de opt-out perdido dependem de haver um segundo tenant e de as variáveis de ambiente estarem preenchidas em produção. A parte do Sheets não depende disso.",
+  "tambem": [
+   "08-01"
+  ]
+ },
+ {
+  "id": "06-03",
+  "titulo": "Não há inventário de suboperadores nem documento sobre transferência internacional para a controladora publicar",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/anpd-res-19-2024-transf-intl.md#anexo-i-art-17",
+   "docs/lgpd/fontes/anpd-res-19-2024-transf-intl.md#anexo-i-art-32",
+   "docs/lgpd/fontes/lei-13709.md#art-33",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "docs/lgpd/README.md",
+    "linha": 32,
+    "trecho": "| Meta (WhatsApp Cloud API), Twilio, Zenvia, Google (Sheets), Vercel, Supabase | **Suboperadores** | Fora do Brasil, em princípio, o que exige análise de transferência internacional"
+   },
+   {
+    "arquivo": "frontend/src/pages/Settings.tsx",
+    "linha": 112,
+    "trecho": "Nenhum provedor configurado (usando variáveis de ambiente/mock)"
+   },
+   {
+    "arquivo": "frontend/src/main.tsx",
+    "linha": 16,
+    "trecho": "<SpeedInsights />"
+   }
+  ],
+  "cenario": "A TopConta precisa publicar na sua página, em português simples, o país de destino, a finalidade e os agentes da transferência internacional (Res. 19, Anexo I, art. 17, §2º, aplicável quando a base for cláusulas-padrão, e art. 32, parágrafo único, para cláusulas específicas). Ela não encontra no repositório nem na tela nenhuma lista dos destinos reais dos dados. Busquei com grep -rniE 'suboperador|subprocessador|transferência internacional|cláusulas-padrão|DPA' fora de docs/lgpd/fontes e .claude/skills e só achei a linha genérica do README. Em Settings.tsx há apenas a tabela de provedores SMS. Os destinos encontrados no código, que essa lista precisa cobrir, são: graph.facebook.com (Meta: telefone, nome e parâmetros do template, mídia da Inbox), api.twilio.com (EUA: telefone e texto), api.zenvia.com (telefone e texto), Google Sheets API (base completa de clientes lida e resumo agregado escrito), Vercel (funções e Speed Insights do frontend, que coleta navegação dos usuários internos) e Supabase (banco). Contratos que a controladora precisa confirmar fora do código: DPA e cláusulas-padrão da ANPD (ou outro mecanismo do art. 33) com Meta, Twilio, Google, Vercel e Supabase. Zenvia, se o processamento ficar no Brasil, entra só como operador. Também falta o contrato operador-controladora com quem opera os disparos e com quem hospeda.",
+  "papel": "controladora",
+  "correcao": "Criar docs/lgpd/artefatos/suboperadores.md com destino, dado enviado, finalidade, país e mecanismo do art. 33 de cada item (Res. 32/2026 dispensa cláusulas se a região for na UE). No código, expor em Settings.tsx (ou em página pública por tenant) a lista derivada dos provedores ativos do tenant (ChannelConfig, WhatsAppAccount, SheetConnection) mais a infraestrutura fixa (Vercel, Supabase), para a controladora publicar. Os contratos (DPA, cláusulas-padrão) ficam fora do código.",
+  "tipo": "fora_do_codigo",
+  "multi_tenant": "Lista de suboperadores gerada por Tenant a partir dos provedores que cada controlador ativou, mais um texto de transferência internacional editável por Tenant.",
+  "severidade_original": "baixa",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Ausência conferida: o grep por suboperador/subprocessador/transferência internacional/cláusulas-padrão fora de fontes e .claude acha só docs/lgpd/README.md:32, e docs/lgpd/artefatos não existe. Settings.tsx:112 e main.tsx:16 (SpeedInsights) conferem. As âncoras anexo-i-art-17 (§2º exige publicar país de destino, finalidade e agentes) e anexo-i-art-32 (parágrafo único) existem e dizem o que o achado afirma. Fica PLAUSIBLE porque a obrigação depende do mecanismo do art. 33 escolhido e de a controladora já publicar ou não isso no próprio site, fatos fora do repositório. O tipo fora_do_codigo e a severidade baixa estão corretos.",
+  "tambem": []
+ },
+ {
+  "id": "07-03",
+  "titulo": "Busca de clientes e de conversas por nome ou telefone vai na query string (GET ?search= / ?busca=), passando por logs de requisição da Vercel em dois projetos",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-46",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "frontend/src/pages/Clients.tsx",
+    "linha": 32,
+    "trecho": "if (search) params.set(\"search\", search);"
+   },
+   {
+    "arquivo": "frontend/src/pages/Clients.tsx",
+    "linha": 53,
+    "trecho": "<input placeholder=\"Buscar por nome/telefone\" value={search} ..."
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 24,
+    "trecho": "search: req.query.search ? String(req.query.search) : undefined,"
+   },
+   {
+    "arquivo": "backend/src/services/segments.ts",
+    "linha": 118,
+    "trecho": "{ nome: { contains: filters.search, mode: \"insensitive\" } },\n        { telefone: { contains: filters.search } },"
+   },
+   {
+    "arquivo": "frontend/src/pages/Inbox.tsx",
+    "linha": 325,
+    "trecho": "if (busca.trim()) qs.set(\"busca\", busca.trim());"
+   },
+   {
+    "arquivo": "frontend/vercel.json",
+    "linha": 4,
+    "trecho": "\"source\": \"/api/:path*\",\n      \"destination\": \"https://crmtopconta-backend.vercel.app/api/:path*\""
+   }
+  ],
+  "cenario": "Um operador procura um cliente digitando o nome completo ou o telefone na tela Base de clientes (ou na Inbox, que mascara o telefone na lista mas aceita busca pelo número inteiro). O frontend envia GET /api/clients?search=<nome ou telefone> (também em /api/clients/export.csv e /api/inbox/conversations?busca=); a URL atravessa o rewrite do projeto frontend e chega ao projeto backend, e os dois registram a requisição nos logs da Vercel, visíveis a todos os membros do time Vercel, que é suboperador fora do Brasil. O dado pessoal sai do banco por um caminho que não é a tela autorizada. Limite: os logs consultados via MCP (Hobby, só 1 h de retenção) exibem o path e não mostram a query string, então a gravação do valor em produção não foi observada; o vetor está no código.",
+  "papel": "operador",
+  "correcao": "Mover os termos de busca para o corpo: criar POST /api/clients/search (e POST para export e para /inbox/conversations) com {search, filtros} no body, reaproveitando buildSegmentWhere; ou, no mínimo, aceitar no GET só filtros não pessoais (cidade, faixa, status) e mandar o termo livre por POST. Ajustar frontend/src/pages/Clients.tsx e Inbox.tsx. Opcional: busca por telefone usando os últimos dígitos já normalizados, sem o número completo.",
+  "tipo": "codigo",
+  "multi_tenant": "n/a",
+  "severidade_original": "media",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "O código confere. Clients.tsx:32 e :53 mandam o termo de busca por nome/telefone na query string, assim como o export em :75. clients.ts:24 repassa o termo, e segments.ts:118-119 faz contains em nome e telefone. Inbox.tsx:325 manda busca, que inbox.ts:33/48 aceita. frontend/vercel.json:4-5 reescreve /api/* para o projeto backend. O backend não loga a URL (não há morgan nem log de req.url). Que a query string fique gravada nos logs da Vercel é fato de produção e o próprio achado diz que não observou isso. Termo de busca em GET é padrão comum, e art. 46 e art. 6º VII não exigem POST. É endurecimento, por isso baixa.",
+  "tambem": []
+ },
+ {
+  "id": "08-05",
+  "titulo": "Não há registro das operações de tratamento (art. 37), nem como gerá-lo por tenant a partir da configuração",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-37",
+   "docs/lgpd/fontes/anpd-res-02-2022-pequeno-porte.md#anexo-i-art-9",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "docs/lgpd/README.md",
+    "linha": 22,
+    "trecho": "artefatos/           rascunhos (registro de operações, aviso de privacidade, LIA)"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 95,
+    "trecho": "model Tenant { ... } (sem base legal, finalidade, compartilhamento ou justificativa de retenção)"
+   }
+  ],
+  "cenario": "Art. 37 obriga controladora E operador a manter registro das operações. O diretório docs/lgpd/artefatos/ anunciado no README não existe (ls docs/lgpd retorna só fontes/ e README.md); grep -rniE 'registro de opera|ROPA|inventário de trat' fora de docs/lgpd/fontes acha apenas o README, o checklist e docs/llm-wiki/log.md (que é histórico da wiki, não ROPA). O sistema trata, por tenant, cadastro, renda, uso de cartão, extrato de compras, conversas de WhatsApp e envia a Meta/Twilio/Google, mas nada descreve dado × finalidade × base × fonte × compartilhamento × retenção × medidas. Se a ANPD pedir o registro à TopConta (ou ao contratado que opera os disparos), não há o que entregar, e com vários controladores cada um precisaria do seu.",
+  "papel": "ambos",
+  "correcao": "Fora do código: redigir o registro (modelo simplificado da ANPD se couber pequeno porte, Res. 2/2022 art. 9º) em docs/lgpd/artefatos/. No código, depois de 08-04: endpoint GET /api/tenant/registro-operacoes (ADMIN) que monta o inventário a partir da config do tenant (BaseLegalFinalidade, retenção, suboperadores ativos em ChannelConfig/WhatsAppAccount/SheetConnection) mais um mapa estático dado→finalidade mantido em services/.",
+  "tipo": "fora_do_codigo",
+  "multi_tenant": "O registro é gerado por Tenant a partir da configuração LGPD dele; o mapa estático de campos é comum ao produto.",
+  "severidade_original": "baixa",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "docs/lgpd tem só fontes/ e README.md: o diretório artefatos/ anunciado no README.md:22 não existe. O grep por 'registro de opera|ROPA' acha só o README, o checklist e docs/llm-wiki/log.md, que é histórico da wiki. O art. 37 (lei-13709.md:677) obriga controladora e operador a manter o registro. Mesmo assim, o registro pode existir fora do repositório, como documento da TopConta, e isso não dá para verificar daqui.",
+  "tambem": []
+ },
+ {
+  "id": "08-06",
+  "titulo": "O tratamento reúne critérios de alto risco (renda estimada, perfil de consumo e de crédito, segmentação e disparo automatizados, data de nascimento) e não há RIPD; isso também tende a afastar o regime de pequeno porte",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-38",
+   "docs/lgpd/fontes/anpd-res-02-2022-pequeno-porte.md#anexo-i-art-3",
+   "docs/lgpd/fontes/anpd-res-02-2022-pequeno-porte.md#anexo-i-art-4",
+   "docs/lgpd/fontes/lei-13709.md#art-50"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/rendaPerfil.ts",
+    "linha": 4,
+    "trecho": "Regra: o limite total é 40% do salário, então salário estimado = limite ÷ 0,40."
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 221,
+    "trecho": "dataNascimento DateTime?\n  sexo String?\n  remuneracaoBruta Decimal?\n  remuneracaoLiquida Decimal?"
+   },
+   {
+    "arquivo": "backend/src/services/segments.ts",
+    "linha": 85,
+    "trecho": "if (filters.categoriasCompra?.length) purchase.merchant = { category: { in: filters.categoriasCompra } };"
+   },
+   {
+    "arquivo": "backend/src/routes/automations.ts",
+    "linha": 18,
+    "trecho": "\"ETAPA_PERFIL\","
+   },
+   {
+    "arquivo": "backend/src/services/transactionClassifier.ts",
+    "linha": 7,
+    "trecho": "\"Débito Pix Cartão\" = saque/antecipação salarial com taxa de juros; `Juros` é o lucro."
+   },
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 269,
+    "trecho": "... zerou limite e saldo de milhares de clientes."
+   }
+  ],
+  "cenario": "Insumo para a controladora: o código trata, para milhares de titulares (export até 50 mil linhas), remuneração bruta/líquida, renda estimada PF1–PF4, extrato de compras por categoria de estabelecimento (inclui 'Farmácia e drogaria', merchantCategories.ts:10), etapa de uso e data de nascimento (permite identificar idosos). O motor de automação (gatilho ETAPA_PERFIL, automationEngine.ts:106) decide sozinho, por perfil de renda e de uso, quem recebe oferta de antecipação salarial com juros. Isso toca critério geral (larga escala, art. 4º, I, 'a'; potencial de afetar interesses financeiros, §2º) e específicos (decisão automatizada que define perfil de consumo e de crédito, II, 'c'; dados de idosos, II, 'd') da Res. 2/2022. Pelo art. 3º, I, tratamento de alto risco não se beneficia do regime simplificado, então a dispensa de encarregado (art. 11) e o registro simplificado (art. 9º) podem não estar disponíveis. O RIPD só é exigível a pedido da ANPD (art. 38), por isso a severidade é baixa; mas sem ele a controladora não demonstra avaliação de risco (art. 50, §2º, I, 'd').",
+  "papel": "controladora",
+  "correcao": "Fora do código: a TopConta avalia formalmente se o tratamento é de alto risco (Res. 2/2022, art. 4º) e elabora RIPD com o conteúdo mínimo do art. 38, parágrafo único, usando os critérios acima. No código, apenas suporte: registrar no AuditLog cada execução de regra de automação com o critério usado (já parcial em automationEngine.ts) para documentar a decisão automatizada.",
+  "tipo": "fora_do_codigo",
+  "multi_tenant": "A avaliação de alto risco e o RIPD são por controlador (Tenant); o produto pode guardar referência ao RIPD vigente na config LGPD do tenant (ver 08-04).",
+  "severidade_original": "baixa",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "As evidências conferem: rendaPerfil.ts:4, schema.prisma:221-224, segments.ts:85, automations.ts:18, transactionClassifier.ts:7, merchantCategories.ts:10 e automationEngine.ts:106. Os critérios da Res. 2/2022, art. 4º (I e II, 'c' e 'd') e o art. 3º, I estão citados corretamente. Classificar o tratamento como alto risco é avaliação da controladora: o disparo de marketing como 'decisão unicamente automatizada' e a presença de idosos na base são discutíveis. A existência de RIPD também não é verificável no repositório. O RIPD só é exigível a pedido da ANPD (art. 38), então baixa está correta.",
+  "tambem": []
+ },
+ {
+  "id": "08-07",
+  "titulo": "CLAUDE.md, README e retention.ts afirmam controles LGPD mais amplos do que o código entrega (anonimização, auditoria de todas as ações sensíveis)",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-6",
+   "docs/lgpd/fontes/lei-13709.md#art-50"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "CLAUDE.md",
+    "linha": 109,
+    "trecho": "`services/retention.ts` runs a daily right-to-be-forgotten job anonymizing clients inactive past `Tenant.retentionDays`."
+   },
+   {
+    "arquivo": "CLAUDE.md",
+    "linha": 111,
+    "trecho": "Every sensitive action goes through `middleware/audit.ts` into `AuditLog`."
+   },
+   {
+    "arquivo": "backend/src/services/retention.ts",
+    "linha": 73,
+    "trecho": "têm seus dados pessoais anonimizados: nome, telefone e CPF deixam de ser reversíveis"
+   },
+   {
+    "arquivo": "backend/src/services/retention.ts",
+    "linha": 105,
+    "trecho": "data: { nome: \"Cliente anonimizado\", telefone: `anon-${client.id}`, cpfHash: ..., cpfMasked: ..., cidade: null, ... tags: [], anonymizedAt: new Date() }"
+   },
+   {
+    "arquivo": "CLAUDE.md",
+    "linha": 61,
+    "trecho": "filter by that tenantId — there is no other isolation boundary."
+   }
+  ],
+  "cenario": "Quem lê CLAUDE.md ou README ('log de auditoria em todas as ações sensíveis', 'right-to-be-forgotten') conclui que o cliente inativo é anonimizado e que toda ação sensível é auditada. No código, a retenção zera só nome, telefone, CPF, cidade e tags: e-mail, data de nascimento, sexo, remuneração, empresa conveniada, lotação, observação de encerramento, as conversas (Conversation.waId/contactName) e as mensagens de WhatsApp ligadas ao clientId continuam lá, então o registro continua identificável e não é 'anonimizado' no sentido da lei. Leituras e respostas da inbox, a lista de clientes e a lista de aniversariantes não passam por logAudit (ver 08-02). E CLAUDE.md diz que não há outra fronteira de isolamento além do filtro por tenantId, mas config/tenantGuard.ts documenta RLS real no Postgres. Um engenheiro ou agente que confie nesses textos para responder a um titular ou à ANPD dará informação errada (art. 6º, X: demonstrar medidas eficazes).",
+  "papel": "operador",
+  "correcao": "Ajustar CLAUDE.md (linhas 59-62 e 105-111), README.md (linhas 165-169 e 216-219), o comentário de services/retention.ts (73-75) e docs/llm-wiki/wiki/topics/seguranca-e-lgpd.md para listar exatamente os campos anonimizados, os que permanecem, quais ações são auditadas e a existência da RLS. Quando a dimensão 04 corrigir a retenção, atualizar o texto junto.",
+  "tipo": "codigo",
+  "multi_tenant": "n/a",
+  "severidade_original": "baixa",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "CLAUDE.md:61, :109 e :111 trazem os textos citados. A retenção (retention.ts:103-115) zera só nome, telefone, CPF, cidade e tags. Continuam na linha do cliente email (schema.prisma:171), dataNascimento, sexo, remuneração, lotação e obsEncerramento. O restante de retention.ts só mexe em campaignRecipient. Leituras sem logAudit confirmadas em inbox.ts e clients.ts:12. config/tenantGuard.ts:8-9 documenta RLS real, o que contradiz CLAUDE.md:61. É documentação que afirma mais do que o código entrega, e baixa é a severidade adequada.",
+  "tambem": []
+ },
+ {
+  "id": "08-08",
+  "titulo": "A cadeia de hash do AuditLog é global entre controladores: verificar integridade de um tenant depende dos registros dos outros e expõe metadados deles",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-6",
+   "docs/lgpd/fontes/lei-13709.md#art-37"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/auditIntegrity.ts",
+    "linha": 7,
+    "trecho": "nova guarda hash = SHA-256(prevHash + campos-desta-linha), formando uma cadeia GLOBAL (todas as tenants, ordenada por createdAt)"
+   },
+   {
+    "arquivo": "backend/src/services/auditIntegrity.ts",
+    "linha": 67,
+    "trecho": "const entries = await withCrossTenantAccess(() =>\n    prisma.auditLog.findMany({ where: { hash: { not: null } }, ..."
+   },
+   {
+    "arquivo": "backend/src/routes/audit.ts",
+    "linha": 26,
+    "trecho": "router.get(\"/verify-integrity\", requireRole(\"ADMIN\", \"ANALYST\"), async (_req, res) => {\n  const result = await verifyAuditChain();"
+   }
+  ],
+  "cenario": "Com dois controladores na plataforma: o ANALYST do tenant B chama GET /api/audit-logs/verify-integrity e recebe 'checked' com o total de entradas de auditoria de todos os tenants e, em caso de quebra, id e createdAt de uma linha que pode ser de outro controlador. Quando o controlador B sai da plataforma e o operador elimina os dados dele (inclusive AuditLog, que guarda e-mail de usuário em CREATE_USER), a cadeia quebra no primeiro registro removido e a verificação da TopConta passa a responder valid:false para sempre: a prova de integridade do log de um controlador (art. 6º, X) fica refém da eliminação legítima de dados de outro.",
+  "papel": "operador",
+  "correcao": "Particionar a cadeia por tenant: getLastAuditHash(tenantId) filtrando por tenantId (sem withCrossTenantAccess) em middleware/audit.ts e services/auditIntegrity.ts, e verifyAuditChain(tenantId) chamado com req.user.tenantId em routes/audit.ts. Migração: recomeçar a cadeia por tenant a partir de uma entrada-âncora que registre o último hash global.",
+  "tipo": "codigo",
+  "multi_tenant": "Cadeia de integridade do AuditLog por Tenant.",
+  "severidade_original": "baixa",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "A cadeia é global: auditIntegrity.ts:7-9, e getLastAuditHash (:48-57) e verifyAuditChain (:65-71) usam withCrossTenantAccess sem filtro de tenant. audit.ts:26-28 chama verifyAuditChain() sem tenantId, e a resposta traz checked e brokenAt.id/createdAt de qualquer tenant. logAudit encadeia com o último hash global (middleware/audit.ts:14). Apagar registros de outro tenant quebra a verificação para todos. O dado exposto é só metadado, então baixa está correta.",
+  "tambem": []
+ }
+]
