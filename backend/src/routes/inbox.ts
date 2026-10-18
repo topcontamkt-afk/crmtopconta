@@ -10,7 +10,7 @@ import { isSendableTemplate, previewTemplateFor, sendReply, sendTemplateReply } 
 import { SendError, OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
 import { accessTokenFor, credentialsOf } from "../services/whatsappAccount";
 import { janelaAte } from "../services/whatsappPayload";
-import { AUTO_REPLY_JANELA_MS, AUTO_REPLY_MAX, AUTO_REPLY_PADRAO, autoReplyTextOf } from "../services/whatsappAutoReply";
+import { AUTO_REPLY_JANELA_MS, AUTO_REPLY_MAX, autoReplyPadraoDo, autoReplyTextOf } from "../services/whatsappAutoReply";
 
 /**
  * Inbox do WhatsApp (Fase 1): lista de conversas e histórico de mensagens recebidas. Leitura e
@@ -56,15 +56,22 @@ router.get("/resumo", async (req, res) => {
   });
 });
 
+/** Dados do controlador deste tenant usados no texto padrão da resposta automática (LGPD 02-08). */
+function controladorDo(tenantId: string) {
+  return prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true, controladorNome: true, encarregadoNome: true, encarregadoContato: true } });
+}
+
 /** GET /api/inbox/auto-reply — configuração da resposta automática da conta ativa. */
 router.get("/auto-reply", async (req, res) => {
   const { tenantId } = req.user!;
   const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: "META" }, orderBy: { createdAt: "asc" } });
   if (!account) return res.status(404).json({ error: "WhatsApp não conectado" });
+  const controlador = await controladorDo(tenantId);
   res.json({
     ativa: account.autoReplyEnabled,
-    texto: autoReplyTextOf(account),
-    padrao: AUTO_REPLY_PADRAO,
+    // LGPD 02-08: mostra o que de fato sai (padrão do controlador deste tenant, ou o texto próprio com a instrução de SAIR)
+    texto: autoReplyTextOf(account, controlador),
+    padrao: autoReplyPadraoDo(controlador),
     personalizado: !!account.autoReplyText?.trim(),
     maximo: AUTO_REPLY_MAX,
     janelaHoras: AUTO_REPLY_JANELA_MS / 3600_000,
@@ -84,7 +91,7 @@ router.put("/auto-reply", requireRole("ADMIN"), async (req, res) => {
   if (parsed.data.ativa && !texto) return res.status(400).json({ error: "Escreva a mensagem da resposta automática." });
   await prisma.whatsAppAccount.update({
     where: { id: account.id },
-    data: { autoReplyEnabled: parsed.data.ativa, autoReplyText: !texto || texto === AUTO_REPLY_PADRAO ? null : texto },
+    data: { autoReplyEnabled: parsed.data.ativa, autoReplyText: !texto || texto === autoReplyPadraoDo(await controladorDo(tenantId)) ? null : texto },
   });
   await logAudit({ tenantId, userId: req.user!.id, action: "WHATSAPP_AUTO_REPLY_UPDATE", target: "WhatsAppAccount", targetId: account.id, details: { ativa: parsed.data.ativa } });
   res.json({ ok: true });

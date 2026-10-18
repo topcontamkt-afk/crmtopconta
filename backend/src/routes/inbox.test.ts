@@ -3,6 +3,8 @@ import request from "supertest";
 
 const db = {
   conversation: { count: jest.fn(async () => 2), findFirst: jest.fn(), findMany: jest.fn(async (_a: any) => [] as any[]) },
+  whatsAppAccount: { findFirst: jest.fn(), update: jest.fn(async () => ({})) },
+  tenant: { findUnique: jest.fn() },
 };
 jest.mock("../config/db", () => ({ prisma: db }));
 jest.mock("../middleware/auth", () => ({
@@ -76,5 +78,28 @@ describe("LGPD 02-06: conversa da Z-API segue a janela de 24h", () => {
     const where = db.conversation.findMany.mock.calls[0][0].where;
     expect(where.OR).toBeUndefined();
     expect(where.lastInboundAt.gte).toBeInstanceOf(Date);
+  });
+});
+
+describe("LGPD 02-08: resposta automática mostra o texto do controlador deste tenant", () => {
+  beforeEach(() => {
+    db.whatsAppAccount.findFirst.mockResolvedValue({ id: "wa1", autoReplyEnabled: true, autoReplyText: null });
+    db.tenant.findUnique.mockResolvedValue({ name: "T", controladorNome: "Empresa X", encarregadoNome: "Ana", encarregadoContato: "dpo@x.com" });
+  });
+
+  it("GET devolve o padrão com o controlador e a instrução de SAIR, sem o telefone fixo antigo", async () => {
+    const r = await request(app).get("/inbox/auto-reply");
+    expect(r.status).toBe(200);
+    expect(r.body.padrao).toContain("Empresa X");
+    expect(r.body.padrao).toContain("dpo@x.com");
+    expect(r.body.texto).toBe(r.body.padrao);
+    expect(r.body.texto).toMatch(/SAIR/);
+    expect(db.tenant.findUnique.mock.calls[0][0].where).toEqual({ id: "t1" });
+  });
+
+  it("PUT com o texto igual ao padrão do controlador grava nulo (segue o padrão se a config mudar)", async () => {
+    const g = await request(app).get("/inbox/auto-reply");
+    await request(app).put("/inbox/auto-reply").send({ ativa: true, texto: g.body.padrao });
+    expect((db.whatsAppAccount.update.mock.calls as any[])[0][0].data).toEqual({ autoReplyEnabled: true, autoReplyText: null });
   });
 });

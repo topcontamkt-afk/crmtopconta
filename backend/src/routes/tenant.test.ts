@@ -48,7 +48,7 @@ beforeEach(() => {
   db.tenant.update.mockImplementation(async ({ data }: any) => ({ ...atual, ...data }));
   // vencidos: 100 com o prazo atual; 250 com prazo menor
   db.client.count.mockImplementation(async ({ where }: any) => {
-    const cutoff: Date = where.OR[0].dataUltimaUtilizacao.lte;
+    const cutoff: Date = where.AND[0].OR[0].dataUltimaUtilizacao.lte;
     return Date.now() - cutoff.getTime() > 1000 * 86_400_000 ? 100 : 250;
   });
 });
@@ -136,6 +136,9 @@ describe("LGPD 04-07: prazo de retenção com limites, fundamento e prévia", ()
     const agora = new Date("2026-10-18T00:00:00Z");
     const w: any = vencidosWhere("t1", 30, agora);
     expect(w).toMatchObject({ tenantId: "t1", anonymizedAt: null });
-    expect(w.OR[0].dataUltimaUtilizacao.lte).toEqual(new Date("2026-09-18T00:00:00Z"));
+    expect(w.AND[0].OR[0].dataUltimaUtilizacao.lte).toEqual(new Date("2026-09-18T00:00:00Z"));
+    // é o MESMO where do job (services/retention.ts), inclusive uso real e mensagem recebida
+    const { inativosWhere } = jest.requireActual("../services/retention");
+    expect(w).toEqual(inativosWhere("t1", new Date("2026-09-18T00:00:00Z")));
   });
 });

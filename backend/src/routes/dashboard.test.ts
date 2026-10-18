@@ -32,6 +32,9 @@ describe("LGPD 01-04: GET /dashboard/engajamento (aniversariantes)", () => {
     expect(JSON.stringify(r.body)).not.toContain("+5584999998888");
     const listaSql = rawQuery.mock.calls.map((c) => c[0] as string).find((s) => s.includes("LIMIT 100"))!;
     expect(listaSql).toContain('"bloqueadoLgpdAt" IS NULL');
+    expect(listaSql).toContain('"anonymizedAt" IS NULL');
+    // LGPD 03-04 / 04-01: todas as consultas de clientes da tela excluem bloqueados e anonimizados
+    for (const [sql] of rawQuery.mock.calls as any[]) if (/FROM "Client"/.test(sql)) expect(sql).toContain('"anonymizedAt" IS NULL AND "bloqueadoLgpdAt" IS NULL');
     const a = (logAudit as jest.Mock).mock.calls[0][0];
     expect(a).toMatchObject({ action: "READ_ANIVERSARIANTES", details: { quantidade: 1 } });
     expect(JSON.stringify(a)).not.toContain("Maria");

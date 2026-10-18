@@ -398,6 +398,22 @@ const RESIDUO_WHERE: Prisma.ClientWhereInput = {
  *  - clientes anonimizados pela versão antiga com sobra de dado pessoal (LGPD 04-01);
  *  - contatos de lista manual fora da base, Inbox e mídia (LGPD 04-02) e estado de desfazer (LGPD 04-04).
  */
+/**
+ * Cliente vencido por inatividade: sem uso (planilha e extrato) nem mensagem recebida desde `cutoff`. Usado pelo
+ * job e pela prévia de Configurações → LGPD (routes/tenant.ts), para a prévia contar exatamente o que o job apagaria.
+ */
+export function inativosWhere(tenantId: string, cutoff: Date): Prisma.ClientWhereInput {
+  return {
+    tenantId,
+    anonymizedAt: null,
+    AND: [
+      { OR: [{ dataUltimaUtilizacao: { lte: cutoff } }, { AND: [{ dataUltimaUtilizacao: null }, { createdAt: { lte: cutoff } }] }] },
+      { OR: [{ ultimoUsoReal: null }, { ultimoUsoReal: { lte: cutoff } }] },
+      { conversations: { none: { lastInboundAt: { gt: cutoff } } } },
+    ],
+  };
+}
+
 export async function runRetentionSweep(prisma: AppPrismaClient, agora = new Date()) {
   // Genuinely cross-tenant by design: varre todos os tenants pra achar quem tem sweep de
   // retenção a fazer. Cada tenant é re-escopado abaixo via runWithTenantContextAsync.
@@ -431,15 +447,7 @@ export async function runRetentionSweep(prisma: AppPrismaClient, agora = new Dat
       };
 
       const inativos = await prisma.client.findMany({
-        where: {
-          tenantId: tenant.id,
-          anonymizedAt: null,
-          AND: [
-            { OR: [{ dataUltimaUtilizacao: { lte: cutoff } }, { AND: [{ dataUltimaUtilizacao: null }, { createdAt: { lte: cutoff } }] }] },
-            { OR: [{ ultimoUsoReal: null }, { ultimoUsoReal: { lte: cutoff } }] },
-            { conversations: { none: { lastInboundAt: { gt: cutoff } } } },
-          ],
-        },
+        where: inativosWhere(tenant.id, cutoff),
         select: { id: true },
         take: RETENCAO_LOTE,
       });

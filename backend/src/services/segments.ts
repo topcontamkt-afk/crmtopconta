@@ -192,7 +192,10 @@ export const INATIVOS_FILTERS: SegmentGroup = {
  * O `buildSegmentWhere` não exclui o bloqueio por conta própria: a listagem de clientes usa o mesmo
  * builder e mostra bloqueados quando pedido (routes/clients.ts aplicarBloqueio).
  */
-export const ENVIAVEL_WHERE: Prisma.ClientWhereInput = { limiteTotal: { gt: 0 }, bloqueadoLgpdAt: null };
+// LGPD 03-04 / 04-06 / 04-01: suspenso a pedido, conta encerrada (sai de todo uso comercial, decisão 4 da triagem) e
+// cliente anonimizado nunca entram em público de envio. Só chaves de topo que nenhum filtro de segmento usa no topo:
+// o filtro `contaEncerrada` fica dentro de AND, então um segmento de encerrados simplesmente não tem quem receber.
+export const ENVIAVEL_WHERE: Prisma.ClientWhereInput = { limiteTotal: { gt: 0 }, bloqueadoLgpdAt: null, encerradoEm: null, anonymizedAt: null };
 
 /** Saldo disponível mínimo (R$) para considerar que o cliente "tem saldo" (podia usar). */
 export const SALDO_MINIMO_ELEGIVEL = 10;

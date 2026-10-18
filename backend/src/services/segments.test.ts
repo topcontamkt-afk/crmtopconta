@@ -107,8 +107,15 @@ describe("LGPD 01-03: renda só como estatística, fora do público", () => {
     expect(where.AND[0]).toEqual({ saldoDisponivel: { gte: 10 } });
   });
 
-  it("ENVIAVEL_WHERE exclui quem não tem limite (comércio credenciado) e o tratamento bloqueado (LGPD 03-04)", () => {
-    expect(ENVIAVEL_WHERE).toEqual({ limiteTotal: { gt: 0 }, bloqueadoLgpdAt: null });
+  it("ENVIAVEL_WHERE exclui sem limite, bloqueado (03-04), encerrado (04-06) e anonimizado (04-01)", () => {
+    expect(ENVIAVEL_WHERE).toEqual({ limiteTotal: { gt: 0 }, bloqueadoLgpdAt: null, encerradoEm: null, anonymizedAt: null });
+  });
+
+  it("ENVIAVEL_WHERE não sobrescreve o filtro de segmento ao ser espalhado (só chaves de topo livres)", () => {
+    const where = buildSegmentWhere("t1", { contaEncerrada: true, cidades: ["Natal"] } as any);
+    const merged = { ...where, ...ENVIAVEL_WHERE };
+    for (const k of Object.keys(ENVIAVEL_WHERE)) expect(where).not.toHaveProperty(k);
+    expect(merged).toMatchObject({ tenantId: "t1", encerradoEm: null });
   });
 });
 

@@ -6,6 +6,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { BASES_LEGAIS } from "../services/baseLegal";
 import { mencionaOptOut, montarRodape } from "../services/templateVariables";
+import { inativosWhere } from "../services/retention";
 
 const router = Router();
 router.use(requireAuth);
@@ -115,12 +116,8 @@ const lgpdSchema = z
 
 /** Clientes que a rotina de retenção anonimizaria com o prazo `dias` (mesmo critério de services/retention.ts). */
 export function vencidosWhere(tenantId: string, dias: number, agora = new Date()): Prisma.ClientWhereInput {
-  const cutoff = new Date(agora.getTime() - dias * 86_400_000);
-  return {
-    tenantId,
-    anonymizedAt: null,
-    OR: [{ dataUltimaUtilizacao: { lte: cutoff } }, { AND: [{ dataUltimaUtilizacao: null }, { createdAt: { lte: cutoff } }] }],
-  };
+  // mesmo critério do job de retenção (services/retention.ts), para a prévia não divergir do que será apagado
+  return inativosWhere(tenantId, new Date(agora.getTime() - dias * 86_400_000));
 }
 
 /** Prévia: quantos clientes já estão vencidos com o prazo atual e quantos ficariam com o novo (só contagem). */

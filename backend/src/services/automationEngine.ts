@@ -9,6 +9,7 @@ import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tena
 import { cidadeKey } from "./cidades";
 import { diasAberturaNaFaixa } from "./ciclos";
 import { CONTATO_LIBERADO_WHERE, semSuprimidos } from "./privacy";
+import { baseLegalVigente, SEM_BASE_LEGAL } from "./baseLegal";
 
 /**
  * Motor de automação (Fase 2): avalia periodicamente as AutomationRule ativas de cada tenant
@@ -217,6 +218,22 @@ async function executeAction(prisma: AppPrismaClient, tenantId: string, ruleId: 
   }
 
   if (action.type === "campaign") {
+    // LGPD 02-01: sem base legal declarada pelo controlador, a automação nem cria a campanha (a fila também barraria,
+    // mas deixaria um rascunho órfão por dia); avisa quem administra.
+    const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { baseLegalMarketing: true } });
+    const baseLegal = baseLegalVigente(tenant);
+    if (!baseLegal) {
+      await notify(prisma, {
+        tenantId,
+        type: "AUTOMATION_BLOCKED",
+        severity: "AVISO",
+        message: `Regra "${ruleName}" não disparou. ${SEM_BASE_LEGAL}`,
+        relatedType: "AutomationRule",
+        relatedId: ruleId,
+      });
+      return { executed: false, reason: "sem base legal declarada" };
+    }
+
     let messageTemplate = action.messageTemplate as string | undefined;
     if (action.templateId) {
       const template = await prisma.messageTemplate.findFirst({ where: { id: action.templateId, tenantId } });
@@ -254,6 +271,7 @@ async function executeAction(prisma: AppPrismaClient, tenantId: string, ruleId: 
         dedupeWindowHrs: action.dedupeWindowHrs || 72,
         attributionDays: action.attributionDays || 7,
         costPerMessage: action.costPerMessage || 0,
+        baseLegal,
         status: "RASCUNHO",
       },
     });

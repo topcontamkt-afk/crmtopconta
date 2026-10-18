@@ -1,4 +1,10 @@
 jest.mock("../config/db", () => ({ prisma: {}, tenantRaw: { query: jest.fn(), execute: jest.fn() } }));
+jest.mock("./notifications", () => ({ notify: jest.fn(async () => undefined) }));
+jest.mock("../middleware/audit", () => ({ logAudit: jest.fn(async () => undefined) }));
+jest.mock("./campaignQueue", () => ({
+  enqueueCampaign: jest.fn(async () => ({ queued: 2 })),
+  processQueueBatch: jest.fn(async () => ({ processed: 2, remaining: 0 })),
+}));
 
 import { runRule } from "./automationEngine";
 import { phoneHash } from "./privacy";
@@ -62,5 +68,28 @@ describe("LGPD 01-03: renda não é critério de gatilho", () => {
     const where = JSON.stringify(prisma.client.findMany.mock.calls[0][0].where);
     expect(where).not.toContain("4800");
     expect(where).toContain('"limiteTotal":{"gt":0}');
+  });
+});
+
+describe("LGPD 02-01: automação de campanha confere a base legal", () => {
+  const campanha = (r: any) => ({ ...r, action: { type: "campaign", messageTemplate: "Oi {{nome}}" } });
+
+  it("sem base legal declarada não cria campanha e avisa", async () => {
+    const prisma = fakePrisma(clients);
+    prisma.tenant.findUnique = jest.fn(async () => ({ cpfSalt: SALT, baseLegalMarketing: null }));
+    prisma.campaign = { create: jest.fn(), findFirst: jest.fn(async () => null) };
+    const r: any = await runRule(prisma, campanha(rule("INATIVO_30_DIAS")));
+    expect(prisma.campaign.create).not.toHaveBeenCalled();
+    expect(JSON.stringify(r)).toContain("sem base legal declarada");
+    const { notify } = jest.requireMock("./notifications");
+    expect(notify).toHaveBeenCalledWith(prisma, expect.objectContaining({ type: "AUTOMATION_BLOCKED" }));
+  });
+
+  it("com base legal, grava a base vigente na campanha criada", async () => {
+    const prisma = fakePrisma(clients);
+    prisma.tenant.findUnique = jest.fn(async () => ({ cpfSalt: SALT, baseLegalMarketing: "LEGITIMO_INTERESSE" }));
+    prisma.campaign = { create: jest.fn(async ({ data }: any) => ({ id: "cp1", ...data })), findFirst: jest.fn(async () => null) };
+    await runRule(prisma, campanha(rule("INATIVO_30_DIAS")));
+    expect(prisma.campaign.create.mock.calls[0][0].data.baseLegal).toBe("LEGITIMO_INTERESSE");
   });
 });
