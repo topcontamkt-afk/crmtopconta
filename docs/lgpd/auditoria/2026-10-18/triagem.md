@@ -16,5 +16,15 @@ formalizar (ver [fora-do-codigo.md](fora-do-codigo.md)).
 | 5 | Prazo geral (04-07) | Mantém 1095 dias. `Tenant.retentionBasis` obrigatório ao mudar, limites de 30 a 1825 dias, prévia do impacto. | Fundamento do prazo |
 | 6 | Correção de dados (03-03) | Correção manual trava o campo contra reimportação (`Client.camposCorrigidos`) e avisa o responsável pela planilha. Configurável por tenant. PATCH passa a aceitar telefone e e-mail normalizados. | — |
 
+**Linha de produção confirmada** (Vercel MCP, `list_deployments` target=production, 2026-10-18): os dois projetos publicam
+a partir de `claude/dreamy-brown-hvs4h6` (backend em `6fabc33`, frontend em `ae033a0`), e não da branch principal do
+git (`claude/crm-google-sheets-d5hfks`, parada em `ce578a6`). Consequências:
+- Uma PR desta branch para a principal levaria junto os 16 commits ainda não revisados (Z-API, resposta automática,
+  acesso por área, ligações).
+- Merge na `dreamy-brown` é deploy em produção imediato, e o SQL de `backend/prisma/sql/` precisa ser aplicado no
+  Supabase antes.
+
+O destino da PR de LGPD será decidido quando ela estiver pronta.
+
 Todos os achados de tipo `codigo` serão corrigidos, com teste que prove cada correção. Os de tipo
 `fora_do_codigo` ficam em [fora-do-codigo.md](fora-do-codigo.md), e os contratos são resolvidos à parte.
