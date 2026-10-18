@@ -1,5 +1,5 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { api, getToken } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 
@@ -28,6 +28,7 @@ interface Mensagem {
   midia: { mime: string | null; nomeArquivo: string | null } | null;
   status: string | null;
   erro: string | null;
+  automatica?: boolean;
   em: string;
 }
 interface Thread {
@@ -292,6 +293,74 @@ function Composer({ conversaId, janelaAberta, podeEnviar, onEnviada }: { convers
   );
 }
 
+interface AutoReplyCfg { ativa: boolean; texto: string; padrao: string; personalizado: boolean; intervaloHoras: number }
+
+/** Resposta automática: o que o cliente recebe ao escrever neste número (canal só de avisos). */
+function AutoReplyPanel({ podeEditar, onFechar }: { podeEditar: boolean; onFechar: () => void }) {
+  const [cfg, setCfg] = useState<AutoReplyCfg | null>(null);
+  const [ativa, setAtiva] = useState(true);
+  const [texto, setTexto] = useState("");
+  const [msg, setMsg] = useState<{ tipo: "ok" | "erro"; texto: string } | null>(null);
+  const [salvando, setSalvando] = useState(false);
+
+  useEffect(() => {
+    api<AutoReplyCfg>("/inbox/auto-reply")
+      .then((c) => { setCfg(c); setAtiva(c.ativa); setTexto(c.texto); })
+      .catch((e) => setMsg({ tipo: "erro", texto: textoDoErro(e) }));
+  }, []);
+
+  async function salvar() {
+    setSalvando(true);
+    setMsg(null);
+    try {
+      await api("/inbox/auto-reply", { method: "PUT", body: { ativa, texto } });
+      setMsg({ tipo: "ok", texto: "Salvo." });
+    } catch (e) {
+      setMsg({ tipo: "erro", texto: textoDoErro(e) });
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 10 }}>
+      <div className="pd-card-head">
+        <strong>Resposta automática</strong>
+        <button type="button" className="btn secondary" style={{ padding: "2px 10px" }} onClick={onFechar}>Fechar</button>
+      </div>
+      <p className="seg-hint" style={{ marginTop: 4 }}>
+        Quando um cliente escreve para este número, ele recebe esta mensagem{cfg ? ` (no máximo uma vez a cada ${cfg.intervaloHoras} horas por conversa)` : ""}. Quem pede para parar (PARAR/SAIR) não recebe.
+      </p>
+      <label style={{ display: "flex", gap: 8, alignItems: "center", margin: "8px 0" }}>
+        <input type="checkbox" checked={ativa} disabled={!podeEditar || !cfg} onChange={(e) => setAtiva(e.target.checked)} />
+        Responder automaticamente
+      </label>
+      <textarea rows={6} style={{ width: "100%", resize: "vertical" }} value={texto} maxLength={4096} disabled={!podeEditar || !cfg} onChange={(e) => setTexto(e.target.value)} />
+      <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+        {podeEditar ? (
+          <>
+            <button type="button" className="btn" disabled={salvando || !cfg} onClick={salvar}>{salvando ? "Salvando…" : "Salvar"}</button>
+            {cfg && <button type="button" className="btn secondary" onClick={() => setTexto(cfg.padrao)}>Voltar ao texto padrão</button>}
+          </>
+        ) : (
+          <span className="seg-hint">Só o administrador altera.</span>
+        )}
+        {msg && <span className={msg.tipo === "ok" ? "seg-hint" : "error-text"}>{msg.texto}</span>}
+      </div>
+    </div>
+  );
+}
+
+/** Pede permissão para avisar por notificação do navegador (só vale com a aba em segundo plano). */
+function AvisoNavegador() {
+  const suportado = typeof window !== "undefined" && "Notification" in window;
+  const [perm, setPerm] = useState<NotificationPermission>(suportado ? Notification.permission : "denied");
+  if (!suportado || perm !== "default") return null;
+  return (
+    <button type="button" className="btn secondary" onClick={() => Notification.requestPermission().then(setPerm)}>🔔 Ativar avisos no navegador</button>
+  );
+}
+
 const MIDIA_ROTULO: Record<string, string> = { image: "📷 Imagem", audio: "🎤 Áudio", video: "🎬 Vídeo", document: "📄 Documento", sticker: "Figurinha" };
 
 function tempoRestante(iso: string | null): string {
@@ -305,12 +374,14 @@ function tempoRestante(iso: string | null): string {
 
 export default function Inbox() {
   const { user } = useAuth();
-    const [status, setStatus] = useState<Status | null>(null);
+  const location = useLocation();
+  const [mostrarAuto, setMostrarAuto] = useState(false);
+  const [status, setStatus] = useState<Status | null>(null);
   const [filtro, setFiltro] = useState<"todas" | "nao_lidas" | "janela_aberta" | "sem_cliente">("todas");
   const [busca, setBusca] = useState("");
   const [conversas, setConversas] = useState<Conversa[]>([]);
   const [naoLidas, setNaoLidas] = useState(0);
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useState<string | null>((location.state as { conversaId?: string } | null)?.conversaId ?? null);
   const [thread, setThread] = useState<Thread | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [imagemAberta, setImagemAberta] = useState<string | null>(null);
@@ -388,11 +459,16 @@ export default function Inbox() {
   const restante = thread ? tempoRestante(thread.conversa.janelaAte) : "";
 
   return (
-    <div>
-      <div className="pd-card-head" style={{ marginBottom: 8 }}>
+    <div className="inbox-page">
+      <div className="pd-card-head">
         <h2 style={{ margin: 0 }}>Inbox do WhatsApp {naoLidas > 0 && <span className="inbox-badge">{naoLidas}</span>}</h2>
-        <Link to="/integrations" className="btn secondary" style={{ textDecoration: "none" }}>Conexão com a Meta</Link>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <AvisoNavegador />
+          <button type="button" className="btn secondary" onClick={() => setMostrarAuto((v) => !v)}>Resposta automática</button>
+          <Link to="/integrations" className="btn secondary" style={{ textDecoration: "none" }}>Conexão com a Meta</Link>
+        </div>
       </div>
+      {mostrarAuto && <AutoReplyPanel podeEditar={user?.role === "ADMIN"} onFechar={() => setMostrarAuto(false)} />}
       {!status.config.appSecret && (
         <div className="card" style={{ borderLeft: "4px solid var(--warning)", marginBottom: 10, fontSize: 13 }}>
           O App Secret não está configurado: as mensagens dos clientes são ignoradas até você informá-lo em Integrações → WhatsApp.
@@ -464,7 +540,8 @@ export default function Inbox() {
               </div>
               <div className="inbox-msgs">
                 {thread.mensagens.map((m) => (
-                  <div key={m.id} className={`bubble ${m.direcao === "ENTRADA" ? "in" : "out"}`}>
+                  <div key={m.id} className={`bubble ${m.direcao === "ENTRADA" ? "in" : "out"}${m.automatica ? " auto" : ""}`}>
+                    {m.automatica && <span className="auto-tag">🤖 Resposta automática</span>}
                     {m.midia && <Midia m={m} onAbrirImagem={setImagemAberta} />}
                     {m.texto && <div>{m.texto}</div>}
                     {!m.texto && !m.midia && <em style={{ color: "var(--text-muted)" }}>[{m.tipo}]</em>}

@@ -41,6 +41,7 @@ import Settings from "./pages/Settings";
 import Account from "./pages/Account";
 import Users from "./pages/Users";
 import NotificationBell from "./components/NotificationBell";
+import InboxAlerts from "./components/InboxAlerts";
 import { SidebarNav, type NavGroupData, type NavItemData } from "./components/ui/dashboard-sidebar";
 
 // Carregado sob demanda: é a única tela que usa a lib de gráficos (recharts), que sozinha
@@ -191,6 +192,7 @@ function Layout({ children }: { children: JSX.Element }) {
             </button>
           </div>
         )}
+        <InboxAlerts />
         <div className="topbar">
           <div />
           <div style={{ display: "flex", alignItems: "center" }}>

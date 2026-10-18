@@ -707,6 +707,10 @@ model WhatsAppAccount {
   lastCheckAt      DateTime?
   lastCheckOk      Boolean?
   lastCheckMessage String?
+  // Resposta automática a quem escreve neste número (canal só de avisos: manda o cliente ao suporte).
+  // Texto nulo = usa o padrão de services/whatsappAutoReply.ts.
+  autoReplyEnabled Boolean   @default(true)
+  autoReplyText    String?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
@@ -718,23 +722,24 @@ model WhatsAppAccount {
 /// Uma conversa por (número nosso, número do cliente). `clientId` é nulo quando o telefone não
 /// bate com nenhum cliente da base. A janela de 24 horas conta a partir de `lastInboundAt`.
 model Conversation {
-  id             String             @id @default(uuid())
-  tenantId       String
-  tenant         Tenant             @relation(fields: [tenantId], references: [id])
-  accountId      String
-  account        WhatsAppAccount    @relation(fields: [accountId], references: [id])
-  clientId       String?
-  client         Client?            @relation(fields: [clientId], references: [id])
-  waId           String // telefone do cliente como a Meta informa (só dígitos, com DDI)
-  contactName    String? // nome do perfil do WhatsApp
-  status         ConversationStatus @default(ABERTA)
-  lastMessageAt  DateTime
-  lastInboundAt  DateTime?
-  lastPreview    String?
-  unreadCount    Int                @default(0)
-  assignedUserId String?
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
+  id              String             @id @default(uuid())
+  tenantId        String
+  tenant          Tenant             @relation(fields: [tenantId], references: [id])
+  accountId       String
+  account         WhatsAppAccount    @relation(fields: [accountId], references: [id])
+  clientId        String?
+  client          Client?            @relation(fields: [clientId], references: [id])
+  waId            String // telefone do cliente como a Meta informa (só dígitos, com DDI)
+  contactName     String? // nome do perfil do WhatsApp
+  status          ConversationStatus @default(ABERTA)
+  lastMessageAt   DateTime
+  lastInboundAt   DateTime?
+  lastPreview     String?
+  unreadCount     Int                @default(0)
+  lastAutoReplyAt DateTime? // última resposta automática enviada (limita a 1 a cada poucas horas)
+  assignedUserId  String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
 
   messages WaMessage[]
 
@@ -758,6 +763,7 @@ model WaMessage {
   mediaFilename  String?
   status         String? // só saída: sent | delivered | read | failed
   sentByUserId   String? // quem respondeu (só saída)
+  automatic      Boolean      @default(false) // resposta automática do sistema (sem usuário)
   errorText      String?
   timestamp      DateTime // horário da mensagem segundo a Meta
   createdAt      DateTime     @default(now())

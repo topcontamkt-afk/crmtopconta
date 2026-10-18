@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { logAudit } from "../middleware/audit";
 import { maskPhone } from "../services/masking";
 import { classificarPerfil } from "../services/rendaPerfil";
 import { getOrCacheMessageMedia, isInlineSafeMime, MediaError, MEDIA_MAX_BYTES } from "../services/whatsappMedia";
@@ -9,6 +10,7 @@ import { isSendableTemplate, previewTemplateFor, sendReply, sendTemplateReply } 
 import { SendError, OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
 import { accessTokenFor, credentialsOf } from "../services/whatsappAccount";
 import { janelaAte } from "../services/whatsappPayload";
+import { AUTO_REPLY_COOLDOWN_MS, AUTO_REPLY_PADRAO, autoReplyTextOf } from "../services/whatsappAutoReply";
 
 /**
  * Inbox do WhatsApp (Fase 1): lista de conversas e histórico de mensagens recebidas. Leitura e
@@ -26,6 +28,61 @@ router.get("/status", async (req, res) => {
     account: account ? { id: account.id, phoneNumberId: account.phoneNumberId, displayName: account.displayName, displayPhone: account.displayPhone } : null,
     config: { appSecret: !!cred.appSecret, accessToken: !!cred.accessToken },
   });
+});
+
+/**
+ * GET /api/inbox/resumo — leve, para o aviso de mensagem nova que roda em qualquer tela: quantas
+ * conversas têm mensagem não lida e qual foi a última a chegar (o front compara com o que já viu).
+ */
+router.get("/resumo", async (req, res) => {
+  const { tenantId } = req.user!;
+  const [naoLidas, ultima] = await Promise.all([
+    prisma.conversation.count({ where: { tenantId, status: "ABERTA", unreadCount: { gt: 0 } } }),
+    prisma.conversation.findFirst({
+      where: { tenantId, status: "ABERTA", unreadCount: { gt: 0 }, lastInboundAt: { not: null } },
+      orderBy: { lastInboundAt: "desc" },
+      include: { client: { select: { nome: true } } },
+    }),
+  ]);
+  res.json({
+    naoLidas,
+    ultima: ultima
+      ? { id: ultima.id, nome: ultima.client?.nome ?? ultima.contactName ?? "Contato sem cadastro", preview: ultima.lastPreview, em: ultima.lastInboundAt!.toISOString() }
+      : null,
+  });
+});
+
+/** GET /api/inbox/auto-reply — configuração da resposta automática da conta ativa. */
+router.get("/auto-reply", async (req, res) => {
+  const { tenantId } = req.user!;
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+  if (!account) return res.status(404).json({ error: "WhatsApp não conectado" });
+  res.json({
+    ativa: account.autoReplyEnabled,
+    texto: autoReplyTextOf(account),
+    padrao: AUTO_REPLY_PADRAO,
+    personalizado: !!account.autoReplyText?.trim(),
+    intervaloHoras: AUTO_REPLY_COOLDOWN_MS / 3600_000,
+  });
+});
+
+const autoReplySchema = z.object({ ativa: z.boolean(), texto: z.string().max(4096) });
+
+/** PUT /api/inbox/auto-reply (ADMIN) — liga/desliga e troca o texto; texto igual ao padrão ou vazio volta ao padrão. */
+router.put("/auto-reply", requireRole("ADMIN"), async (req, res) => {
+  const parsed = autoReplySchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Dados inválidos" });
+  const { tenantId } = req.user!;
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+  if (!account) return res.status(404).json({ error: "WhatsApp não conectado" });
+  const texto = parsed.data.texto.trim();
+  if (parsed.data.ativa && !texto) return res.status(400).json({ error: "Escreva a mensagem da resposta automática." });
+  await prisma.whatsAppAccount.update({
+    where: { id: account.id },
+    data: { autoReplyEnabled: parsed.data.ativa, autoReplyText: !texto || texto === AUTO_REPLY_PADRAO ? null : texto },
+  });
+  await logAudit({ tenantId, userId: req.user!.id, action: "WHATSAPP_AUTO_REPLY_UPDATE", target: "WhatsAppAccount", targetId: account.id, details: { ativa: parsed.data.ativa } });
+  res.json({ ok: true });
 });
 
 const listQuery = z.object({
@@ -137,6 +194,7 @@ router.get("/conversations/:id/messages", async (req, res) => {
       midia: m.mediaId ? { mime: m.mediaMime, nomeArquivo: m.mediaFilename } : null,
       status: m.status,
       erro: m.errorText,
+      automatica: m.automatic,
       em: m.timestamp.toISOString(),
     })),
     temMais: mensagens.length === q.data.limite,
@@ -162,6 +220,7 @@ const presentMessage = (m: any) => ({
   midia: m.mediaId ? { mime: m.mediaMime, nomeArquivo: m.mediaFilename } : null,
   status: m.status,
   erro: m.errorText,
+  automatica: m.automatic,
   em: m.timestamp.toISOString(),
 });
 

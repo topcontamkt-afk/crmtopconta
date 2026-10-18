@@ -17,6 +17,7 @@ import { nextEventStatus } from "../services/whatsappPayload";
 import { applyOutboundStatus } from "../services/whatsappReply";
 import { getOrCacheMessageMedia } from "../services/whatsappMedia";
 import { storeInboundMessage } from "../services/whatsappInbox";
+import { maybeAutoReply } from "../services/whatsappAutoReply";
 import { verifyTwilioSignature, verifyWhatsAppSignature } from "../services/webhookAuth";
 import { webhookLimiter } from "../middleware/rateLimit";
 
@@ -386,6 +387,8 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
                 console.warn(`[webhooks/whatsapp] mídia ${m.mediaId} não guardada agora: ${e.message}`)
               );
             }
+            // Canal só de avisos: manda o cliente ao suporte (uma vez por conversa a cada poucas horas).
+            await maybeAutoReply(prisma, account.tenantId, account, r);
           });
         } catch (e) {
           console.error("[webhooks/whatsapp] falha ao gravar mensagem recebida:", e);

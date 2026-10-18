@@ -1,0 +1,105 @@
+import { AUTO_REPLY_COOLDOWN_MS, AUTO_REPLY_PADRAO, autoReplyTextOf, maybeAutoReply, shouldAutoReply } from "./whatsappAutoReply";
+
+const conta = { id: "a1", phoneNumberId: "pn1", autoReplyEnabled: true, autoReplyText: null, credentials: null };
+const ok = (wamid = "wamid.AUTO") => jest.fn(async () => ({ ok: true, json: async () => ({ messages: [{ id: wamid }] }) }));
+
+function fakePrisma(opts: { reservar?: number } = {}) {
+  return {
+    conversation: {
+      updateMany: jest.fn(async () => ({ count: opts.reservar ?? 1 })),
+      findFirst: jest.fn(async () => ({ id: "c1", waId: "5579999990000" })),
+      update: jest.fn(async () => ({})),
+    },
+    waMessage: { create: jest.fn(async () => ({})) },
+  } as any;
+}
+
+describe("texto da resposta automática", () => {
+  it("usa o padrão quando a conta não tem texto próprio", () => {
+    expect(autoReplyTextOf({ autoReplyText: null })).toBe(AUTO_REPLY_PADRAO);
+    expect(autoReplyTextOf({ autoReplyText: "   " })).toBe(AUTO_REPLY_PADRAO);
+    expect(AUTO_REPLY_PADRAO).toContain("(79) 99837-2540");
+  });
+  it("usa o texto da conta quando existe", () => {
+    expect(autoReplyTextOf({ autoReplyText: " Fale com o suporte " })).toBe("Fale com o suporte");
+  });
+});
+
+describe("shouldAutoReply", () => {
+  it("responde mensagem nova de quem não pediu descadastro", () => {
+    expect(shouldAutoReply({ autoReplyEnabled: true }, { stored: true, optedOut: false })).toBe(true);
+  });
+  it("não responde se estiver desligada, duplicada (reenvio da Meta) ou descadastro", () => {
+    expect(shouldAutoReply({ autoReplyEnabled: false }, { stored: true, optedOut: false })).toBe(false);
+    expect(shouldAutoReply({ autoReplyEnabled: true }, { stored: false, optedOut: false })).toBe(false);
+    expect(shouldAutoReply({ autoReplyEnabled: true }, { stored: true, optedOut: true })).toBe(false);
+  });
+});
+
+describe("maybeAutoReply", () => {
+  const inbound = { stored: true, optedOut: false, conversationId: "c1" };
+
+  it("envia o texto padrão e grava a saída marcada como automática", async () => {
+    const prisma = fakePrisma();
+    const fetchImpl = ok();
+    expect(await maybeAutoReply(prisma, "t1", { ...conta, credentials: null }, inbound, { fetchImpl })).toBe(false); // sem token: não envia
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    process.env.WHATSAPP_ACCESS_TOKEN = "tok";
+    try {
+      expect(await maybeAutoReply(fakePrisma(), "t1", conta, inbound, { fetchImpl })).toBe(true);
+      const body = JSON.parse((fetchImpl.mock.calls[0] as any)[1].body);
+      expect(body.to).toBe("5579999990000");
+      expect(body.text.body).toBe(AUTO_REPLY_PADRAO);
+    } finally {
+      delete process.env.WHATSAPP_ACCESS_TOKEN;
+    }
+  });
+
+  it("grava WaMessage SAIDA automática e não zera o não lido", async () => {
+    process.env.WHATSAPP_ACCESS_TOKEN = "tok";
+    try {
+      const prisma = fakePrisma();
+      await maybeAutoReply(prisma, "t1", conta, inbound, { fetchImpl: ok("wamid.X") });
+      const data = prisma.waMessage.create.mock.calls[0][0].data;
+      expect(data).toMatchObject({ direction: "SAIDA", wamid: "wamid.X", automatic: true, status: "sent", conversationId: "c1" });
+      expect(data.sentByUserId).toBeUndefined();
+      const upd = prisma.conversation.update.mock.calls[0][0].data;
+      expect(upd.unreadCount).toBeUndefined();
+    } finally {
+      delete process.env.WHATSAPP_ACCESS_TOKEN;
+    }
+  });
+
+  it("respeita o intervalo: se a trava não reserva, não envia", async () => {
+    process.env.WHATSAPP_ACCESS_TOKEN = "tok";
+    try {
+      const prisma = fakePrisma({ reservar: 0 });
+      const fetchImpl = ok();
+      expect(await maybeAutoReply(prisma, "t1", conta, inbound, { fetchImpl })).toBe(false);
+      expect(fetchImpl).not.toHaveBeenCalled();
+      const now = new Date("2026-10-18T12:00:00Z");
+      await maybeAutoReply(fakePrisma(), "t1", conta, inbound, { fetchImpl: ok(), now });
+      const prisma2 = fakePrisma();
+      await maybeAutoReply(prisma2, "t1", conta, inbound, { fetchImpl: ok(), now });
+      const where = prisma2.conversation.updateMany.mock.calls[0][0].where;
+      expect(where.OR[1].lastAutoReplyAt.lt).toEqual(new Date(now.getTime() - AUTO_REPLY_COOLDOWN_MS));
+    } finally {
+      delete process.env.WHATSAPP_ACCESS_TOKEN;
+    }
+  });
+
+  it("se a Meta recusar, libera a trava e não grava mensagem", async () => {
+    process.env.WHATSAPP_ACCESS_TOKEN = "tok";
+    try {
+      const prisma = fakePrisma();
+      const fetchImpl = jest.fn(async () => ({ ok: false, status: 400, json: async () => ({ error: { message: "boom", code: 100 } }) }));
+      const now = new Date("2026-10-18T12:00:00Z");
+      expect(await maybeAutoReply(prisma, "t1", conta, inbound, { fetchImpl: fetchImpl as any, now })).toBe(false);
+      expect(prisma.waMessage.create).not.toHaveBeenCalled();
+      expect(prisma.conversation.updateMany).toHaveBeenLastCalledWith({ where: { id: "c1", tenantId: "t1", lastAutoReplyAt: now }, data: { lastAutoReplyAt: null } });
+    } finally {
+      delete process.env.WHATSAPP_ACCESS_TOKEN;
+    }
+  });
+});
