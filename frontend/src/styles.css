@@ -850,6 +850,10 @@ input, select, textarea {
 .pd-opp-text { flex: 1 1 180px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .pd-opp-text strong { font-size: 14px; }
 .pd-opp-text span { color: var(--text-muted); font-size: 12.5px; }
+.pd-pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 14px; }
+.pd-pager-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pd-pager-ctl .btn { padding: 4px 10px; }
+.pd-pager-ctl select { padding: 3px 6px; }
 .pd-opp .btn { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; }
 
 .pd-health { display: flex; align-items: center; gap: 18px; margin-top: 10px; }

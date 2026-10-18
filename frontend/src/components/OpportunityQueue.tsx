@@ -45,7 +45,8 @@ const tipoDaFaixa = (key: string) => (key === "uso_0" ? "semUso" : key);
 
 /**
  * Fila de oportunidades: faixas de uso do limite (0%, 1-10, 11-20, 21-30, 31-50, 51-70, 71-99 e 100%) + públicos de ativação, comércio
- * e relacionamento prontos para campanha, itens de qualidade de dados e os que dependem de histórico.
+ * e relacionamento prontos para campanha, itens de qualidade de dados e os que dependem de histórico. A lista "Todas as oportunidades"
+ * é paginada no navegador (6 por página, ou 12/todas), voltando à página 1 ao trocar de grupo.
  * Tudo vem de GET /api/dashboard/oportunidades (dados reais); "Criar campanha" abre o assistente com
  * o público e a mensagem sugerida já preenchidos.
  */
@@ -56,6 +57,8 @@ export default function OpportunityQueue({ cidade, convenio }: { cidade: string;
   const [banda, setBanda] = useState("uso_100");
   const [grupo, setGrupo] = useState("todas");
   const [criando, setCriando] = useState<string | null>(null);
+  const [pagina, setPagina] = useState(1);
+  const [porPagina, setPorPagina] = useState(6); // 0 = todas
 
   const load = useCallback(() => {
     const qs = new URLSearchParams();
@@ -105,7 +108,11 @@ export default function OpportunityQueue({ cidade, convenio }: { cidade: string;
   const faixasComUso = data.faixas.filter((b) => b.n > 0);
   const atual = data.faixas.find((b) => b.key === banda) ?? data.faixas[data.faixas.length - 1];
   const grupos = ["todas", ...Array.from(new Set(data.itens.map((i) => i.grupo)))];
-  const itens = data.itens.filter((i) => grupo === "todas" || i.grupo === grupo);
+  const filtrados = data.itens.filter((i) => grupo === "todas" || i.grupo === grupo);
+  const totalPaginas = porPagina === 0 ? 1 : Math.max(1, Math.ceil(filtrados.length / porPagina));
+  const paginaAtual = Math.min(pagina, totalPaginas); // se a lista encolher (outro filtro/cidade), não fica numa página que não existe
+  const inicio = porPagina === 0 ? 0 : (paginaAtual - 1) * porPagina;
+  const itens = porPagina === 0 ? filtrados : filtrados.slice(inicio, inicio + porPagina);
 
   return (
     <div className="card pd-card" style={{ flex: "1 1 100%" }}>
@@ -145,7 +152,7 @@ export default function OpportunityQueue({ cidade, convenio }: { cidade: string;
         <div className="pd-label" style={{ margin: 0 }}>Todas as oportunidades</div>
         <div className="pd-chips">
           {grupos.map((g) => (
-            <button key={g} type="button" aria-pressed={grupo === g} className={`pd-chip ${grupo === g ? "on" : ""}`} onClick={() => setGrupo(g)}>
+            <button key={g} type="button" aria-pressed={grupo === g} className={`pd-chip ${grupo === g ? "on" : ""}`} onClick={() => { setGrupo(g); setPagina(1); }}>
               {g === "todas" ? "Todas" : g} <strong>{g === "todas" ? data.itens.length : data.itens.filter((i) => i.grupo === g).length}</strong>
             </button>
           ))}
@@ -153,6 +160,7 @@ export default function OpportunityQueue({ cidade, convenio }: { cidade: string;
       </div>
 
       <div className="pd-opps">
+        {filtrados.length === 0 && <span className="pd-hint">Nenhuma oportunidade neste grupo.</span>}
         {itens.map((o) => {
           const cor = o.status === "campanha" ? BLUE : o.status === "dados" ? AMBER : GREY;
           const tag =
@@ -185,6 +193,33 @@ export default function OpportunityQueue({ cidade, convenio }: { cidade: string;
           );
         })}
       </div>
+
+      {filtrados.length > 0 && (
+        <div className="pd-pager">
+          <span className="pd-hint" style={{ margin: 0 }}>
+            Mostrando {intFmt.format(inicio + 1)}–{intFmt.format(inicio + itens.length)} de {intFmt.format(filtrados.length)}
+          </span>
+          <div className="pd-pager-ctl">
+            <label className="pd-hint" style={{ margin: 0 }}>
+              Por página{" "}
+              <select value={porPagina} onChange={(e) => { setPorPagina(Number(e.target.value)); setPagina(1); }} aria-label="Itens por página">
+                <option value={6}>6</option>
+                <option value={12}>12</option>
+                <option value={0}>Todas</option>
+              </select>
+            </label>
+            {totalPaginas > 1 && (
+              <>
+                <button type="button" className="btn secondary" disabled={paginaAtual <= 1} onClick={() => setPagina(paginaAtual - 1)}>‹ Anterior</button>
+                {Array.from({ length: totalPaginas }, (_, i) => i + 1).map((n) => (
+                  <button key={n} type="button" aria-current={n === paginaAtual ? "page" : undefined} className={`pd-chip ${n === paginaAtual ? "on" : ""}`} onClick={() => setPagina(n)}>{n}</button>
+                ))}
+                <button type="button" className="btn secondary" disabled={paginaAtual >= totalPaginas} onClick={() => setPagina(paginaAtual + 1)}>Próxima ›</button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
