@@ -33,7 +33,8 @@ async function loadProfile(userId: string, tenantId: string) {
 
 export async function areaAccess(req: Request, res: Response, next: NextFunction) {
   const required = areaForRequest(req.method, req.path);
-  if (!required) return next();
+  // Usuário desativado é barrado em toda rota autenticada, não só nas que têm área: o requireAuth só
+  // confere o JWT (12 h), então era aqui o único lugar que olhava `active` (LGPD 05-07).
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) return next();
   let payload: any;
@@ -46,7 +47,7 @@ export async function areaAccess(req: Request, res: Response, next: NextFunction
   try {
     const profile = await loadProfile(payload.sub, payload.tenantId);
     if (!profile || !profile.active) return res.status(401).json({ error: "Usuário desativado ou inexistente" });
-    if (!canAccess(profile, required)) return res.status(403).json({ error: "Você não tem acesso a esta área do sistema", codigo: "SEM_ACESSO_AREA" });
+    if (required && !canAccess(profile, required)) return res.status(403).json({ error: "Você não tem acesso a esta área do sistema", codigo: "SEM_ACESSO_AREA" });
     return next();
   } catch (e) {
     console.error("[areaAccess] falha ao conferir o acesso:", e);
