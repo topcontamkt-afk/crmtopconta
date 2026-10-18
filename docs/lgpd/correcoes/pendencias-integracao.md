@@ -69,3 +69,13 @@ segmentos estão salvos como `{"operator":"AND"}` e quais campanhas os usaram. D
 - Retenção: exportar o critério de vencidos para `routes/tenant.ts` (`vencidosWhere` copiado hoje).
 - KPIs do dashboard e contagem de segmentos ainda contam bloqueados.
 - Templates MARKETING existentes sem SAIR não podem ser editados/reenviados até ganharem rodapé ou botão.
+
+## Pendências do Lote 2 para a integração
+- `ENVIAVEL_WHERE`, segments e opportunities excluem `encerradoEm`, `anonymizedAt` e `bloqueadoLgpdAt` (hoje só bloqueado).
+- `routes/dashboard.ts`: queries cruas em `"Client"` (~48/143/188/255/270/332/349/383) não usam `rawFilterSql` e contam
+  anonimizados/bloqueados; card `/encerramentos` fica sem motivo após a minimização.
+- `POST /imports/cartoes/preview` não simula supressão nem correção manual.
+- `routes/audit.test.ts`: mock sem o campo `redigidas`.
+- Decisão do controlador: anonimização por retenção também grava supressão ELIMINACAO (mitigado por `NOVA_RELACAO` e liberação manual).
+- Validar em ambiente real, sob `app_runtime` + RLS: o bloco `DO $purge$` do `/clients/purge` e o `UPDATE "Purchase"` da anonimização (mockados nos testes).
+- Legado: linhas de AuditLog redigidas pela retenção antiga aparecem como CONTEUDO no verificador.
