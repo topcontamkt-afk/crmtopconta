@@ -295,6 +295,27 @@ LIGADO fora da Vercel (ainda não existe). Passo 0 já feito: `services/whatsapp
 modal da Meta devolve `ligacoes` (informativo: não muda o resultado do teste). Próximos passos: ligar o recurso no número, assinar `calls`, tratar o webhook (SDP offer → accept com SDP answer),
 servidor de áudio ↔ xAI e registro das ligações.
 
+### RETOMAR DEPOIS: ligação pelo WhatsApp (cliente liga para a IA) e outras pendências
+
+**Estado em 18/10/2026.** Decisão: o cliente liga PARA nós pelo WhatsApp (Calling API da Meta); ligação da empresa para o cliente fica de fora (exige permissão por template). Já feito e em produção: só o
+diagnóstico no "Testar conexão" (passo 0 acima). Conferido na Meta: limite diário = **10.000** (atende o mínimo de 2.000; o campo `messaging_limit_tier` NÃO vem pela Graph API para esse número, então o
+diagnóstico mostra ❔ no limite: aceitável, ou trocar a leitura); recurso de ligações **desligado de propósito** (ligar antes do servidor de áudio pronto faria o ícone aparecer e as chamadas tocarem
+sem atender, o que derruba a taxa de atendimento e gera restrição da Meta). **Vercel não serve para o áudio** (WebRTC usa UDP; função da Vercel só atende HTTP/WebSocket).
+Hospedagem escolhida em princípio: **Fly.io** (aceita UDP, região gru; só o áudio vai para lá, o resto do CRM continua na Vercel); o usuário ainda precisa criar a conta (cartão) e dizer "pode seguir
+com o Fly.io". Alternativas: VPS (Docker), ou serviço gerenciado (LiveKit Cloud).
+Passos que faltam, em ordem: (1) servidor de áudio em pacote separado (Node + WebRTC, ex. `werift`, codec **PCMU** para repassar direto à xAI sem converter; reaproveitar `services/voice.ts` e
+`voiceBridge.ts`); (2) tratar o webhook `calls` (o `POST /api/integrations/webhooks/whatsapp` da Vercel recebe o SDP offer, repassa ao servidor de áudio com segredo compartilhado, devolve o SDP answer e
+chama `accept` na Graph API; `terminate` ao fim); (3) assinar o campo `calls` no app da Meta e ligar `calling.status=ENABLED` no número (`POST /{phone}/settings`) e escolher o codec PCMU nas call settings;
+(4) tabela de ligações (cliente, duração, resultado, custo) + tela/relatório; (5) template com botão de ligar (call button) e ajuste do texto da resposta automática da Inbox (hoje diz "não realizamos
+atendimentos por aqui"); (6) testar com um celular de teste antes de abrir a todos. Limites a respeitar: baixa taxa de atendimento e reclamações geram restrição; ligação da empresa: 1 pedido de permissão/dia e
+2/semana por cliente. Não dá para testar contra a Meta fora do ambiente real (sandbox só para Tech Partners).
+
+**Outras pendências em aberto:** Twilio — concluir o Trust Hub (Primary Customer Profile) para ligações de SAÍDA; teste de ligação RECEBIDA ainda não reportado (número do Twilio precisa estar na conta e
+"A call comes in" = `https://crmtopconta-backend.vercel.app/api/voice/inbound`). Inbox — opcional: avisar na tela quando a assinatura do webhook for inválida. Cidades — opcional: incluir "assessoria/
+consultoria/tecnologia/comunicacao" na regex de nome de empresa de `cidades.ts`; 90 clientes ativos com limite sem cidade válida. Dados — enviar extrato de setembro de Natal (06/09–05/10) e Carmópolis
+(07/09–06/10) para medir o ciclo anterior; reimportar a base de 790 clientes com limite 0; 15 clientes lixo; `LINK_BASE_URL` com domínio próprio; templates fase 3 (copiar código, cabeçalho de
+vídeo/documento); limpeza de sobras do Supabase. Dashboard — oferecer botão "Criar campanha" por cidade para quem não usou o saldo.
+
 ### Templates do WhatsApp (Meta) — Fase 4
 
 `services/whatsappTemplates.ts` (validação das regras da Meta, nosso `{{nome}}` → `{{1}}`, payload com exemplos, Graph API de criar/listar/excluir
