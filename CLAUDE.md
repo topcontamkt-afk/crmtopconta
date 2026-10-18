@@ -316,6 +316,19 @@ consultoria/tecnologia/comunicacao" na regex de nome de empresa de `cidades.ts`;
 (07/09–06/10) para medir o ciclo anterior; reimportar a base de 790 clientes com limite 0; 15 clientes lixo; `LINK_BASE_URL` com domínio próprio; templates fase 3 (copiar código, cabeçalho de
 vídeo/documento); limpeza de sobras do Supabase. Dashboard — oferecer botão "Criar campanha" por cidade para quem não usou o saldo.
 
+### Acesso por área (Usuários → Acessos)
+
+Além do papel (ADMIN/OPERATOR/ANALYST/VIEWER = o que a pessoa pode FAZER), cada usuário tem as **áreas** que pode ABRIR: `User.areasRestritas` (false = todas, é o padrão e vale para quem já existia) +
+`User.areas` (lista). ADMIN sempre vê tudo. As 12 áreas são as do menu (dashboard, clients, segments, commerce, ciclos, inbox, campaigns, templates, automations, imports, integrations, audit);
+Usuários/Configurações/Minha conta são livres. `services/areas.ts` (puro, testado em `areas.test.ts`) tem a tabela `RULES` "método + caminho da API → áreas que dão acesso (qualquer uma serve)"; a
+conferência real é `middleware/areaAccess.ts`, montado em `app.use("/api", areaAccess)` ANTES das rotas: lê o JWT, busca `active`/`role`/áreas no banco (cache de 15 s, limpo ao editar) e devolve 403
+`SEM_ACESSO_AREA`; também barra usuário DESATIVADO (401) — antes ele continuava até o token de 12 h vencer. Sem token/token inválido não decide nada (o `requireAuth` da rota responde 401). Dependências entre
+áreas estão nas regras: Campanhas LÊ templates/segmentos/filtros de comércio (GET) sem ganhar as telas; cartões do dashboard usam `/ciclos/proximos|audiencia` e `POST /segments/presets`; importar compras
+(`/purchases/import`) e `/clients/purge` são de Importações; Automações lê `/ciclos` e templates. **Rota nova em `app.ts` sem regra faz o teste falhar**: acrescente-a em `RULES` (ou a deixe aberta de propósito).
+`/auth/login`, `/auth/2fa/verify` e `/auth/me` devolvem `areas` (null = todas); o front (`utils/areas.ts`, espelho do backend) filtra o menu, `AreaRouteGuard` redireciona acesso direto por endereço à primeira
+tela liberada e o Layout chama `refreshUser()` ao abrir. Tela: Usuários ganhou a coluna e o editor "Acessos" (caixinhas + atalhos Marketing/Atendimento/Analista) e as caixinhas no formulário de novo usuário;
+`PATCH /api/users/:id` aceita `areas` (lista = restringe, null = todas), auditado. SQL: `backend/prisma/sql/2026-10-acesso-por-area.sql` (rodar antes do deploy; ninguém perde acesso ao publicar).
+
 ### Templates do WhatsApp (Meta) — Fase 4
 
 `services/whatsappTemplates.ts` (validação das regras da Meta, nosso `{{nome}}` → `{{1}}`, payload com exemplos, Graph API de criar/listar/excluir

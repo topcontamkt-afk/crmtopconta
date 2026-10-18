@@ -32,6 +32,7 @@ import cronRoutes from "./routes/cron";
 import purchaseRoutes from "./routes/purchases";
 import cicloRoutes from "./routes/ciclos";
 import voiceRoutes, { voiceWebhook } from "./routes/voice";
+import { areaAccess } from "./middleware/areaAccess";
 
 /**
  * Criação do Express app, sem app.listen() nem inicialização do scheduler — para poder ser
@@ -74,6 +75,8 @@ app.use(
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
 app.use("/r", trackedLinkRoutes);
+// Acesso por área (Usuários → Acessos): confere antes de qualquer rota de /api
+app.use("/api", areaAccess);
 app.use("/api/auth", authRoutes);
 app.use("/api/clients", clientRoutes);
 app.use("/api/dashboard", dashboardRoutes);

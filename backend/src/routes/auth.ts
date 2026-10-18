@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, signPending2FAToken, signToken, verifyPending2FAToken } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
+import { allowedAreas } from "../services/areas";
 import { twoFactorVerifyLimiter } from "../middleware/rateLimit";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 import {
@@ -73,6 +74,7 @@ router.post("/login", async (req, res) => {
         role: user.role,
         tenantId: user.tenantId,
         mustChangePassword: user.mustChangePassword,
+        areas: allowedAreas(user),
       },
     });
   });
@@ -119,6 +121,7 @@ router.post("/2fa/verify", twoFactorVerifyLimiter, async (req, res) => {
         role: user.role,
         tenantId: user.tenantId,
         mustChangePassword: user.mustChangePassword,
+        areas: allowedAreas(user),
       },
     });
   });
@@ -134,6 +137,7 @@ router.get("/me", requireAuth, async (req, res) => {
     tenantId: user.tenantId,
     mustChangePassword: user.mustChangePassword,
     twoFactorEnabled: user.twoFactorEnabled,
+    areas: allowedAreas(user),
   });
 });
 

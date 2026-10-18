@@ -141,6 +141,12 @@ model User {
   active       Boolean  @default(true)
   createdAt    DateTime @default(now())
 
+  // Acesso por área do sistema (services/areas.ts). `areasRestritas=false` = vê todas as áreas (padrão e
+  // quem já existia); true = só as de `areas`. ADMIN sempre vê tudo. O papel (role) continua dizendo o que
+  // a pessoa pode FAZER dentro da área; isto diz ONDE ela pode entrar.
+  areasRestritas Boolean  @default(false)
+  areas          String[] @default([])
+
   // Segurança de login (rate limiting anti brute-force) — armazenado no banco (não em memória
   // do processo) para funcionar de forma consistente entre invocações serverless distintas.
   failedLoginCount Int       @default(0)
@@ -722,23 +728,23 @@ model WhatsAppAccount {
 /// Uma conversa por (número nosso, número do cliente). `clientId` é nulo quando o telefone não
 /// bate com nenhum cliente da base. A janela de 24 horas conta a partir de `lastInboundAt`.
 model Conversation {
-  id              String             @id @default(uuid())
-  tenantId        String
-  tenant          Tenant             @relation(fields: [tenantId], references: [id])
-  accountId       String
-  account         WhatsAppAccount    @relation(fields: [accountId], references: [id])
-  clientId        String?
-  client          Client?            @relation(fields: [clientId], references: [id])
-  waId            String // telefone do cliente como a Meta informa (só dígitos, com DDI)
-  contactName     String? // nome do perfil do WhatsApp
-  status          ConversationStatus @default(ABERTA)
-  lastMessageAt   DateTime
-  lastInboundAt   DateTime?
-  lastPreview     String?
-  unreadCount     Int                @default(0)
-  assignedUserId  String?
-  createdAt       DateTime           @default(now())
-  updatedAt       DateTime           @updatedAt
+  id             String             @id @default(uuid())
+  tenantId       String
+  tenant         Tenant             @relation(fields: [tenantId], references: [id])
+  accountId      String
+  account        WhatsAppAccount    @relation(fields: [accountId], references: [id])
+  clientId       String?
+  client         Client?            @relation(fields: [clientId], references: [id])
+  waId           String // telefone do cliente como a Meta informa (só dígitos, com DDI)
+  contactName    String? // nome do perfil do WhatsApp
+  status         ConversationStatus @default(ABERTA)
+  lastMessageAt  DateTime
+  lastInboundAt  DateTime?
+  lastPreview    String?
+  unreadCount    Int                @default(0)
+  assignedUserId String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
 
   messages WaMessage[]
 

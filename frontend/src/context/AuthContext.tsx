@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { api, getToken, setToken } from "../api/client";
+import type { Area } from "../utils/areas";
 
 export interface AuthUser {
   id: string;
@@ -8,6 +9,8 @@ export interface AuthUser {
   role: "ADMIN" | "OPERATOR" | "ANALYST" | "VIEWER";
   tenantId: string;
   mustChangePassword?: boolean;
+  /** áreas liberadas; null/ausente = todas */
+  areas?: Area[] | null;
 }
 
 type LoginResult = { ok: true } | { requires2FA: true; tempToken: string };

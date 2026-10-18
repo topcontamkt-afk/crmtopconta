@@ -42,6 +42,7 @@ import Account from "./pages/Account";
 import Users from "./pages/Users";
 import NotificationBell from "./components/NotificationBell";
 import InboxAlerts from "./components/InboxAlerts";
+import { areaDoCaminho, podeVer, primeiraTelaLiberada } from "./utils/areas";
 import { SidebarNav, type NavGroupData, type NavItemData } from "./components/ui/dashboard-sidebar";
 
 // Carregado sob demanda: é a única tela que usa a lib de gráficos (recharts), que sozinha
@@ -65,6 +66,21 @@ function RequireAuth({ children }: { children: JSX.Element }) {
  * isso só evita que quem não tem o papel chegue a uma tela quebrada por acesso direto à URL).
  * Nunca introduz uma restrição de papel que não exista no backend.
  */
+/** Barra a tela de uma área não liberada (acesso direto pelo endereço): vai para a primeira liberada. */
+function AreaRouteGuard({ children }: { children: JSX.Element }) {
+  const { user } = useAuth();
+  const { pathname } = useLocation();
+  const area = areaDoCaminho(pathname);
+  if (!user || !area || podeVer(user.areas, area)) return children;
+  const destino = primeiraTelaLiberada(user.areas);
+  try {
+    sessionStorage.setItem("accessDenied", "1");
+  } catch {
+    // storage indisponível: só perde o aviso
+  }
+  return destino ? <Navigate to={destino} replace /> : <Navigate to="/account" replace />;
+}
+
 function RoleGate({ allowedRoles, children }: { allowedRoles: AuthUser["role"][]; children: JSX.Element }) {
   const { user } = useAuth();
   if (!user || !allowedRoles.includes(user.role)) {
@@ -81,10 +97,16 @@ function RoleGate({ allowedRoles, children }: { allowedRoles: AuthUser["role"][]
 }
 
 function Layout({ children }: { children: JSX.Element }) {
-  const { user, logout } = useAuth();
+  const { user, logout, refreshUser } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const [accessDenied, setAccessDenied] = useState(false);
+
+  // As áreas liberadas podem ter mudado desde o login: confere uma vez ao abrir o sistema
+  useEffect(() => {
+    refreshUser().catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     try {
@@ -131,6 +153,12 @@ function Layout({ children }: { children: JSX.Element }) {
       ],
     },
   ];
+
+  // Acesso por área: o menu só mostra o que a pessoa pode abrir (a conferência real é no servidor)
+  const visiveis = groups
+    .map((g) => ({ ...g, items: g.items.filter((i) => (i.id === "search" ? podeVer(user?.areas, "clients") : podeVer(user?.areas, i.id as any))) }))
+    .filter((g) => g.items.length > 0);
+  groups.splice(0, groups.length, ...visiveis);
 
   if (user?.role === "ADMIN") {
     groups.push({
@@ -220,6 +248,7 @@ export default function App() {
         element={
           <RequireAuth>
             <Layout>
+              <AreaRouteGuard>
               <Routes>
                 <Route
                   path="/"
@@ -273,6 +302,7 @@ export default function App() {
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/account" element={<Account />} />
               </Routes>
+              </AreaRouteGuard>
             </Layout>
           </RequireAuth>
         }
