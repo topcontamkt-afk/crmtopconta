@@ -114,6 +114,9 @@ export default function CampaignWizard() {
   }
   useEffect(() => {
     api<{ configurado: boolean }>("/templates/meta-status").then((m) => setMetaConectada(m.configurado)).catch(() => {});
+    // Mostra já o que está no cadastro e depois traz o que a sincronização achar de novo na Meta
+    // (a 1ª sincronização importa um template por vez e pode levar minutos: a lista não pode esperar por ela).
+    carregarTemplates().catch(() => undefined);
     api("/templates/sync", { method: "POST" })
       .catch(() => undefined)
       .finally(() => {
@@ -388,7 +391,7 @@ export default function CampaignWizard() {
 
                 {(!template || buscando) && (verTodos || buscando) && (
                   <div className="cw-box" style={{ marginTop: 10 }}>
-                    {lista.length === 0 && <span className="pd-hint">Nenhum template encontrado.</span>}
+                    {lista.length === 0 && <span className="pd-hint">{sincronizando ? "Sincronizando com a Meta… os templates novos aparecem aqui quando terminar." : "Nenhum template encontrado."}</span>}
                     {lista.map((t) => <TemplateItem key={t.id} t={t} bloqueado={!usavel(t)} onPick={() => { setTemplateId(t.id); setBusca(""); }} />)}
                   </div>
                 )}
