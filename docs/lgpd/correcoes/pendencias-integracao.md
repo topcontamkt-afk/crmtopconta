@@ -9,11 +9,20 @@ Itens que os lotes deixaram para outro dono. Marque ao resolver.
   `CONTEUDO`). Precisa de desenho: registrar a redação como evento encadeado, ou hash sobre resumo (Lote 5).
 - [ ] O mock de `retention.test.ts` não tem `auditLog.count`; o Lote 5 trocou por `findMany` com `select id`. Manter compatível.
 
+- [ ] Importação e reimportação usam `semSuprimidos`/`estaSuprimido` e `CONTATO_LIBERADO_WHERE` (`services/privacy.ts`);
+  anonimização chama `suprimir(..., { motivo: "ELIMINACAO" })` (Lote 1).
+- [ ] Opt-out manual em `routes/clients.ts` chama `registrarOptOutTelefone` (Lote 1).
+
 ## Para o Lote 4 (campanhas, segmentos)
 - [ ] Telefone mascarado em `/campaigns/:id/report/export.csv` e no relatório nominal (`/destinatarios`) (Lote 3, 05-01).
 - [ ] `segments.ts` (`buildSegmentWhere`/`ENVIAVEL_WHERE`) exclui `bloqueadoLgpdAt` (Lote 3, 03-04).
 
+- [ ] `Settings.tsx` mostra a `webhookUrl` dos canais SMS; o texto "usando variáveis de ambiente/mock" não vale mais em produção (Lote 1).
+
 ## Integração (orquestrador)
+- [ ] `routes/inbox.ts:185` devolve `janelaAberta: true` para toda conversa Z-API; usar a regra da Meta e desabilitar o
+  Composer com janela fechada (Lote 1, 02-06).
+- [ ] Documentar `ALLOW_GLOBAL_CHANNEL_CREDENTIALS` e `PLATFORM_DEFAULT_TENANT_ID` no `.env.example` e no CLAUDE.md (Lote 1, 06-01).
 - [ ] Opt-out automático (`whatsappInbox.ts`) cria `PedidoTitular` tipo REVOGACAO já atendido (Lote 3).
 - [ ] `services/dashboardMetrics.ts` e KPIs ainda contam clientes bloqueados (Lote 3).
 - [ ] Ligar `logAcessoNegado` em `requireRole` (`middleware/auth.ts`) antes do 403 (Lote 5, 05-03).
@@ -26,6 +35,11 @@ Itens que os lotes deixaram para outro dono. Marque ao resolver.
 - [ ] `POST /clients/:id/anonymize` com o `anonymizeClient` do Lote 2.
 - [ ] 08-07: seção LGPD do CLAUDE.md, README e `docs/llm-wiki/wiki/topics/seguranca-e-lgpd.md`.
 - [ ] Conferir `docs/lgpd/artefatos/registro-de-operacoes.md` contra o comportamento final.
+
+## Antes do deploy (operador)
+- Confirmar em Integrações que o WhatsApp da TopConta está configurado na tela (token cifrado), senão o envio para (06-01).
+- Se houver SMS saindo pelas variáveis `TWILIO_*`: definir `PLATFORM_DEFAULT_TENANT_ID` na Vercel ou cadastrar o canal
+  SMS, e configurar no provedor a `webhookUrl` que `GET /channels` devolve (06-01, 05-05).
 
 ## Decidir depois (sem dono)
 - Auditoria de leitura de conversa e download de mídia na Inbox (polling de 5 s inundaria o AuditLog; precisa de dedupe).
