@@ -22,7 +22,7 @@ const TRIGGERS = [
   ["INATIVO_30_DIAS", "Reativação após dias inativo"],
   ["LIMITE_RENOVADO", "Aviso de limite renovado"],
   ["ESTIMULO_FAIXA", "Estímulo por faixa de uso"],
-  ["ETAPA_PERFIL", "Etapa de uso + perfil de renda (PF1–PF4)"],
+  ["ETAPA_PERFIL", "Etapa de uso real"],
   ["CICLO_ABERTO", "Ciclo da cidade abriu (limite renovou)"],
   ["OPT_OUT_TELEFONE_INVALIDO", "Bloqueio automático de inconsistências de opt-out"],
 ] as const;
@@ -45,7 +45,6 @@ export default function Automations() {
   const [dias, setDias] = useState(7);
   const [faixa, setFaixa] = useState("USO_21_30");
   const [etapaUso, setEtapaUso] = useState("EM_RISCO");
-  const [perfilRenda, setPerfilRenda] = useState("");
   const [comSaldo, setComSaldo] = useState(true);
   // Ciclo da cidade
   const [ciclos, setCiclos] = useState<{ cidadeKey: string; cidade: string; diaAbertura: number }[]>([]);
@@ -81,9 +80,10 @@ export default function Automations() {
     if (trigger === "LIMITE_RENOVADO") return { horasJanela: dias * 24 };
     if (trigger === "ESTIMULO_FAIXA") return { faixa };
     if (trigger === "CICLO_ABERTO") {
-      return { cidades: cidadesSel.length ? cidadesSel : undefined, diasAposAbertura: diasApos, perfilRenda: perfilRenda || undefined, comSaldo: saldoCiclo || undefined };
+      return { cidades: cidadesSel.length ? cidadesSel : undefined, diasAposAbertura: diasApos, comSaldo: saldoCiclo || undefined };
     }
-    if (trigger === "ETAPA_PERFIL") return { etapaUso: etapaUso || undefined, perfilRenda: perfilRenda || undefined, comSaldo };
+    // LGPD 01-03: perfil de renda não é critério de público (só estatística no Dashboard)
+    if (trigger === "ETAPA_PERFIL") return { etapaUso: etapaUso || undefined, comSaldo };
     return {};
   }
 
@@ -152,24 +152,14 @@ export default function Automations() {
         {trigger === "ETAPA_PERFIL" && (
           <>
             <div className="form-row">
-              <label>Etapa de uso</label>
+              <label>Etapa de uso (obrigatória)</label>
               <select value={etapaUso} onChange={(e) => setEtapaUso(e.target.value)}>
-                <option value="">Qualquer</option>
+                <option value="">Escolha a etapa</option>
                 <option value="NUNCA_USOU">Nunca usou</option>
                 <option value="RECORRENTE">Recorrente</option>
                 <option value="OCASIONAL">Ocasional</option>
                 <option value="EM_RISCO">Em risco (31–90 dias)</option>
                 <option value="INATIVO">Inativo (+90 dias)</option>
-              </select>
-            </div>
-            <div className="form-row">
-              <label>Perfil de renda</label>
-              <select value={perfilRenda} onChange={(e) => setPerfilRenda(e.target.value)}>
-                <option value="">Qualquer</option>
-                <option value="PF1">PF1</option>
-                <option value="PF2">PF2</option>
-                <option value="PF3">PF3</option>
-                <option value="PF4">PF4</option>
               </select>
             </div>
             <div className="form-row">
@@ -211,16 +201,6 @@ export default function Automations() {
                 <option value={1}>1 dia depois da abertura</option>
                 <option value={2}>2 dias depois da abertura</option>
                 <option value={3}>3 dias depois da abertura</option>
-              </select>
-            </div>
-            <div className="form-row">
-              <label>Perfil de renda</label>
-              <select value={perfilRenda} onChange={(e) => setPerfilRenda(e.target.value)}>
-                <option value="">Qualquer</option>
-                <option value="PF1">PF1</option>
-                <option value="PF2">PF2</option>
-                <option value="PF3">PF3</option>
-                <option value="PF4">PF4</option>
               </select>
             </div>
             <div className="form-row">

@@ -1,4 +1,4 @@
-import { AUTO_REPLY_JANELA_MS, AUTO_REPLY_MAX, AUTO_REPLY_PADRAO, autoReplyTextOf, maybeAutoReply, shouldAutoReply } from "./whatsappAutoReply";
+import { AUTO_REPLY_JANELA_MS, AUTO_REPLY_MAX, AUTO_REPLY_PADRAO, autoReplyPadraoDo, autoReplyTextOf, maybeAutoReply, shouldAutoReply } from "./whatsappAutoReply";
 
 // LGPD 06-01: o token do ambiente (WHATSAPP_ACCESS_TOKEN) só vale como reserva com liberação explícita.
 process.env.ALLOW_GLOBAL_CHANNEL_CREDENTIALS = "true";
@@ -6,8 +6,9 @@ process.env.ALLOW_GLOBAL_CHANNEL_CREDENTIALS = "true";
 const conta = { id: "a1", phoneNumberId: "pn1", autoReplyEnabled: true, autoReplyText: null, credentials: null };
 const ok = (wamid = "wamid.AUTO") => jest.fn(async () => ({ ok: true, json: async () => ({ messages: [{ id: wamid }] }) }));
 
-function fakePrisma(opts: { jaEnviadas?: number } = {}) {
+function fakePrisma(opts: { jaEnviadas?: number; tenant?: Record<string, unknown> | null } = {}) {
   return {
+    tenant: { findUnique: jest.fn(async () => (opts.tenant === undefined ? { name: "Tenant X" } : opts.tenant)) },
     conversation: {
       findFirst: jest.fn(async () => ({ id: "c1", waId: "5579999990000" })),
       update: jest.fn(async () => ({})),
@@ -16,14 +17,26 @@ function fakePrisma(opts: { jaEnviadas?: number } = {}) {
   } as any;
 }
 
-describe("texto da resposta automática", () => {
-  it("usa o padrão quando a conta não tem texto próprio", () => {
+describe("texto da resposta automática (LGPD 02-08)", () => {
+  it("sem configuração: texto neutro, sem telefone fixo no código, ensinando a parar", () => {
     expect(autoReplyTextOf({ autoReplyText: null })).toBe(AUTO_REPLY_PADRAO);
-    expect(autoReplyTextOf({ autoReplyText: "   " })).toBe(AUTO_REPLY_PADRAO);
-    expect(AUTO_REPLY_PADRAO).toContain("(79) 99837-2540");
+    expect(autoReplyTextOf({ autoReplyText: "   " }, { name: "Tenant X" })).toBe(AUTO_REPLY_PADRAO);
+    expect(AUTO_REPLY_PADRAO).not.toMatch(/\d{4}-?\d{4}/); // nenhum telefone
+    expect(AUTO_REPLY_PADRAO).not.toContain("99837");
+    expect(AUTO_REPLY_PADRAO).toContain("responda SAIR");
   });
-  it("usa o texto da conta quando existe", () => {
-    expect(autoReplyTextOf({ autoReplyText: " Fale com o suporte " })).toBe("Fale com o suporte");
+  it("com o controlador configurado: identifica quem trata, dá o canal do titular e ensina a parar", () => {
+    const t = autoReplyPadraoDo({ controladorNome: "Top Conta Ltda", encarregadoNome: "Encarregado de Dados", encarregadoContato: "privacidade@topconta.com.br" });
+    expect(t).toContain("Top Conta Ltda");
+    expect(t).toContain("Encarregado de Dados: privacidade@topconta.com.br");
+    expect(t).toContain("seus dados pessoais");
+    expect(t).toMatch(/responda SAIR\.$/);
+    // só o contato, sem nome: ainda dá o canal
+    expect(autoReplyPadraoDo({ encarregadoContato: "(11) 4000-0000" })).toContain("(11) 4000-0000");
+  });
+  it("usa o texto da conta quando existe; sem instrução de saída, ganha a instrução no fim", () => {
+    expect(autoReplyTextOf({ autoReplyText: " Fale com o suporte. Para sair, responda SAIR " })).toBe("Fale com o suporte. Para sair, responda SAIR");
+    expect(autoReplyTextOf({ autoReplyText: " Fale com o suporte " })).toBe("Fale com o suporte\n\nResponda SAIR para não receber mais mensagens.");
   });
 });
 
@@ -53,6 +66,15 @@ describe("maybeAutoReply", () => {
       const body = JSON.parse((fetchImpl.mock.calls[0] as any)[1].body);
       expect(body.to).toBe("5579999990000");
       expect(body.text.body).toBe(AUTO_REPLY_PADRAO);
+
+      // LGPD 02-08: o padrão vem do controlador DESTE tenant
+      const f2 = ok();
+      const prisma = fakePrisma({ tenant: { name: "B", controladorNome: "Empresa B", encarregadoContato: "dpo@b.com" } });
+      expect(await maybeAutoReply(prisma, "tB", conta, inbound, { fetchImpl: f2 })).toBe(true);
+      expect(prisma.tenant.findUnique.mock.calls[0][0].where).toEqual({ id: "tB" });
+      const texto = JSON.parse((f2.mock.calls[0] as any)[1].body).text.body;
+      expect(texto).toContain("Empresa B");
+      expect(texto).toContain("dpo@b.com");
     } finally {
       delete process.env.WHATSAPP_ACCESS_TOKEN;
     }

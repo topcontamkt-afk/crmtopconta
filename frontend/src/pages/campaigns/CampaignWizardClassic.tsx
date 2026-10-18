@@ -47,7 +47,6 @@ export default function CampaignWizardClassic() {
   const [cidade, setCidade] = useState("");
   const [faixaUso, setFaixaUso] = useState("");
   const [statusConta, setStatusConta] = useState("");
-  const [perfilRenda, setPerfilRenda] = useState("");
   const [etapaUso, setEtapaUso] = useState("");
   const [limiteCheio, setLimiteCheio] = useState<number | null>(null);
   const [semUsoDiasMin, setSemUsoDiasMin] = useState("");
@@ -97,7 +96,6 @@ export default function CampaignWizardClassic() {
       cidade: cidade ? [cidade] : undefined,
       faixaUso: faixaUso ? [faixaUso] : undefined,
       statusConta: statusConta ? [statusConta] : undefined,
-      perfilRenda: perfilRenda ? [perfilRenda] : undefined,
       etapaUso: etapaUso ? [etapaUso] : undefined,
       semUsoDiasMin: semUsoDiasMin ? Number(semUsoDiasMin) : undefined,
       usadoNosUltimosDias: usadoNosUltimosDias ? Number(usadoNosUltimosDias) : undefined,
@@ -249,13 +247,6 @@ export default function CampaignWizardClassic() {
                     {FAIXA_OPTIONS.map((f) => (
                       <option key={f.value} value={f.value}>{f.label}</option>
                     ))}
-                  </select>
-                  <select value={perfilRenda} onChange={(e) => setPerfilRenda(e.target.value)}>
-                    <option value="">Qualquer perfil de renda</option>
-                    <option value="PF1">PF1 (até R$ 4.000)</option>
-                    <option value="PF2">PF2 (4.001 a 8.000)</option>
-                    <option value="PF3">PF3 (8.001 a 12.000)</option>
-                    <option value="PF4">PF4 (12.001 a 100.000)</option>
                   </select>
                   <select value={etapaUso} onChange={(e) => setEtapaUso(e.target.value)}>
                     <option value="">Qualquer etapa de uso</option>

@@ -25,6 +25,7 @@ function makeFakePrisma(campaign: Record<string, unknown>, clientCount: number) 
       update: jest.fn(async () => ({})),
     },
     client: { findMany: jest.fn(async () => clients) },
+    tenant: { findUnique: jest.fn(async () => ({ baseLegalMarketing: "LEGITIMO_INTERESSE" })) },
     messageEvent: {
       findFirst: jest.fn(async ({ where }: any) => {
         dedupeWheres.push(where);
@@ -147,8 +148,8 @@ function fakeEnvio(eventos: any[], opts: { supressoes?: any[]; optOutPorTelefone
       update: jest.fn(async () => ({})),
     },
     tenant: {
-      findUniqueOrThrow: jest.fn(async () => ({ id: "t1", maxMsgsPerMinute: 1000 })),
-      findUnique: jest.fn(async () => ({ cpfSalt: SALT, whatsappProvider: "META" })),
+      findUniqueOrThrow: jest.fn(async () => ({ id: "t1", name: "TopConta", maxMsgsPerMinute: 1000, baseLegalMarketing: "LEGITIMO_INTERESSE" })),
+      findUnique: jest.fn(async () => ({ cpfSalt: SALT, whatsappProvider: "META", baseLegalMarketing: "LEGITIMO_INTERESSE" })),
     },
     channelConfig: { findMany: jest.fn(async () => []) },
     whatsAppAccount: { findFirst: jest.fn(async () => null) },
@@ -227,7 +228,7 @@ describe("enqueueManualCampaign — lista refiltrada ao agendar (LGPD 02-03)", (
             : []
         ),
       },
-      tenant: { findUnique: jest.fn(async () => ({ cpfSalt: SALT })) },
+      tenant: { findUnique: jest.fn(async () => ({ cpfSalt: SALT, baseLegalMarketing: "LEGITIMO_INTERESSE" })) },
       supressaoTitular: { findMany: jest.fn(async () => [{ tenantId: "t1", phoneHash: phoneHash(SALT, "+5584944445555"), docHash: null, motivo: "OPT_OUT" }]) },
       client: { findMany: jest.fn(async () => []) },
       messageEvent: { createMany: jest.fn(async ({ data }: any) => void created.push(...data)) },

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api, downloadFile } from "../../api/client";
+import { useAuth } from "../../context/AuthContext";
 
 type SaldoGroup = "COM_SALDO" | "SEM_SALDO" | "DESCONHECIDO";
 
@@ -399,7 +400,7 @@ function WhoUsed({ usuarios }: { usuarios: UsuarioQueUsou[] }) {
     <div className="card" style={{ marginTop: 16 }}>
       <h3>Quem usou o limite (50 mais recentes)</h3>
       {usuarios.length === 0 ? (
-        <p style={{ fontSize: 13, color: "var(--text-muted)" }}>Nenhum uso identificado ainda. A lista completa, com telefone, sai em "Exportar CSV".</p>
+        <p style={{ fontSize: 13, color: "var(--text-muted)" }}>Nenhum uso identificado ainda. A lista completa sai em "Exportar CSV" (telefone mascarado; completo só para administradores, com motivo).</p>
       ) : (
         <div style={{ overflowX: "auto" }}>
           <table>
@@ -428,7 +429,28 @@ function WhoUsed({ usuarios }: { usuarios: UsuarioQueUsou[] }) {
 
 export default function CampaignReport() {
   const { id } = useParams();
+  const { user } = useAuth();
   const [report, setReport] = useState<Report | null>(null);
+  const [erroExport, setErroExport] = useState<string | null>(null);
+
+  // LGPD 05-01: o CSV sai com o telefone mascarado; completo só para ADMIN, com motivo (no corpo, auditado)
+  async function exportar(completo: boolean) {
+    if (!id) return;
+    setErroExport(null);
+    let motivo = "";
+    if (completo) {
+      motivo = (window.prompt("Motivo para exportar o telefone completo (fica registrado na auditoria):") ?? "").trim();
+      if (motivo.length < 5) {
+        setErroExport("Informe o motivo (ao menos 5 caracteres) para exportar o telefone completo.");
+        return;
+      }
+    }
+    try {
+      await downloadFile(`/campaigns/${id}/report/export.csv`, `campanha-${id}.csv`, { method: "POST", body: completo ? { completo: true, motivo } : {} });
+    } catch (e) {
+      setErroExport(e instanceof Error ? e.message : "Não foi possível exportar.");
+    }
+  }
   const [phones, setPhones] = useState("");
   const [testResult, setTestResult] = useState<string | null>(null);
 
@@ -468,10 +490,18 @@ export default function CampaignReport() {
     <div>
       <div className="topbar">
         <h2>Relatório da campanha {report.isSandbox && <span className="badge warn">Sandbox</span>}</h2>
-        <button className="btn secondary" onClick={() => id && downloadFile(`/campaigns/${id}/report/export.csv`, `campanha-${id}.csv`)}>
-          Exportar CSV
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn secondary" onClick={() => exportar(false)} title="Telefone mascarado">
+            Exportar CSV
+          </button>
+          {user?.role === "ADMIN" && (
+            <button className="btn secondary" onClick={() => exportar(true)} title="Exige motivo; fica na auditoria">
+              CSV com telefone completo
+            </button>
+          )}
+        </div>
       </div>
+      {erroExport && <p className="error-text">{erroExport}</p>}
 
       <div className="grid-kpi">
         <div className="card">

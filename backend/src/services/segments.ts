@@ -1,6 +1,6 @@
 import { etapaWhere, EtapaUso } from "./etapaUso";
 import { Prisma } from "@prisma/client";
-import { limiteRange, LIMITE_TETO, PerfilRenda } from "./rendaPerfil";
+import { PerfilRenda } from "./rendaPerfil";
 import { diasAberturaNaFaixa, FaixaDias } from "./ciclos";
 
 /**
@@ -26,10 +26,13 @@ export interface SegmentFilters {
   categoriasCompra?: string[];
   lojistaIds?: string[];
   compraNosUltimosDias?: number;
-  // Perfil de renda PF1–PF4, estimado pelo limite (limite ÷ 0,40) — ver services/rendaPerfil.ts.
-  // Vários perfis se combinam em OR. Clientes sem limite (comércio credenciado) não têm perfil.
+  /**
+   * @deprecated LGPD 01-03 (triagem, decisão 2): renda é só estatística agregada (dashboard), não filtro de
+   * público. Segmentos salvos antes ainda trazem o campo: ele é IGNORADO no cálculo e a tela avisa
+   * (`filtrosRendaIgnorados`).
+   */
   perfilRenda?: PerfilRenda[];
-  // Limite exatamente no teto de R$ 2.000 (renda real de R$ 5.000 ou mais, sem separar).
+  /** @deprecated LGPD 01-03: "no teto do limite" = renda de R$ 5.000 ou mais; ignorado como `perfilRenda`. */
   noTetoLimite?: boolean;
   // Saldo disponível mínimo (R$): "com saldo" = podia usar no momento.
   saldoDisponivelMin?: number;
@@ -90,15 +93,7 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
     }
     and.push({ purchases: { some: purchase } });
   }
-  if (filters.perfilRenda?.length) {
-    and.push({
-      OR: filters.perfilRenda.map((p) => {
-        const r = limiteRange(p);
-        return { limiteTotal: r.lte === undefined ? { gt: r.gt } : { gt: r.gt, lte: r.lte } };
-      }),
-    });
-  }
-  if (filters.noTetoLimite) and.push({ limiteTotal: LIMITE_TETO });
+  // LGPD 01-03: perfilRenda e noTetoLimite não filtram mais (ver FILTROS_RENDA)
   if (filters.saldoDisponivelMin !== undefined) and.push({ saldoDisponivel: { gte: filters.saldoDisponivelMin } });
   if (filters.etapaUso?.length) and.push({ OR: filters.etapaUso.map((e) => etapaWhere(e)) });
   if (filters.usosMin !== undefined) and.push({ usosUltimos90d: { gte: filters.usosMin } });
@@ -123,6 +118,28 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
   if (and.length) where.AND = and;
 
   return where;
+}
+
+/** LGPD 01-03: filtros de renda que deixaram de valer para público (ficam só na estatística do dashboard). */
+export const FILTROS_RENDA = ["perfilRenda", "noTetoLimite"] as const;
+
+/**
+ * Filtros de renda presentes (e ignorados) num segmento salvo, em qualquer nível de grupo. Lista vazia = nada
+ * ignorado. Usado para a tela avisar que o segmento antigo passou a contar sem o filtro de renda.
+ */
+export function filtrosRendaIgnorados(filtersOrGroup: unknown): string[] {
+  const achados = new Set<string>();
+  const visitar = (f: any) => {
+    if (!f || typeof f !== "object") return;
+    for (const k of FILTROS_RENDA) {
+      const v = f[k];
+      if (v !== undefined && v !== null && v !== false && !(Array.isArray(v) && v.length === 0)) achados.add(k);
+    }
+    if (f.conditions) visitar(f.conditions);
+    if (Array.isArray(f.groups)) f.groups.forEach(visitar);
+  };
+  visitar(filtersOrGroup);
+  return [...achados];
 }
 
 /** Constrói o `where` do Prisma recursivamente a partir de um SegmentGroup (AND/OR aninhados). */
@@ -170,9 +187,12 @@ export const INATIVOS_FILTERS: SegmentGroup = {
  * Quem pode receber disparo de consumidor: tem limite. Cliente sem limite (zero) é comércio
  * credenciado — está na base como cadastro, mas não é público de campanha de cartão. Aplicado na
  * montagem do público (campaignQueue.buildAudience), na estimativa do assistente e, por garantia,
- * no envio da fila.
+ * no envio da fila. LGPD 03-04: nem cliente com o tratamento suspenso a pedido do titular
+ * (`bloqueadoLgpdAt`), em todo lugar que monta ou conta público (ciclos, comércio, dashboard).
+ * O `buildSegmentWhere` não exclui o bloqueio por conta própria: a listagem de clientes usa o mesmo
+ * builder e mostra bloqueados quando pedido (routes/clients.ts aplicarBloqueio).
  */
-export const ENVIAVEL_WHERE: Prisma.ClientWhereInput = { limiteTotal: { gt: 0 } };
+export const ENVIAVEL_WHERE: Prisma.ClientWhereInput = { limiteTotal: { gt: 0 }, bloqueadoLgpdAt: null };
 
 /** Saldo disponível mínimo (R$) para considerar que o cliente "tem saldo" (podia usar). */
 export const SALDO_MINIMO_ELEGIVEL = 10;
@@ -182,27 +202,10 @@ export interface SegmentPreset {
   filters: SegmentFilters;
 }
 
-/**
- * Segmentos prontos de perfil de renda × uso. Criados de uma vez por
- * POST /api/segments/presets/perfis-renda (idempotente: o mesmo nome só é recontado).
- * "Sem uso no momento" = limite todo disponível hoje; NÃO prova que nunca usou (quem usou e já teve
- * a fatura descontada em folha também fica com o limite cheio). Só o histórico de compras separa.
- */
-export const PERFIL_RENDA_PRESETS: SegmentPreset[] = [
-  { name: "PF1 · base geral", filters: { perfilRenda: ["PF1"] } },
-  { name: "PF1 · sem uso no momento", filters: { perfilRenda: ["PF1"], faixaUso: ["SEM_USO"] } },
-  { name: "PF1 · com saldo", filters: { perfilRenda: ["PF1"], saldoDisponivelMin: SALDO_MINIMO_ELEGIVEL } },
-  { name: "PF1 · limite 100% usado", filters: { perfilRenda: ["PF1"], faixaUso: ["USO_100"] } },
-  { name: "PF2 · base geral", filters: { perfilRenda: ["PF2"] } },
-  { name: "PF2 · sem uso no momento", filters: { perfilRenda: ["PF2"], faixaUso: ["SEM_USO"] } },
-  { name: "PF2 · com saldo", filters: { perfilRenda: ["PF2"], saldoDisponivelMin: SALDO_MINIMO_ELEGIVEL } },
-  { name: "PF2 · limite 100% usado", filters: { perfilRenda: ["PF2"], faixaUso: ["USO_100"] } },
-  { name: "PF2+ · no teto de R$ 2.000", filters: { noTetoLimite: true } },
-  { name: "PF3 · base geral", filters: { perfilRenda: ["PF3"] } },
-  { name: "PF4 · base geral", filters: { perfilRenda: ["PF4"] } },
-];
+// LGPD 01-03: os segmentos prontos de perfil de renda (PF1–PF4 × uso, antigo PERFIL_RENDA_PRESETS) foram
+// retirados: renda não é mais critério de público. O card de perfis do dashboard continua (agregado).
 
-/** Segmentos prontos por etapa de uso real (combine com perfil de renda no filtro ou no assistente). */
+/** Segmentos prontos por etapa de uso real. */
 export const ETAPA_USO_PRESETS: SegmentPreset[] = [
   { name: "Etapa · nunca usou", filters: { etapaUso: ["NUNCA_USOU"] } },
   { name: "Etapa · recorrentes", filters: { etapaUso: ["RECORRENTE"] } },

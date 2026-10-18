@@ -1,4 +1,4 @@
-import { TEMPLATE_VARIABLES, variablesIn } from "./templateVariables";
+import { mencionaOptOut, TEMPLATE_VARIABLES, variablesIn } from "./templateVariables";
 import { WHATSAPP_API_VERSION } from "./whatsappMedia";
 import { SendError, explainMetaError } from "./whatsappSend";
 import { trackedUrlExample, trackedUrlPattern } from "./trackedLinks";
@@ -74,6 +74,19 @@ export function toMetaBody(body: string): string {
   return body.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, v) => `{{${order.indexOf(v) + 1}}}`);
 }
 
+/**
+ * LGPD 02-05: o template ensina a parar de receber? Rodapé com a instrução ("Responda SAIR...") ou botão de
+ * resposta rápida de saída (SAIR, PARAR...). O toque no botão descadastra (whatsappInbox).
+ */
+export function templateTemOptOut(t: { footer?: string | null; quickReplies?: unknown }): boolean {
+  const botoes = Array.isArray(t.quickReplies) ? (t.quickReplies as unknown[]).filter((b): b is string => typeof b === "string") : [];
+  return mencionaOptOut(t.footer) || botoes.some((b) => mencionaOptOut(b));
+}
+
+export const ERRO_SEM_OPT_OUT =
+  "Template de marketing precisa ensinar a parar de receber: inclua o rodapé \"Responda SAIR para não receber mais mensagens\" ou um botão de resposta rápida SAIR.";
+
+/** Valida um template criado ou editado por nós (os importados da Meta não passam por aqui: só leitura). */
 export function validateTemplate(t: TemplateDraft): string[] {
   const erros: string[] = [];
   const body = t.body ?? "";
@@ -127,6 +140,8 @@ export function validateTemplate(t: TemplateDraft): string[] {
   if (new Set(textos).size !== textos.length) erros.push("Há botões com o mesmo texto.");
 
   if (!t.category || !(TEMPLATE_CATEGORIES as readonly string[]).includes(t.category)) erros.push("Escolha a categoria: Marketing ou Utilidade.");
+  // LGPD 02-05: marketing (legítimo interesse) leva o descadastro na própria mensagem
+  if (t.category === "MARKETING" && !templateTemOptOut(t)) erros.push(ERRO_SEM_OPT_OUT);
   return erros;
 }
 

@@ -5,7 +5,6 @@ import { FAIXA_OPTIONS } from "../../utils/faixas";
 export interface Filtros {
   cidade: string;
   faixaUso: string;
-  perfilRenda: string;
   etapaUso: string;
   statusConta: string;
   semUsoDiasMin: string;
@@ -17,7 +16,6 @@ export interface Filtros {
 export const FILTROS_VAZIOS: Filtros = {
   cidade: "",
   faixaUso: "",
-  perfilRenda: "",
   etapaUso: "",
   statusConta: "",
   semUsoDiasMin: "",
@@ -32,7 +30,6 @@ export function filtrosParaApi(f: Filtros) {
     cidade: f.cidade ? [f.cidade] : undefined,
     faixaUso: f.faixaUso ? [f.faixaUso] : undefined,
     statusConta: f.statusConta ? [f.statusConta] : undefined,
-    perfilRenda: f.perfilRenda ? [f.perfilRenda] : undefined,
     etapaUso: f.etapaUso ? [f.etapaUso] : undefined,
     semUsoDiasMin: f.semUsoDiasMin ? Number(f.semUsoDiasMin) : undefined,
     usadoNosUltimosDias: f.usadoNosUltimosDias ? Number(f.usadoNosUltimosDias) : undefined,
@@ -57,13 +54,7 @@ export default function FiltrosRapidos({ value, onChange }: { value: Filtros; on
           <option key={f.value} value={f.value}>{f.label}</option>
         ))}
       </select>
-      <select value={value.perfilRenda} onChange={set("perfilRenda")}>
-        <option value="">Qualquer perfil de renda</option>
-        <option value="PF1">PF1 (até R$ 4.000)</option>
-        <option value="PF2">PF2 (4.001 a 8.000)</option>
-        <option value="PF3">PF3 (8.001 a 12.000)</option>
-        <option value="PF4">PF4 (12.001 a 100.000)</option>
-      </select>
+      {/* LGPD 01-03: perfil de renda não é filtro de público (só estatística no Dashboard) */}
       <select value={value.etapaUso} onChange={set("etapaUso")}>
         <option value="">Qualquer etapa de uso</option>
         <option value="NUNCA_USOU">Nunca usou</option>

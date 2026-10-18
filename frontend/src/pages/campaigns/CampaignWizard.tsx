@@ -82,12 +82,14 @@ export default function CampaignWizard() {
   const [filtros, setFiltros] = useState<Filtros>(FILTROS_VAZIOS);
   const [rows, setRows] = useState<PlanilhaRow[]>([]);
   const [consent, setConsent] = useState(false);
+  // LGPD 02-02: origem do consentimento de quem NÃO é cliente (onde e como foi coletado)
+  const [consentOrigem, setConsentOrigem] = useState("");
   const [telefonesTeste, setTelefonesTeste] = useState("");
   const [testeMsg, setTesteMsg] = useState<string | null>(null);
   const testeCampaign = useRef<string | null>(null);
 
   // validação / custo
-  const [validation, setValidation] = useState<Validation | null>(null);
+  const [validation, setValidation] = useState<(Validation & { foraDaBase?: number }) | null>(null);
   const [validando, setValidando] = useState(false);
   const [erroValidacao, setErroValidacao] = useState("");
   const [custosAberto, setCustosAberto] = useState(false);
@@ -204,7 +206,8 @@ export default function CampaignWizard() {
   const faltamVariaveis = (template?.variaveisSemMapa?.length ?? 0) > 0;
   const passo0Ok = nome.trim() !== "" && !!template && usavel(template) && !faltamVariaveis;
   const passo1Ok = publico !== "teste" && !!audiencia && !!validation && validation.contatos > 0;
-  const passo2Ok = !!validation?.podeLancar && (publico !== "planilha" || consent);
+  const foraDaBase = publico === "planilha" ? validation?.foraDaBase ?? 0 : 0;
+  const passo2Ok = !!validation?.podeLancar && (publico !== "planilha" || (consent && (foraDaBase === 0 || consentOrigem.trim().length >= 10)));
   const passo3Ok = quando === "agora" || (!!agendadoPara && agendadoPara.getTime() > Date.now());
   const podeContinuar = [passo0Ok, passo1Ok, passo2Ok, passo3Ok][step];
 
@@ -244,7 +247,17 @@ export default function CampaignWizard() {
     if (publico === "planilha") {
       const r = await api<{ campaign: { id: string }; enviar: number }>("/campaigns/manual", {
         method: "POST",
-        body: { name: nome.trim(), templateId, rows, consentimento: true, rascunho, scheduledAt, costPerMessage: custo, throttlePerMin: throttle },
+        body: {
+          name: nome.trim(),
+          templateId,
+          rows,
+          consentimento: true,
+          ...(foraDaBase > 0 ? { consentimentoOrigem: consentOrigem.trim() } : {}),
+          rascunho,
+          scheduledAt,
+          costPerMessage: custo,
+          throttlePerMin: throttle,
+        },
       });
       return { id: r.campaign.id, total: r.enviar };
     }
@@ -503,6 +516,24 @@ export default function CampaignWizard() {
                   <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
                   <span>Confirmo que tenho autorização para contatar estes números pelo WhatsApp. Quem já pediu para não receber mensagens foi retirado da lista automaticamente.</span>
                 </label>
+              )}
+              {publico === "planilha" && foraDaBase > 0 && (
+                <div className="form-row" style={{ marginTop: 10 }}>
+                  <label>
+                    Origem do consentimento dos {foraDaBase} contato(s) que não são clientes <span className="error-text">(obrigatório)</span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={consentOrigem}
+                    onChange={(e) => setConsentOrigem(e.target.value)}
+                    maxLength={1000}
+                    placeholder="Onde e como o aceite foi coletado. Ex.: formulário do site em out/2026, com caixa de aceite para receber ofertas pelo WhatsApp"
+                  />
+                  <div className="pd-hint">
+                    Quem não é cliente não tem relação com a empresa: a mensagem só pode ir com consentimento. A origem fica gravada na campanha, com o
+                    seu usuário e a data (LGPD).
+                  </div>
+                </div>
               )}
 
               {publico !== "planilha" && publico !== "teste" && (

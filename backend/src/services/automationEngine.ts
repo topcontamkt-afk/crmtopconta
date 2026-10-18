@@ -5,7 +5,6 @@ import { enqueueCampaign, processQueueBatch } from "./campaignQueue";
 import { buildSegmentWhere, ENVIAVEL_WHERE, SALDO_MINIMO_ELEGIVEL } from "./segments";
 import { avaliarFrescor } from "./dataFreshness";
 import { isEtapaUso } from "./etapaUso";
-import { isPerfilRenda } from "./rendaPerfil";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 import { cidadeKey } from "./cidades";
 import { diasAberturaNaFaixa } from "./ciclos";
@@ -24,7 +23,7 @@ import { CONTATO_LIBERADO_WHERE, semSuprimidos } from "./privacy";
  *  - ESTIMULO_FAIXA: clientes na faixa condition.faixa (obrigatório).
  *  - CICLO_ABERTO: o ciclo da cidade do cliente abriu há N dias (condition.diasAposAbertura, default 0 = no dia
  *    da abertura, quando o limite renova), opcionalmente só em certas cidades (condition.cidades = chaves de
- *    CicloCidade; vazio = todas as cadastradas), com perfilRenda/etapaUso/comSaldo opcionais. Devolve UM grupo
+ *    CicloCidade; vazio = todas as cadastradas), com etapaUso/comSaldo opcionais. Devolve UM grupo
  *    por cidade: cada cidade vira sua própria campanha (resultado separado) e só dispara no dia dela.
  *  - OPT_OUT_TELEFONE_INVALIDO: inconsistências de opt-out (autorização=true com optOutAt
  *    preenchido) — a ação aqui é sempre "block", corrigindo o dado.
@@ -111,26 +110,23 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
     }
 
     case "ETAPA_PERFIL": {
-      // condition: { etapaUso?, perfilRenda?, comSaldo? }. Pelo menos um dos dois filtros é obrigatório
-      // (senão a regra miraria a base inteira). Etapa de uso depende do extrato: com o extrato velho
+      // condition: { etapaUso, comSaldo? }. A etapa é obrigatória (senão a regra miraria a base inteira).
+      // LGPD 01-03: `perfilRenda` (renda estimada) deixou de ser critério de público e é ignorado; regra antiga
+      // só com perfil de renda para de disparar. Etapa de uso depende do extrato: com o extrato velho
       // (ver dataFreshness.ts) a regra não dispara — quem "parou de usar" seria só falta de planilha.
       const etapa = isEtapaUso(condition?.etapaUso) ? condition.etapaUso : undefined;
-      const perfil = isPerfilRenda(condition?.perfilRenda) ? condition.perfilRenda : undefined;
-      if (!etapa && !perfil) return { clientIds: [] };
-      if (etapa) {
-        const ultima = await prisma.purchase.aggregate({ where: { tenantId }, _max: { occurredAt: true } });
-        const frescor = avaliarFrescor(ultima._max.occurredAt);
-        if (frescor.status !== "OK") {
-          console.warn(`[automation] ETAPA_PERFIL ignorada: extrato de compras ${frescor.status} (tenant ${tenantId})`);
-          return { clientIds: [] };
-        }
+      if (!etapa) return { clientIds: [] };
+      const ultima = await prisma.purchase.aggregate({ where: { tenantId }, _max: { occurredAt: true } });
+      const frescor = avaliarFrescor(ultima._max.occurredAt);
+      if (frescor.status !== "OK") {
+        console.warn(`[automation] ETAPA_PERFIL ignorada: extrato de compras ${frescor.status} (tenant ${tenantId})`);
+        return { clientIds: [] };
       }
       const clients = await prisma.client.findMany({
         where: {
           AND: [
             buildSegmentWhere(tenantId, {
-              etapaUso: etapa ? [etapa] : undefined,
-              perfilRenda: perfil ? [perfil] : undefined,
+              etapaUso: [etapa],
               saldoDisponivelMin: condition?.comSaldo ? SALDO_MINIMO_ELEGIVEL : undefined,
             }),
             ENVIAVEL_WHERE,
@@ -147,8 +143,7 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
       const configs = await prisma.cicloCidade.findMany({ where: { tenantId } });
       const escolhidas = Array.isArray(condition?.cidades) && condition.cidades.length ? new Set<string>(condition.cidades) : null;
       const hoje = diasAberturaNaFaixa({ min: apos, max: apos }, "abriuHa");
-      const etapa = isEtapaUso(condition?.etapaUso) ? condition.etapaUso : undefined;
-      const perfil = isPerfilRenda(condition?.perfilRenda) ? condition.perfilRenda : undefined;
+      const etapa = isEtapaUso(condition?.etapaUso) ? condition.etapaUso : undefined; // LGPD 01-03: perfilRenda ignorado
       if (etapa) {
         const ultima = await prisma.purchase.aggregate({ where: { tenantId }, _max: { occurredAt: true } });
         if (avaliarFrescor(ultima._max.occurredAt).status !== "OK") {
@@ -162,7 +157,6 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
         where: {
           AND: [
             buildSegmentWhere(tenantId, {
-              perfilRenda: perfil ? [perfil] : undefined,
               etapaUso: etapa ? [etapa] : undefined,
               saldoDisponivelMin: condition?.comSaldo ? SALDO_MINIMO_ELEGIVEL : undefined,
             }),

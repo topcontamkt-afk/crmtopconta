@@ -45,3 +45,22 @@ describe("automationEngine — supressão e bloqueio do titular", () => {
     expect(r.matched).toBe(2);
   });
 });
+
+describe("LGPD 01-03: renda não é critério de gatilho", () => {
+  it("ETAPA_PERFIL só com perfilRenda não dispara (nem consulta clientes)", async () => {
+    const prisma = fakePrisma(clients);
+    const r: any = await runRule(prisma, rule("ETAPA_PERFIL", { perfilRenda: "PF1" }), { simular: true });
+    expect(r.matched).toBe(0);
+    expect(prisma.client.findMany).not.toHaveBeenCalled();
+  });
+
+  it("CICLO_ABERTO ignora perfilRenda: o filtro do banco não tem faixa de limite por renda", async () => {
+    const dia = Number(new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", day: "numeric" }).format(new Date()));
+    const prisma = fakePrisma([{ ...clients[0], cidade: "Natal" }]);
+    prisma.cicloCidade = { findMany: jest.fn(async () => [{ cidadeKey: "natal", cidade: "Natal", diaAbertura: dia }]) };
+    await runRule(prisma, rule("CICLO_ABERTO", { perfilRenda: "PF4" }), { simular: true });
+    const where = JSON.stringify(prisma.client.findMany.mock.calls[0][0].where);
+    expect(where).not.toContain("4800");
+    expect(where).toContain('"limiteTotal":{"gt":0}');
+  });
+});

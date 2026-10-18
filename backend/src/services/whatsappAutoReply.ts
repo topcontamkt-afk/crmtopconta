@@ -1,27 +1,65 @@
 import { AppPrismaClient } from "../config/db";
 import { credentialsOf } from "./whatsappAccount";
 import { SendError, sendText, TEXT_MAX_CHARS } from "./whatsappSend";
+import { INSTRUCAO_OPT_OUT, mencionaOptOut } from "./templateVariables";
 
 /**
- * Resposta automática do número de avisos: quem escreve aqui recebe uma mensagem fixa mandando-o ao
- * suporte. Só vai dentro da janela de 24h que a própria mensagem do cliente acabou de abrir (texto
+ * Resposta automática do número de avisos: quem escreve aqui recebe uma mensagem dizendo que o canal não é
+ * acompanhado, com o contato do controlador (quando configurado) e como parar de receber. Só vai dentro da janela de 24h que a própria mensagem do cliente acabou de abrir (texto
  * livre) e responde a TODA mensagem do cliente, mas no máximo `AUTO_REPLY_MAX` vezes por conversa em
  * `AUTO_REPLY_JANELA_MS` (24 h corridas; depois disso o cliente é ignorado até a janela andar) e nunca
  * para quem pediu descadastro (PARAR/SAIR). O limite conta as respostas automáticas já gravadas.
  */
+/**
+ * LGPD 02-08: texto NEUTRO, usado quando a conta não tem texto próprio e o tenant não configurou o controlador
+ * (Configurações → LGPD). Sem telefone ou nome de empresa fixo no código: o padrão de um tenant nunca manda o
+ * titular para o contato de outro controlador. Sempre ensina a parar.
+ */
 export const AUTO_REPLY_PADRAO =
-  "Este é um canal apenas para informações. Informamos que não realizamos atendimentos por aqui.\n\n" +
-  "Para suporte técnico ou em caso de dúvidas, entre em contato com nossa equipe de suporte: (79) 99837-2540.";
+  "Este número envia apenas avisos e não acompanha as mensagens recebidas.\n\n" + `Para não receber mais mensagens, responda SAIR.`;
+
+/** Dados do controlador (Tenant) usados no texto padrão. */
+export interface ControladorAutoReply {
+  name?: string | null;
+  controladorNome?: string | null;
+  encarregadoNome?: string | null;
+  encarregadoContato?: string | null;
+}
+
+/**
+ * LGPD 02-08 / 03-06: texto padrão a partir da configuração do controlador: quem é (nome do controlador), por onde
+ * falar e exercer os direitos sobre os dados (contato do encarregado/canal do titular) e como parar. Sem
+ * controlador nem contato configurados, o texto neutro.
+ */
+export function autoReplyPadraoDo(t: ControladorAutoReply | null | undefined): string {
+  const nome = t?.controladorNome?.trim() || "";
+  const contato = t?.encarregadoContato?.trim() || "";
+  if (!nome && !contato) return AUTO_REPLY_PADRAO;
+  const quem = nome ? `Este número de ${nome} envia apenas avisos` : "Este número envia apenas avisos";
+  const linhas = [`${quem} e não acompanha as mensagens recebidas.`];
+  if (contato) {
+    const resp = t?.encarregadoNome?.trim();
+    linhas.push(`Para atendimento, dúvidas ou pedidos sobre seus dados pessoais, fale com ${resp ? `${resp}: ` : ""}${contato}.`);
+  }
+  linhas.push("Para não receber mais mensagens, responda SAIR.");
+  return linhas.join("\n\n");
+}
 
 export const AUTO_REPLY_MAX = 3;
 export const AUTO_REPLY_JANELA_MS = 24 * 3600_000;
 
 type AccountLike = { autoReplyEnabled?: boolean | null; autoReplyText?: string | null };
 
-/** Texto que será enviado: o da conta, ou o padrão quando está vazio. */
-export function autoReplyTextOf(account: AccountLike): string {
+/**
+ * Texto que será enviado: o da conta, ou o padrão do controlador (`controlador`) quando está vazio. LGPD 02-08: o
+ * texto próprio que não ensina a parar ganha a instrução de descadastro no fim.
+ */
+export function autoReplyTextOf(account: AccountLike, controlador?: ControladorAutoReply | null): string {
   const t = account.autoReplyText?.trim();
-  return t ? t.slice(0, TEXT_MAX_CHARS) : AUTO_REPLY_PADRAO;
+  if (!t) return autoReplyPadraoDo(controlador);
+  if (mencionaOptOut(t)) return t.slice(0, TEXT_MAX_CHARS);
+  const sufixo = `\n\n${INSTRUCAO_OPT_OUT}`;
+  return t.slice(0, TEXT_MAX_CHARS - sufixo.length) + sufixo;
 }
 
 /** Decisão pura: responde a esta mensagem? (a trava por conversa é feita no banco, de forma atômica) */
@@ -55,7 +93,11 @@ export async function maybeAutoReply(
 
     const conversation = await prisma.conversation.findFirst({ where: { id: inbound.conversationId, tenantId }, select: { id: true, waId: true } });
     if (!conversation) return false;
-    const texto = autoReplyTextOf(account);
+    // LGPD 02-08: o padrão usa os dados do controlador DESTE tenant (nunca os de outro)
+    const controlador = await prisma.tenant
+      .findUnique({ where: { id: tenantId }, select: { name: true, controladorNome: true, encarregadoNome: true, encarregadoContato: true } })
+      .catch(() => null);
+    const texto = autoReplyTextOf(account, controlador);
     try {
       const wamid = await sendText(account.phoneNumberId, credentialsOf(account).accessToken, conversation.waId, texto, deps.fetchImpl);
       await prisma.waMessage.create({

@@ -13,6 +13,8 @@ import { credentialsOf, globalCredentialsAllowed } from "./whatsappAccount";
 import { CONTATO_LIBERADO_WHERE, contatoSuprimido, motivoBloqueioCliente, semSuprimidos, suprimidosEmLote, textoSupressao, canonicalPhone } from "./privacy";
 import { decryptSecret, isEncryptedPayload } from "./crypto";
 import { brl, recipientContext, renderTemplate, templateContext, usesLimiteDisponivel } from "./messageContext";
+import { comRodape, montarRodape } from "./templateVariables";
+import { baseLegalVigente, motivoSemBaseLegal } from "./baseLegal";
 export { recipientContext, renderTemplate, templateContext, usesLimiteDisponivel };
 
 /**
@@ -25,7 +27,10 @@ export { recipientContext, renderTemplate, templateContext, usesLimiteDisponivel
  *  - respeita o throttle configurado (throttlePerMin) e o rate limit global do tenant
  *    (Tenant.maxMsgsPerMinute — Fase 2);
  *  - tenta os provedores do canal em ordem de prioridade, com failover automático em falha
- *    (Fase 2 — multi-provider SMS).
+ *    (Fase 2 — multi-provider SMS);
+ *  - LGPD 02-01: nada é enfileirado nem enviado sem base legal declarada pelo tenant (Configurações → LGPD);
+ *  - LGPD 02-05/02-07: texto livre (SMS, Z-API, WhatsApp sem template da Meta) sempre leva o rodapé do
+ *    controlador com a instrução de descadastro (`montarRodape`). Template da Meta vai como aprovado.
  * Em produção isso roda em workers dedicados por canal, consumindo de uma fila real
  * (RabbitMQ/Redis Streams) — aqui a fila é modelada em Postgres (MessageEvent status=FILA)
  * para manter o MVP sem dependências de infra extras, com a mesma interface de domínio.
@@ -233,7 +238,16 @@ export async function buildAudience(prisma: AppPrismaClient, tenantId: string, c
  * Enfileira MessageEvents (status FILA) para todos os clientes elegíveis, aplicando a janela de
  * dedupe e sorteando a variante A/B quando a campanha tem variantSplitPercent configurado.
  */
-export async function enqueueCampaign(prisma: AppPrismaClient, tenantId: string, campaignId: string) {
+export async function enqueueCampaign(
+  prisma: AppPrismaClient,
+  tenantId: string,
+  campaignId: string
+): Promise<{ audienceSize: number; queued: number; control: number; skippedDedupe: number; bloqueados?: number; bloqueado?: string }> {
+  // LGPD 02-01: sem base legal declarada nada entra na fila (campanha, lista manual e automação passam aqui)
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { baseLegalMarketing: true } });
+  const semBase = motivoSemBaseLegal(tenant);
+  if (semBase) return { audienceSize: 0, queued: 0, control: 0, skippedDedupe: 0, bloqueado: semBase };
+
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
   if (campaign.manual) return enqueueManualCampaign(prisma, tenantId, campaign);
   const audience = await buildAudience(prisma, tenantId, campaignId);
@@ -361,6 +375,14 @@ async function sentInLastMinute(prisma: AppPrismaClient, tenantId: string): Prom
 export async function processQueueBatch(prisma: AppPrismaClient, campaignId: string, limit = 50) {
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
   const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: campaign.tenantId } });
+  // LGPD 02-01: sem base legal declarada nada sai, e a fila fica intacta (sai quando o controlador declarar)
+  const semBase = motivoSemBaseLegal(tenant);
+  if (semBase) {
+    return { processed: 0, remaining: await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } }), results: [], throttled: false, bloqueado: semBase };
+  }
+  // base vigente no disparo, para campanha criada antes da declaração (as novas já gravam na criação)
+  if (!campaign.baseLegal) await prisma.campaign.update({ where: { id: campaignId }, data: { baseLegal: baseLegalVigente(tenant) } });
+  const rodape = montarRodape(tenant);
   const providers = await resolveProviders(prisma, campaign.tenantId, campaign.channel);
   // LGPD 06-01: sem provedor do próprio tenant, nada sai e a fila fica intacta (não marca FALHA em massa)
   if (providers.length === 0) {
@@ -445,7 +467,8 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
       await block("Sem limite disponível na planilha (a mensagem usa essa variável)");
       continue;
     }
-    const body = renderTemplate(templateBody, ctx);
+    // LGPD 02-05/02-07: texto livre (SMS, Z-API, mock) leva o rodapé do controlador; template da Meta não muda
+    const body = metaTemplate ? renderTemplate(templateBody, ctx) : comRodape(renderTemplate(templateBody, ctx), rodape);
 
     // Template da Meta: os parâmetros saem do cadastro do cliente / da lista (variante B não existe aqui: a Meta aprova um texto só).
     const tplParams = metaTemplate ? templateParams(metaTemplate, ctx) : null;
@@ -507,10 +530,11 @@ export async function sendTestMessages(
   if (providers.length === 0) throw new Error(semProvedorMotivo(campaign.channel)); // LGPD 06-01
 
   const sample = { nome: "Cliente Teste", cidade: "São Paulo", percentual: 42, saldo: brl(850), limite: brl(1500), limite_disponivel: brl(850) };
-  const body = renderTemplate(campaign.messageTemplate, sample);
-
   const { template: metaTemplate, bloqueado } = await resolveWhatsAppTemplate(prisma, campaign, providers);
   if (bloqueado) throw new Error(bloqueado);
+  // LGPD 02-05: o teste mostra o texto como o cliente vai receber (com o rodapé, no texto livre)
+  const controlador = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true, controladorNome: true, rodapeOptOut: true } });
+  const body = metaTemplate ? renderTemplate(campaign.messageTemplate, sample) : comRodape(renderTemplate(campaign.messageTemplate, sample), montarRodape(controlador ?? {}));
   const params = metaTemplate ? templateParams(metaTemplate, sample) : null;
   const header = await prepareHeaderImage(prisma, tenantId, metaTemplate, providers);
   if (header.bloqueado) throw new Error(header.bloqueado);

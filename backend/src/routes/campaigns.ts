@@ -1,14 +1,15 @@
 import { breakdownByPerfil } from "../services/campaignPerfil";
 import { classificarPerfil } from "../services/rendaPerfil";
 import { ETAPAS_USO } from "../services/etapaUso";
-import { Router } from "express";
+import { Request, Response, Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { buildSegmentWhere, ENVIAVEL_WHERE } from "../services/segments";
 import { breakdownByCiclo } from "../services/cicloReport";
-import { PERFIS_RENDA } from "../services/rendaPerfil";
+import { baseLegalVigente, SEM_BASE_LEGAL } from "../services/baseLegal";
+import { CONTATO_LIBERADO_WHERE } from "../services/privacy";
 import {
   buildAudience,
   enqueueCampaign,
@@ -32,6 +33,16 @@ import {
 
 const router = Router();
 router.use(requireAuth);
+
+/**
+ * LGPD 02-01: base legal vigente do tenant, ou null. Sem base declarada nenhuma campanha de marketing é criada
+ * (a fila e o disparo conferem de novo em campaignQueue).
+ */
+async function baseLegalDoTenant(tenantId: string) {
+  const t = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { baseLegalMarketing: true } });
+  return baseLegalVigente(t);
+}
+const semBaseLegal = (res: any) => res.status(409).json({ error: SEM_BASE_LEGAL, code: "SEM_BASE_LEGAL" });
 
 router.get("/", async (req, res) => {
   const campaigns = await prisma.campaign.findMany({
@@ -78,6 +89,9 @@ const manualCreateSchema = z.object({
   costPerMessage: z.number().nonnegative().default(0),
   // Aceite obrigatório: quem sobe a lista responde por ter autorização para contatar os números.
   consentimento: z.literal(true),
+  // LGPD 02-02: com contatos FORA da base (sem relação com o controlador), a prova declarada do consentimento:
+  // onde e como foi coletado (ex.: "formulário do site em 10/2026, campo de aceite de WhatsApp").
+  consentimentoOrigem: z.string().trim().max(1000).optional(),
   // Rascunho: guarda a lista e a campanha sem enfileirar nada (o envio sai ao agendar/lançar).
   rascunho: z.boolean().default(false),
   scheduledAt: z.string().datetime().optional(),
@@ -94,9 +108,25 @@ router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const { tenantId, id: userId } = req.user!;
   const d = parsed.data;
 
+  const baseLegal = await baseLegalDoTenant(tenantId);
+  if (!baseLegal) return semBaseLegal(res);
+
   const r = await prepareManual(prisma, tenantId, d.rows, d.templateId);
   if ("error" in r) return res.status(400).json({ error: r.error });
   if (r.enviar.length === 0) return res.status(400).json({ error: "Nenhum contato da lista pode receber a mensagem", motivos: r.rejected.slice(0, 200) });
+
+  // LGPD 02-02: quem não é cliente não tem relação prévia com o controlador (legítimo interesse não cobre):
+  // só com o consentimento declarado (origem + quem declara + quando), gravado na campanha.
+  const foraDaBase = r.enviar.length - r.daBase;
+  const origem = d.consentimentoOrigem?.trim() ?? "";
+  if (foraDaBase > 0 && origem.length < 10) {
+    return res.status(400).json({
+      error: `A lista tem ${foraDaBase} contato(s) que não são clientes. Para eles, informe onde e como o consentimento foi coletado (mínimo de 10 caracteres).`,
+      code: "CONSENTIMENTO_OBRIGATORIO",
+      foraDaBase,
+    });
+  }
+  const consentimento = foraDaBase > 0 ? { consentimentoOrigem: origem, consentimentoPor: req.user!.email ?? userId, consentimentoEm: new Date() } : {};
 
   const campaign = await prisma.campaign.create({
     data: {
@@ -105,6 +135,8 @@ router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
       objective: d.objective,
       channel: "WHATSAPP",
       manual: true,
+      baseLegal,
+      ...consentimento,
       templateId: r.template.id,
       messageTemplate: r.template.body,
       throttlePerMin: d.throttlePerMin,
@@ -146,7 +178,7 @@ router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
     action: "CREATE_MANUAL_CAMPAIGN",
     target: "Campaign",
     targetId: campaign.id,
-    details: { templateId: r.template.id, recebem: r.enviar.length, daBase: r.daBase, recusadas: r.rejected.length, consentimento: true },
+    details: { templateId: r.template.id, recebem: r.enviar.length, daBase: r.daBase, recusadas: r.rejected.length, consentimento: true, baseLegal, consentimentoDeclarado: foraDaBase > 0 },
   });
   res.status(201).json({ campaign, enviar: r.enviar.length, daBase: r.daBase, recusadas: r.rejected.length, motivos: r.rejected.slice(0, 200) });
 });
@@ -274,8 +306,7 @@ const adHocFiltersSchema = z
     tags: z.array(z.string()).optional(),
     search: z.string().optional(),
     empresaConveniada: z.array(z.string()).optional(),
-    perfilRenda: z.array(z.enum(PERFIS_RENDA)).optional(),
-    noTetoLimite: z.boolean().optional(),
+    // LGPD 01-03: perfil de renda (perfilRenda/noTetoLimite) não é mais filtro de público: só estatística
     saldoDisponivelMin: z.number().optional(),
     etapaUso: z.array(z.enum(ETAPAS_USO)).optional(),
     usosMin: z.number().int().min(0).optional(),
@@ -324,6 +355,8 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { tenantId, id: userId } = req.user!;
   const d = parsed.data;
+  const baseLegal = await baseLegalDoTenant(tenantId);
+  if (!baseLegal) return semBaseLegal(res);
 
   let messageTemplate = d.messageTemplate || "";
   if (d.templateId) {
@@ -341,12 +374,13 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
     : d.adHocFilters;
   const where = buildSegmentWhere(tenantId, (filters as any) || {});
   const estimatedAudience = await prisma.client.count({
-    where: { ...where, autorizacaoComunicacao: true, optOutAt: null, statusConta: { not: "BLOQUEADO" }, ...ENVIAVEL_WHERE },
+    where: { ...where, ...CONTATO_LIBERADO_WHERE, statusConta: { not: "BLOQUEADO" }, ...ENVIAVEL_WHERE },
   });
 
   const campaign = await prisma.campaign.create({
     data: {
       tenantId,
+      baseLegal,
       name: d.name,
       objective: d.objective,
       channel: d.channel,
@@ -394,6 +428,7 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
       controlGroupPercent: d.controlGroupPercent,
       costPerMessage: d.costPerMessage,
       estimatedAudience,
+      baseLegal,
     },
   });
   res.status(201).json(campaign);
@@ -412,6 +447,7 @@ router.post("/:id/schedule", requireRole("ADMIN", "OPERATOR"), async (req, res) 
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
 
   const result = await enqueueCampaign(prisma, tenantId, campaign.id);
+  if (result.bloqueado) return res.status(409).json({ error: result.bloqueado, code: "SEM_BASE_LEGAL" }); // LGPD 02-01
   await logAudit({ tenantId, userId, action: "SCHEDULE_CAMPAIGN", target: "Campaign", targetId: campaign.id, details: result });
   res.json(result);
 });
@@ -611,11 +647,16 @@ router.get("/:id/report", async (req, res) => {
 });
 
 /**
- * GET /api/campaigns/:id/report/export.csv — lista nominal de envios com o uso de cada cliente
- * (saldo no envio, primeiro uso, uso por horizonte D0..D30, valor e lucro em 30 dias).
+ * Export da lista nominal de envios com o uso de cada cliente (saldo no envio, primeiro uso, uso por horizonte
+ * D0..D30, valor e lucro em 30 dias). LGPD 05-01: telefone MASCARADO por padrão; completo só para ADMIN, com
+ * motivo (no corpo, nunca na URL), e a auditoria registra se saiu completo e o motivo.
  */
-router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
-  const { tenantId, id: userId } = req.user!;
+async function exportarRelatorio(req: Request, res: Response, src: Record<string, unknown>) {
+  const { tenantId, id: userId, role } = req.user!;
+  const completo = src.completo === "1" || src.completo === "true" || src.completo === true;
+  const motivo = typeof src.motivo === "string" ? src.motivo.trim().slice(0, 500) : "";
+  if (completo && role !== "ADMIN") return res.status(403).json({ error: "Só administradores exportam o telefone completo" });
+  if (completo && motivo.length < 5) return res.status(400).json({ error: "Informe o motivo para exportar o telefone completo" });
   const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
 
@@ -646,7 +687,7 @@ router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST")
       const usos = ev?.usos ?? [];
       return [
         csvEscape(e.client?.nome ?? e.recipient?.nome ?? ""),
-        e.client?.telefone ?? e.recipient?.telefone ?? "",
+        telefoneCsv(e.client?.telefone ?? e.recipient?.telefone ?? "", completo),
         csvEscape(e.client?.cidade || ""),
         e.status === "CONTROLE" ? "CONTROLE" : "TRATADO",
         e.variant,
@@ -668,10 +709,36 @@ router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST")
     })
     .join("\n");
 
-  await logAudit({ tenantId, userId, action: "EXPORT_CAMPAIGN_REPORT", target: "Campaign", targetId: campaign.id });
+  await logAudit({
+    tenantId,
+    userId,
+    action: "EXPORT_CAMPAIGN_REPORT",
+    target: "Campaign",
+    targetId: campaign.id,
+    details: { count: events.length, telefoneCompleto: completo, ...(completo ? { motivo } : {}) },
+  });
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="campanha-${campaign.id}.csv"`);
   res.send(header + rows);
+}
+
+/** Telefone no CSV: mascarado, salvo export completo autorizado; valor anonimizado ("anon-...") nunca vira dígitos. */
+function telefoneCsv(telefone: string, completo: boolean): string {
+  if (!telefone) return "";
+  return completo ? telefone : maskPhone(telefone);
+}
+
+/** GET /api/campaigns/:id/report/export.csv — sempre mascarado (motivo não vai na URL). */
+router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
+  if (req.query.completo !== undefined || req.query.motivo !== undefined) {
+    return res.status(400).json({ error: "Telefone completo só por POST, com o motivo no corpo (LGPD)." });
+  }
+  await exportarRelatorio(req, res, {});
+});
+
+/** POST /api/campaigns/:id/report/export.csv — o mesmo export; `{ completo: true, motivo }` só para ADMIN. */
+router.post("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
+  await exportarRelatorio(req, res, (req.body ?? {}) as Record<string, unknown>);
 });
 
 function csvEscape(value: string): string {
