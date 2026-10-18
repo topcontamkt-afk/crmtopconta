@@ -66,6 +66,8 @@ export interface SuprimirInput {
   canal?: string | null;
   origem: string;
   pedidoId?: string | null;
+  /** data gravada (padrão: agora); a eliminação grava só o dia */
+  createdAt?: Date;
 }
 
 /**
@@ -91,7 +93,16 @@ export async function suprimir(
   if (cobreTelefone && cobreDoc && existentes.length) return { id: existentes[0].id, criada: false, telefoneMasked };
 
   const criada = await prisma.supressaoTitular.create({
-    data: { tenantId, phoneHash: ph, docHash: dh, motivo: input.motivo, canal: input.canal ?? null, origem: input.origem, pedidoId: input.pedidoId ?? null },
+    data: {
+      tenantId,
+      phoneHash: ph,
+      docHash: dh,
+      motivo: input.motivo,
+      canal: input.canal ?? null,
+      origem: input.origem,
+      pedidoId: input.pedidoId ?? null,
+      ...(input.createdAt ? { createdAt: input.createdAt } : {}),
+    },
     select: { id: true },
   });
   return { id: criada.id, criada: true, telefoneMasked };

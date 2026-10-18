@@ -482,7 +482,8 @@ export async function previewCardAccountImport(prisma: AppPrismaClient, tenantId
 }
 
 /** Avisos sem PII (só o número da linha vai junto) para linhas que a LGPD manda ignorar. */
-export const AVISO_ELIMINADO = "Aviso: titular pediu a eliminação dos dados (LGPD), linha ignorada";
+// a supressão vem do pedido do titular ou da retenção automática: o aviso não presume qual
+export const AVISO_ELIMINADO = "Aviso: dados do titular eliminados (pedido ou prazo de retenção, LGPD), linha ignorada";
 export const AVISO_BLOQUEADO = "Aviso: titular com tratamento bloqueado (LGPD), linha ignorada";
 
 export interface CardImportOptions {

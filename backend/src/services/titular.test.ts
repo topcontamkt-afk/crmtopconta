@@ -78,4 +78,13 @@ describe("LGPD 03-02: relatorioTitular", () => {
     expect(me.OR).toEqual([{ clientId: "c1" }, { recipientId: { in: ["r1"] } }]);
     expect(p.waMessage.findMany.mock.calls[0][0].select).not.toHaveProperty("mediaId");
   });
+
+  it("listas manuais: pelo número só sem documento ou com o mesmo (número reaproveitado é outra pessoa)", async () => {
+    const p = mockPrisma(cliente);
+    await relatorioTitular(p, "t1", "c1");
+    expect(p.campaignRecipient.findMany.mock.calls[0][0].where).toEqual({
+      tenantId: "t1",
+      OR: [{ clientId: "c1" }, { cpfHash: "HASH" }, { telefone: "+5584999998888", OR: [{ cpfHash: null }, { cpfHash: "HASH" }] }],
+    });
+  });
 });

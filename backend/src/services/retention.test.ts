@@ -79,14 +79,14 @@ function model(name: string) {
 
 const MODELS = [
   "tenant", "client", "auditLog", "supressaoTitular", "conversation", "waMessage", "waMediaBlob", "campaignRecipient",
-  "messageEvent", "accountSnapshot", "movement", "importChange", "notification",
+  "messageEvent", "accountSnapshot", "movement", "importChange", "notification", "pedidoTitular",
 ];
 const mockPrisma: Record<string, ReturnType<typeof model>> = Object.fromEntries(MODELS.map((m) => [m, model(m)]));
 const mockTenantRaw = { execute: jest.fn(async () => 3), query: jest.fn() };
 jest.mock("../config/db", () => ({ prisma: mockPrisma, tenantRaw: mockTenantRaw }));
 
 import { prisma } from "../config/db";
-import { anonymizeClient, ANON_NOME, dadosAnonimizados, REDACTED_MARKER, runRetentionSweep } from "./retention";
+import { anonymizeClient, ANON_NOME, dadosAnonimizados, inicioDoDiaBrasilia, REDACTED_MARKER, runRetentionSweep } from "./retention";
 import { resetAnchorCache, verifyAuditChain } from "./auditIntegrity";
 import { logAudit } from "../middleware/audit";
 import { runWithTenantContextAsync } from "../config/tenantGuard";
@@ -136,6 +136,10 @@ function popular() {
     { id: "ic3", tenantId: "t1", clientId: "c2", before: { nome: "Maria" }, createdAt: diasAntes(2) },
   ];
   store.notification = [{ id: "n1", tenantId: "t1", relatedType: "Client", relatedId: "c1" }];
+  store.pedidoTitular = [
+    { id: "p1", tenantId: "t1", clientId: "c1", tipo: "ELIMINACAO", canal: "WHATSAPP", status: "ABERTO", descricao: "João, tel 84 99999-8888, pediu", resposta: "ok João", telefoneMasked: "*********8888" },
+    { id: "p2", tenantId: "t1", clientId: "c2", tipo: "ACESSO", canal: "EMAIL", status: "ABERTO", descricao: "Maria pediu cópia", resposta: null, telefoneMasked: null },
+  ];
 }
 
 const emTenant = <T>(fn: () => Promise<T>) => runWithTenantContextAsync("t1", fn);
@@ -179,8 +183,32 @@ describe("anonymizeClient (LGPD 03-01 / 04-01 / 04-02 / 04-08)", () => {
     await emTenant(() => anonymizeClient(prisma as any, "t1", "c1", { motivo: "pedido do titular", origem: "PEDIDO_TITULAR", pedidoId: "p1", agora: AGORA }));
     expect(store.supressaoTitular).toHaveLength(1);
     const s = store.supressaoTitular[0];
-    expect(s).toMatchObject({ tenantId: "t1", motivo: "ELIMINACAO", docHash: "hash-real-do-cpf", phoneHash: phoneHash(SALT, "+5584999998888"), pedidoId: "p1" });
+    expect(s).toMatchObject({ tenantId: "t1", motivo: "ELIMINACAO", docHash: "hash-real-do-cpf", phoneHash: phoneHash(SALT, "+5584999998888") });
     expect(JSON.stringify(s)).not.toContain("99998888");
+  });
+
+  it("art. 12: a supressão não aponta para o pedido e guarda só o dia (sem elo do hash do CPF ao cliente)", async () => {
+    await emTenant(() => anonymizeClient(prisma as any, "t1", "c1", { motivo: "pedido", origem: "PEDIDO_TITULAR", pedidoId: "p1", agora: AGORA }));
+    const s = store.supressaoTitular[0];
+    expect(s.pedidoId ?? null).toBeNull();
+    expect(s.createdAt).toEqual(new Date("2026-10-18T03:00:00Z")); // meia-noite de Brasília do dia
+    expect(inicioDoDiaBrasilia(new Date("2026-10-19T02:59:00Z"))).toEqual(new Date("2026-10-18T03:00:00Z"));
+  });
+
+  it("pedidos do titular: tipo e status ficam; texto livre, telefone e vínculo com o cliente saem", async () => {
+    await emTenant(() => anonymizeClient(prisma as any, "t1", "c1", { motivo: "x", origem: "PEDIDO_TITULAR", agora: AGORA }));
+    expect(store.pedidoTitular[0]).toMatchObject({ id: "p1", tipo: "ELIMINACAO", status: "ABERTO", clientId: null, descricao: null, resposta: null, telefoneMasked: null });
+    expect(store.pedidoTitular[1]).toMatchObject({ clientId: "c2", descricao: "Maria pediu cópia" });
+  });
+
+  it("número reaproveitado: destinatário com o mesmo telefone e OUTRO CPF não é anonimizado", async () => {
+    store.campaignRecipient.push(
+      { id: "r2", tenantId: "t1", clientId: null, nome: "Pedro (dono novo do número)", telefone: "+5584999998888", cpfHash: "hash-de-outra-pessoa", cpfMasked: "x", limiteDisponivel: 200, createdAt: diasAntes(1) },
+      { id: "r3", tenantId: "t1", clientId: null, nome: "João pelo CPF", telefone: "+5584000000000", cpfHash: "hash-real-do-cpf", cpfMasked: "x", limiteDisponivel: 10, createdAt: diasAntes(1) },
+    );
+    await emTenant(() => anonymizeClient(prisma as any, "t1", "c1", { motivo: "x", origem: "PEDIDO_TITULAR", agora: AGORA }));
+    expect(store.campaignRecipient.find((r) => r.id === "r2")).toMatchObject({ nome: "Pedro (dono novo do número)", telefone: "+5584999998888" });
+    expect(store.campaignRecipient.find((r) => r.id === "r3")).toMatchObject({ nome: "Contato anonimizado", telefone: "anon-r3" });
   });
 
   it("anonimiza o cliente e tudo o que se liga a ele, inclusive conversa e lista sem vínculo pelo número", async () => {

@@ -193,6 +193,12 @@ export interface AnonymizeResult {
   copiasExternas: { provedor: "ZAPI"; conversas: number; aviso: string }[];
 }
 
+/** Meia-noite de Brasília (UTC-3, sem horário de verão) do dia de `d`. */
+export function inicioDoDiaBrasilia(d: Date): Date {
+  const brt = new Date(d.getTime() - 3 * 3_600_000);
+  return new Date(Date.UTC(brt.getUTCFullYear(), brt.getUTCMonth(), brt.getUTCDate(), 3));
+}
+
 /** Anonimiza um titular e tudo o que se liga a ele. Devolve null se o cliente não existe neste tenant. */
 export async function anonymizeClient(
   prisma: AppPrismaClient,
@@ -209,7 +215,9 @@ export async function anonymizeClient(
   const variantes = dadosReais ? variantesTelefone(client.telefone) : [];
   const waIds = variantes.map((v) => v.replace("+", ""));
 
-  // 1) LGPD 03-01: supressão ANTES de sobrescrever os hashes reais
+  // 1) LGPD 03-01: supressão ANTES de sobrescrever os hashes reais. Sem o id do pedido e com a data reduzida ao
+  //    dia (art. 12): a controladora tem o CPF, e um elo com o pedido ou um horário que casa com a trilha levaria
+  //    do hash ao cliente anonimizado. A importação só compara a data com a abertura da conta, e o dia basta.
   let supressaoGravada = false;
   if (dadosReais) {
     const sup = await suprimir(prisma, tenantId, {
@@ -217,7 +225,7 @@ export async function anonymizeClient(
       docHash: client.cpfHash,
       motivo: "ELIMINACAO",
       origem: `anonimizacao:${opts.origem}`,
-      pedidoId: opts.pedidoId ?? null,
+      createdAt: inicioDoDiaBrasilia(agora),
     });
     supressaoGravada = !!sup;
   }
@@ -252,7 +260,13 @@ export async function anonymizeClient(
   const destinatarios = await prisma.campaignRecipient.findMany({
     where: {
       tenantId,
-      OR: [{ clientId }, ...(variantes.length ? [{ telefone: { in: variantes } }] : []), ...(dadosReais ? [{ cpfHash: client.cpfHash }] : [])],
+      // pelo número só quando o destinatário não tem documento ou tem o mesmo: com outro CPF é outra pessoa
+      // (número reaproveitado) e a linha dela não pode ser apagada junto
+      OR: [
+        { clientId },
+        ...(variantes.length ? [{ telefone: { in: variantes }, OR: [{ cpfHash: null }, ...(dadosReais ? [{ cpfHash: client.cpfHash }] : [])] }] : []),
+        ...(dadosReais ? [{ cpfHash: client.cpfHash }] : []),
+      ],
     },
     select: { id: true, telefone: true },
   });
@@ -288,6 +302,12 @@ export async function anonymizeClient(
   // LGPD 04-04: o estado anterior guardado para desfazer importação reidentificaria o cliente
   const importChanges = (await prisma.importChange.deleteMany({ where: { tenantId, clientId } })).count;
   const notificacoes = (await prisma.notification.deleteMany({ where: { tenantId, relatedType: "Client", relatedId: clientId } })).count;
+  // 2f) pedidos do titular: tipo, canal, datas e status ficam (prova do atendimento e do prazo); o texto livre, que
+  //     pode citar o titular, e o vínculo com o cliente saem (LGPD 03-01 / art. 16)
+  await prisma.pedidoTitular.updateMany({
+    where: { tenantId, clientId },
+    data: { clientId: null, descricao: null, resposta: null, telefoneMasked: null },
+  });
 
   // 3) o próprio cliente (LGPD 04-01)
   await prisma.client.update({ where: { id: client.id }, data: dadosAnonimizados(client, agora) });

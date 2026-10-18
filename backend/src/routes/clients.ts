@@ -209,6 +209,10 @@ async function exportar(req: Request, res: Response, src: Fonte, search?: string
  */
 router.get("/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
   if (req.query.search !== undefined) return res.status(400).json({ error: BUSCA_NA_URL });
+  // LGPD 07-03: o motivo é texto livre e cairia nos logs de requisição; telefone completo só pelo POST
+  if (req.query.completo !== undefined || req.query.motivo !== undefined) {
+    return res.status(400).json({ error: "Para exportar com telefone completo, use POST /api/clients/export.csv com o motivo no corpo." });
+  }
   await exportar(req, res, req.query as Fonte);
 });
 
@@ -526,6 +530,8 @@ BEGIN
     SELECT m."id" FROM "WaMessage" m JOIN "Conversation" c ON c."id" = m."conversationId" WHERE c."tenantId" = t AND c."clientId" IS NOT NULL);
   DELETE FROM "WaMessage" WHERE "tenantId" = t AND "conversationId" IN (SELECT "id" FROM "Conversation" WHERE "tenantId" = t AND "clientId" IS NOT NULL);
   DELETE FROM "Conversation" WHERE "tenantId" = t AND "clientId" IS NOT NULL;
+  UPDATE "PedidoTitular" SET "descricao" = NULL, "resposta" = NULL, "telefoneMasked" = NULL, "clientId" = NULL
+    WHERE "tenantId" = t AND "clientId" IS NOT NULL;
   UPDATE "CampaignRecipient" SET "nome" = 'Contato anonimizado', "telefone" = 'anon-' || "id", "cpfHash" = NULL, "cpfMasked" = NULL,
     "limiteDisponivel" = NULL, "clientId" = NULL WHERE "tenantId" = t AND "clientId" IS NOT NULL;
   DELETE FROM "MessageEvent" WHERE "clientId" IN (SELECT "id" FROM "Client" WHERE "tenantId" = t);

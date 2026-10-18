@@ -119,7 +119,8 @@ export async function relatorioTitular(prisma: AppPrismaClient, tenantId: string
       },
     }),
     prisma.campaignRecipient.findMany({
-      where: { tenantId, OR: [{ clientId }, { cpfHash }, { telefone: client.telefone }] },
+      // pelo número só sem documento ou com o mesmo: outro CPF no mesmo número é outra pessoa (número reaproveitado)
+      where: { tenantId, OR: [{ clientId }, { cpfHash }, { telefone: client.telefone, OR: [{ cpfHash: null }, { cpfHash }] }] },
       orderBy: { createdAt: "asc" },
       select: { id: true, nome: true, telefone: true, cpfMasked: true, limiteDisponivel: true, optOutAt: true, createdAt: true, campaign: { select: { id: true, name: true } } },
     }),

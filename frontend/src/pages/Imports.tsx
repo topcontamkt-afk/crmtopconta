@@ -313,7 +313,7 @@ export default function Imports() {
         lgpd.camposPreservadosCorrecao += resp.camposPreservadosCorrecao ?? 0;
       }
       const avisosLgpd = [
-        lgpd.eliminadosAPedido > 0 ? `${lgpd.eliminadosAPedido} linha(s) ignorada(s): titular pediu a eliminação dos dados` : "",
+        lgpd.eliminadosAPedido > 0 ? `${lgpd.eliminadosAPedido} linha(s) ignorada(s): dados do titular eliminados (pedido ou prazo de retenção)` : "",
         lgpd.bloqueadosLgpd > 0 ? `${lgpd.bloqueadosLgpd} linha(s) ignorada(s): tratamento bloqueado a pedido do titular` : "",
         lgpd.supressoesLiberadas > 0 ? `${lgpd.supressoesLiberadas} titular(es) voltou(aram) por conta aberta depois do pedido de eliminação` : "",
         lgpd.camposPreservadosCorrecao > 0 ? `${lgpd.camposPreservadosCorrecao} campo(s) corrigido(s) à mão mantido(s) (a planilha não sobrescreve correção)` : "",

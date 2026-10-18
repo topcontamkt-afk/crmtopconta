@@ -139,12 +139,19 @@ describe("LGPD 05-01: export", () => {
   });
 
   it("telefone completo: só ADMIN e com motivo, que vai para o AuditLog", async () => {
-    expect((await request(app).get("/clients/export.csv?completo=1&motivo=incidente").set("x-role", "OPERATOR")).status).toBe(403);
-    expect((await request(app).get("/clients/export.csv?completo=1").set("x-role", "ADMIN")).status).toBe(400);
-    const r = await request(app).get("/clients/export.csv?completo=1&motivo=resposta%20a%20incidente").set("x-role", "ADMIN");
+    expect((await request(app).post("/clients/export.csv").send({ completo: true, motivo: "incidente" }).set("x-role", "OPERATOR")).status).toBe(403);
+    expect((await request(app).post("/clients/export.csv").send({ completo: true }).set("x-role", "ADMIN")).status).toBe(400);
+    const r = await request(app).post("/clients/export.csv").send({ completo: true, motivo: "resposta a incidente" }).set("x-role", "ADMIN");
     expect(r.status).toBe(200);
     expect(r.text).toContain(TEL);
     expect(audit.mock.calls[0][0].details).toMatchObject({ telefoneCompleto: true, motivo: "resposta a incidente" });
+  });
+
+  it("motivo nunca vai na URL: GET com completo/motivo é recusado (LGPD 07-03)", async () => {
+    const r = await request(app).get("/clients/export.csv?completo=1&motivo=resposta%20a%20incidente").set("x-role", "ADMIN");
+    expect(r.status).toBe(400);
+    expect(db.client.findMany).not.toHaveBeenCalled();
+    expect(audit).not.toHaveBeenCalled();
   });
 
   it("mantém o escape anti-fórmula", async () => {
