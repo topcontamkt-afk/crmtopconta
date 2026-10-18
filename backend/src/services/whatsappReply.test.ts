@@ -1,4 +1,5 @@
 import { applyOutboundStatus, nextOutboundStatus, sendReply, sendTemplateReply } from "./whatsappReply";
+import { SEM_BASE_LEGAL } from "./baseLegal";
 import { phoneHash } from "./privacy";
 
 const now = new Date("2026-10-11T12:00:00Z");
@@ -113,13 +114,13 @@ describe("status de entrega", () => {
 describe("sendTemplateReply — opt-out por telefone", () => {
   const now = new Date("2026-10-11T12:00:00Z");
   const approved = { id: "tp1", channel: "WHATSAPP", status: "APROVADO", metaStatus: "APPROVED", metaName: "oferta_v1", language: "pt_BR", body: "Olá {{nome}}" };
-  function fakeTpl(client: any, supressoes: any[] = [], optOutOutroCadastro: any[] = []) {
+  function fakeTpl(client: any, supressoes: any[] = [], optOutOutroCadastro: any[] = [], base: string | null = "LEGITIMO_INTERESSE", category = "MARKETING") {
     const created: any[] = [];
     const prisma: any = {
       conversation: { findFirst: jest.fn(async () => ({ id: "c1", waId: "558499998888", contactName: "Maria", client, account: { tenantId: "t1", phoneNumberId: "1055", active: true } })), update: jest.fn() },
-      messageTemplate: { findFirst: jest.fn(async () => approved) },
+      messageTemplate: { findFirst: jest.fn(async () => ({ ...approved, category })) },
       waMessage: { create: jest.fn(async ({ data }: any) => { created.push(data); return { id: "m1", ...data }; }) },
-      tenant: { findUnique: jest.fn(async () => ({ cpfSalt: "salt" })) },
+      tenant: { findUnique: jest.fn(async () => ({ cpfSalt: "salt", baseLegalMarketing: base })) },
       supressaoTitular: { findMany: jest.fn(async () => supressoes) },
       client: { findMany: jest.fn(async () => optOutOutroCadastro) },
       campaignRecipient: { findMany: jest.fn(async () => []) },
@@ -154,6 +155,16 @@ describe("sendTemplateReply — opt-out por telefone", () => {
     const { prisma, created } = fakeTpl(liberado);
     await sendTemplateReply(prisma, "t1", "u1", "c1", "tp1", { token: "T", fetchImpl: okFetch(), now });
     expect(created).toHaveLength(1);
+  });
+
+  it("LGPD 02-01: template de marketing sem base legal declarada não sai; utilidade sai", async () => {
+    const semBase = fakeTpl(liberado, [], [], null);
+    const f = okFetch();
+    await expect(sendTemplateReply(semBase.prisma, "t1", "u1", "c1", "tp1", { token: "T", fetchImpl: f, now })).rejects.toMatchObject({ code: "TEMPLATE_INDISPONIVEL", message: SEM_BASE_LEGAL });
+    expect(f).not.toHaveBeenCalled();
+    const utilidade = fakeTpl(liberado, [], [], null, "UTILITY");
+    await sendTemplateReply(utilidade.prisma, "t1", "u1", "c1", "tp1", { token: "T", fetchImpl: okFetch(), now });
+    expect(utilidade.created).toHaveLength(1);
   });
 });
 

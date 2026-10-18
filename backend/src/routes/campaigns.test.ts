@@ -29,6 +29,7 @@ jest.mock("../services/campaignResults", () => ({ ...jest.requireActual("../serv
 import router from "./campaigns";
 import { logAudit } from "../middleware/audit";
 import { SEM_BASE_LEGAL } from "../services/baseLegal";
+import { AVISO_RENDA_IGNORADA } from "../services/segments";
 
 const app = express();
 app.use(express.json());
@@ -61,6 +62,14 @@ describe("LGPD 02-01: campanha sem base legal declarada não é criada", () => {
     expect(db.campaign.create.mock.calls[0][0].data.baseLegal).toBe("LEGITIMO_INTERESSE");
     expect(audit.mock.calls[0][0].details.baseLegal).toBe("LEGITIMO_INTERESSE");
     expect(db.client.count.mock.calls[0][0].where).toMatchObject({ bloqueadoLgpdAt: null });
+  });
+
+  it("POST /campaigns: segmento antigo com filtro de renda é recusado (LGPD 01-03, o público seria maior)", async () => {
+    db.segmentDefinition.findFirst.mockResolvedValue({ id: "s1", filters: { noTetoLimite: true } });
+    const r = await request(app).post("/campaigns").send({ name: "C", channel: "WHATSAPP", templateId: "tp1", segmentId: "s1" });
+    expect(r.status).toBe(409);
+    expect(r.body).toEqual({ error: AVISO_RENDA_IGNORADA, code: "FILTRO_RENDA" });
+    expect(db.campaign.create).not.toHaveBeenCalled();
   });
 
   it("POST /campaigns/manual: 409 sem base", async () => {

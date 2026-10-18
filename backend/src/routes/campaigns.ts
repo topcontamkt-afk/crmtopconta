@@ -6,7 +6,7 @@ import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
-import { buildSegmentWhere, ENVIAVEL_WHERE } from "../services/segments";
+import { AVISO_RENDA_IGNORADA, buildSegmentWhere, ENVIAVEL_WHERE, filtrosRendaIgnorados } from "../services/segments";
 import { breakdownByCiclo } from "../services/cicloReport";
 import { baseLegalVigente, SEM_BASE_LEGAL } from "../services/baseLegal";
 import { CONTATO_LIBERADO_WHERE } from "../services/privacy";
@@ -372,6 +372,8 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const filters = d.segmentId
     ? (await prisma.segmentDefinition.findFirst({ where: { id: d.segmentId, tenantId } }))?.filters
     : d.adHocFilters;
+  // LGPD 01-03: segmento antigo com filtro de renda ampliaria o público em silêncio
+  if (filtrosRendaIgnorados(filters).length) return res.status(409).json({ error: AVISO_RENDA_IGNORADA, code: "FILTRO_RENDA" });
   const where = buildSegmentWhere(tenantId, (filters as any) || {});
   const estimatedAudience = await prisma.client.count({
     where: { ...where, ...CONTATO_LIBERADO_WHERE, statusConta: { not: "BLOQUEADO" }, ...ENVIAVEL_WHERE },

@@ -4,6 +4,7 @@ const prepareManual = jest.fn();
 jest.mock("./manualCampaign", () => ({ prepareManual: (...a: any[]) => prepareManual(...a) }));
 
 import { validateWizard } from "./campaignWizard";
+import { AVISO_RENDA_IGNORADA } from "./segments";
 
 /**
  * Lote 4 LGPD no assistente de campanha: base legal (02-01), rodapé/descadastro (02-05, 02-07) e consentimento
@@ -43,6 +44,13 @@ describe("LGPD 02-01: base legal no assistente", () => {
     expect(v.podeLancar).toBe(true);
   });
 
+  it("consentimento: aviso de que a prova do aceite fica fora do CRM (art. 8º, §2º)", async () => {
+    const v = await validateWizard(fakePrisma({ baseLegalMarketing: "CONSENTIMENTO" }), "t1", todos);
+    expect(check(v, "base_legal")).toMatchObject({ nivel: "aviso" });
+    expect(check(v, "base_legal").detalhe).toContain("prova do consentimento");
+    expect(v.podeLancar).toBe(true);
+  });
+
   it("base e LIA em dia: ok", async () => {
     const v = await validateWizard(fakePrisma(), "t1", todos);
     expect(check(v, "base_legal")).toMatchObject({ nivel: "ok" });
@@ -52,6 +60,16 @@ describe("LGPD 02-01: base legal no assistente", () => {
     const prisma = fakePrisma();
     await validateWizard(prisma, "t1", todos);
     expect(prisma.client.count.mock.calls[1][0].where).toMatchObject({ bloqueadoLgpdAt: null, optOutAt: null, autorizacaoComunicacao: true });
+  });
+});
+
+describe("LGPD 01-03: segmento com filtro de renda", () => {
+  it("erro no público e não pode lançar (sem o filtro, iria para mais gente)", async () => {
+    const prisma = fakePrisma();
+    prisma.segmentDefinition.findFirst.mockResolvedValue({ id: "s1", filters: { operator: "AND", conditions: { perfilRenda: ["PF1"], saldoDisponivelMin: 50 } } });
+    const v = await validateWizard(prisma, "t1", { templateId: "tp1", audience: { tipo: "segmento", segmentId: "s1" } });
+    expect(check(v, "publico")).toMatchObject({ nivel: "erro", detalhe: AVISO_RENDA_IGNORADA });
+    expect(v.podeLancar).toBe(false);
   });
 });
 

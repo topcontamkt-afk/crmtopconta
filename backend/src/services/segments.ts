@@ -124,6 +124,13 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
 export const FILTROS_RENDA = ["perfilRenda", "noTetoLimite"] as const;
 
 /**
+ * Segmento ou regra antiga com filtro de renda: sem o filtro, o público ficaria MAIOR do que o planejado (ex.: "PF1
+ * com saldo" viraria "todos com saldo"), então campanha e automação com ele não saem até a pessoa revisar.
+ */
+export const AVISO_RENDA_IGNORADA =
+  "O público usa filtro de perfil de renda, que deixou de valer (LGPD). Sem ele, a mensagem iria para mais gente do que o planejado. Edite o segmento ou a regra e escolha outro critério.";
+
+/**
  * Filtros de renda presentes (e ignorados) num segmento salvo, em qualquer nível de grupo. Lista vazia = nada
  * ignorado. Usado para a tela avisar que o segmento antigo passou a contar sem o filtro de renda.
  */

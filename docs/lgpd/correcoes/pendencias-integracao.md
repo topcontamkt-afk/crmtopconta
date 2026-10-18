@@ -17,6 +17,8 @@ que ficou de fora de propósito e o que depende de alguém fora do código.
 | Janela de 24h da Z-API na Inbox; 403 por papel auditado; planilha única por tenant; variáveis de credencial global documentadas | integração `f98c4c9` |
 | Público de envio exclui bloqueado, encerrado e anonimizado (`ENVIAVEL_WHERE`); dashboard não conta anonimizado nem bloqueado | integração `9fcc163` + Lote 2 (`dashboardMetrics.ts`) |
 | Resposta automática da Inbox com o padrão do controlador; automação confere base legal; prévia de retenção = critério do job | integração `9fcc163` |
+| Pedido do titular perde texto livre e vínculo na eliminação e no "Limpar base"; supressão ELIMINACAO sem id do pedido e só com o dia (art. 12); número reaproveitado fora da anonimização e do relatório; motivo do export fora da URL | `/lgpd-check` `d83470d` |
+| Segmento ou regra antiga com filtro de renda é recusado (sem o filtro o público cresceria); template MARKETING pela Inbox exige base legal; e-mail só pode ser apagado; conta reaberta limpa `encerradoEm`; aviso de que consentimento exige prova fora do CRM | `/lgpd-check` (2ª parte) |
 
 ## Ficou de fora de propósito
 
@@ -34,6 +36,19 @@ que ficou de fora de propósito e o que depende de alguém fora do código.
 - Credencial Google por tenant (OAuth ou Service Account cifrada) como solução definitiva de 06-02.
 - Retenção do log do servidor para tentativas de login com e-mail inexistente (log drain).
 - Anonimização por retenção também grava supressão ELIMINACAO (volta por `NOVA_RELACAO` ou liberação manual): confirmar com a controladora.
+  O aviso da importação já não diz "o titular pediu". Opção: motivo próprio `RETENCAO` com prazo.
+- Compras de cliente anonimizado seguem ligadas ao `clientId` (valor, lojista, mês, juros). Como a controladora tem o
+  extrato original, isso é pseudonimização diante dela (art. 12). Opção: apagar as compras quando a eliminação vem de
+  pedido do titular, aceitando perder esses usos no histórico do dashboard e das campanhas.
+- Base legal da TopConta declarada pelo SQL `2026-10-lgpd-adequacao.sql`, sem autor no AuditLog: pedir a um ADMIN da
+  controladora que salve Configurações → LGPD (grava `UPDATE_TENANT_LGPD` encadeado).
+- Consentimento como base: hoje só aviso; recusar enquanto não houver registro de aceite por titular é decisão da controladora.
+- Template importado da Meta sem botão/rodapé de saída continua enviável (só aviso no assistente).
+- Envio de teste (`/campaigns/:id/test`) não confere base legal (vai para números digitados pela equipe).
+- Planilha Google: vale quem cadastra primeiro; prova de posse fica para a credencial por tenant (06-02).
+- Reduzir `retentionDaysAfterClosure`, `inboxRetentionDays` ou `mediaRetentionDays` não mostra prévia (só o prazo geral).
+- Opt-out por SMS e manual não criam `PedidoTitular` (o do WhatsApp cria); 403 `SEM_ACESSO_AREA` não é auditado.
+- Opt-outs antigos só em `Client.optOutAt` não foram copiados para `SupressaoTitular` (o envio ainda os lê pelo cadastro).
 
 ## Decisão: eliminação x reimportação
 

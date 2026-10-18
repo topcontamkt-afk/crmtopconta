@@ -15,6 +15,7 @@ import {
 } from "./whatsappSend";
 import { previewOf } from "./whatsappPayload";
 import { estaSuprimido, motivoBloqueioCliente, textoSupressao } from "./privacy";
+import { motivoSemBaseLegal } from "./baseLegal";
 import { templateContext } from "./messageContext";
 import { sendTemplateMessage, templateParams, templatePreview } from "./whatsappTemplates";
 import { unmappedPositions } from "./templateImport";
@@ -234,6 +235,11 @@ export async function sendTemplateReply(
 
   const template = await prisma.messageTemplate.findFirst({ where: { id: templateId, tenantId } });
   if (!template || !isSendableTemplate(template)) throw new SendError("TEMPLATE_INDISPONIVEL", "Este template não está aprovado pela Meta.");
+  // LGPD 02-01: template de marketing é contato proativo, com a mesma trava de base legal das campanhas
+  if (template.category !== "UTILITY") {
+    const semBase = motivoSemBaseLegal(await prisma.tenant.findUnique({ where: { id: tenantId }, select: { baseLegalMarketing: true } }));
+    if (semBase) throw new SendError("TEMPLATE_INDISPONIVEL", semBase);
+  }
 
   const { params, texto } = previewTemplateFor(template, conversation);
   let headerImageId: string | undefined;

@@ -18,6 +18,7 @@ jest.mock("./zapi", () => ({ zapiCredentialsOf: () => ({ instanceId: "i", token:
 import { enqueueCampaign, processQueueBatch, sendTestMessages } from "./campaignQueue";
 import { MockSMSAdapter } from "./channels/sms";
 import { SEM_BASE_LEGAL } from "./baseLegal";
+import { AVISO_RENDA_IGNORADA } from "./segments";
 
 const SALT = "salt-t1";
 const cliente = { id: "c1", telefone: "+5584911110000", cpfHash: "doc-c1", nome: "Ana", autorizacaoComunicacao: true, optOutAt: null, bloqueadoLgpdAt: null, limiteTotal: 1000, saldoDisponivel: 500, percentualUtilizado: 50, cidade: "Natal" };
@@ -86,6 +87,14 @@ describe("LGPD 02-01: sem base legal declarada, nada é enfileirado nem enviado"
     expect(r).toMatchObject({ queued: 0, bloqueado: SEM_BASE_LEGAL });
     expect(prisma.messageEvent.create).not.toHaveBeenCalled();
     expect(prisma.campaign.update).not.toHaveBeenCalled();
+  });
+
+  it("LGPD 01-03: segmento antigo com filtro de renda não é enfileirado (o público seria maior)", async () => {
+    const { prisma } = fake({ campanha: { segment: { filters: { perfilRenda: ["PF1"] } } } });
+    const r = await enqueueCampaign(prisma, "t1", "camp1");
+    expect(r).toMatchObject({ queued: 0, bloqueado: AVISO_RENDA_IGNORADA });
+    expect(prisma.client.findMany).not.toHaveBeenCalled();
+    expect(prisma.messageEvent.create).not.toHaveBeenCalled();
   });
 
   it("com base declarada, o disparo grava a base vigente na campanha que ainda não a tinha", async () => {

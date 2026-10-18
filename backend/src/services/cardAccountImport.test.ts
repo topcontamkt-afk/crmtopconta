@@ -321,6 +321,16 @@ describe("LGPD 04-06 / 01-01: encerramento e minimização", () => {
     expect(upserts[0].create.encerradoEm).toBeInstanceOf(Date); // cliente novo: data de hoje
   });
 
+  it("conta reaberta (\"não\" explícito no encerramento) limpa encerradoEm; coluna vazia não mexe", async () => {
+    const ex = cliente({ cpfHash: HASH_A, encerradoEm: new Date("2026-01-05T00:00:00Z") });
+    const reaberta = fakeCartoes({ existentes: [ex] });
+    await runCardAccountImport(reaberta.prisma, "t1", [{ ...linhaDeCompras, encerrado: "não" }], "u1");
+    expect(reaberta.upserts[0].update.encerradoEm).toBeNull();
+    const vazia = fakeCartoes({ existentes: [ex] });
+    await runCardAccountImport(vazia.prisma, "t1", [{ ...linhaDeCompras, encerrado: "" }], "u1");
+    expect(vazia.upserts[0].update).not.toHaveProperty("encerradoEm");
+  });
+
   it("data de ativação antiga não faz regredir o último uso conhecido", () => {
     const ex = cliente({ dataUltimaUtilizacao: new Date("2026-10-01T00:00:00Z") });
     const p = { rowNumber: 2, cpfHash: "h", limiteTotal: 0, saldoDisponivel: 0, valorUtilizado: 0, statusConta: "ATIVO" as const, data: { nome: "Maria", dataUltimaUtilizacao: new Date("2020-01-01") } as any };

@@ -41,7 +41,7 @@ export default function ClientProfile() {
   const podeEditar = admin || user?.role === "OPERATOR";
   const [client, setClient] = useState<ClientDetail | null>(null);
   const [editando, setEditando] = useState(false);
-  const [form, setForm] = useState({ nome: "", cidade: "", telefone: "", email: "" });
+  const [form, setForm] = useState({ nome: "", cidade: "", telefone: "", apagarEmail: false });
   const [erro, setErro] = useState<string | null>(null);
   const [aviso, setAviso] = useState<string | null>(null);
 
@@ -54,7 +54,7 @@ export default function ClientProfile() {
 
   function abrirEdicao() {
     if (!client) return;
-    setForm({ nome: client.nome, cidade: client.cidade ?? "", telefone: client.telefone, email: client.email ?? "" });
+    setForm({ nome: client.nome, cidade: client.cidade ?? "", telefone: client.telefone, apagarEmail: false });
     setEditando(true);
   }
 
@@ -66,7 +66,8 @@ export default function ClientProfile() {
     if (form.nome.trim() !== client.nome) body.nome = form.nome.trim();
     if (form.cidade.trim() !== (client.cidade ?? "")) body.cidade = form.cidade.trim();
     if (form.telefone.trim() !== client.telefone) body.telefone = form.telefone.trim();
-    if (form.email.trim() !== (client.email ?? "")) body.email = form.email.trim() || null;
+    // LGPD 01-01: o CRM não guarda mais e-mail; só dá para apagar o que sobrou de importações antigas
+    if (form.apagarEmail && client.email) body.email = null;
     if (!Object.keys(body).length) return setEditando(false);
     try {
       await api(`/clients/${client.id}`, { method: "PATCH", body });
@@ -192,7 +193,12 @@ export default function ClientProfile() {
           <label>Nome <input value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} /></label>
           <label>Cidade <input value={form.cidade} onChange={(e) => setForm({ ...form, cidade: e.target.value })} /></label>
           <label>Telefone <input value={form.telefone} onChange={(e) => setForm({ ...form, telefone: e.target.value })} placeholder="(84) 99999-9999" /></label>
-          <label>E-mail <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></label>
+          {client.email && (
+            <label>
+              <input type="checkbox" checked={form.apagarEmail} onChange={(e) => setForm({ ...form, apagarEmail: e.target.checked })} /> Apagar o e-mail
+              guardado (o CRM não usa mais e-mail)
+            </label>
+          )}
           <div style={{ display: "flex", gap: 8 }}>
             <button className="btn" onClick={salvar}>Salvar correção</button>
             <button className="btn secondary" onClick={() => setEditando(false)}>Cancelar</button>

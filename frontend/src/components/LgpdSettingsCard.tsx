@@ -170,6 +170,12 @@ export default function LgpdSettingsCard({ isAdmin }: { isAdmin: boolean }) {
           descadastro fácil em toda mensagem; consentimento exige prova de quando e como cada pessoa aceitou.
         </Ajuda>
         {semBase && <div className="error-text" style={{ fontSize: 13 }}>Envio de marketing bloqueado até a base legal ser declarada.</div>}
+        {f.baseLegalMarketing === "CONSENTIMENTO" && (
+          <div className="error-text" style={{ fontSize: 13 }}>
+            O CRM não registra o aceite de cada pessoa (data, canal e texto): a autorização vem da planilha. Com consentimento, a
+            prova fica com o controlador, fora do sistema (art. 8º, §2º).
+          </div>
+        )}
       </div>
       {f.baseLegalMarketing === "LEGITIMO_INTERESSE" && (
         <div className="seg-row">

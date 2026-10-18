@@ -2,7 +2,7 @@ import { AppPrismaClient } from "../config/db";
 import { logAudit } from "../middleware/audit";
 import { notify } from "./notifications";
 import { enqueueCampaign, processQueueBatch } from "./campaignQueue";
-import { buildSegmentWhere, ENVIAVEL_WHERE, SALDO_MINIMO_ELEGIVEL } from "./segments";
+import { AVISO_RENDA_IGNORADA, buildSegmentWhere, ENVIAVEL_WHERE, filtrosRendaIgnorados, SALDO_MINIMO_ELEGIVEL } from "./segments";
 import { avaliarFrescor } from "./dataFreshness";
 import { isEtapaUso } from "./etapaUso";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
@@ -112,8 +112,8 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
 
     case "ETAPA_PERFIL": {
       // condition: { etapaUso, comSaldo? }. A etapa é obrigatória (senão a regra miraria a base inteira).
-      // LGPD 01-03: `perfilRenda` (renda estimada) deixou de ser critério de público e é ignorado; regra antiga
-      // só com perfil de renda para de disparar. Etapa de uso depende do extrato: com o extrato velho
+      // LGPD 01-03: `perfilRenda` (renda estimada) deixou de ser critério de público; regra com ele não dispara
+      // (ver runRule). Etapa de uso depende do extrato: com o extrato velho
       // (ver dataFreshness.ts) a regra não dispara — quem "parou de usar" seria só falta de planilha.
       const etapa = isEtapaUso(condition?.etapaUso) ? condition.etapaUso : undefined;
       if (!etapa) return { clientIds: [] };
@@ -144,7 +144,7 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
       const configs = await prisma.cicloCidade.findMany({ where: { tenantId } });
       const escolhidas = Array.isArray(condition?.cidades) && condition.cidades.length ? new Set<string>(condition.cidades) : null;
       const hoje = diasAberturaNaFaixa({ min: apos, max: apos }, "abriuHa");
-      const etapa = isEtapaUso(condition?.etapaUso) ? condition.etapaUso : undefined; // LGPD 01-03: perfilRenda ignorado
+      const etapa = isEtapaUso(condition?.etapaUso) ? condition.etapaUso : undefined; // LGPD 01-03: regra com perfilRenda não chega aqui (runRule)
       if (etapa) {
         const ultima = await prisma.purchase.aggregate({ where: { tenantId }, _max: { occurredAt: true } });
         if (avaliarFrescor(ultima._max.occurredAt).status !== "OK") {
@@ -320,6 +320,11 @@ export async function runRule(
   opts: { simular?: boolean } = {}
 ): Promise<RuleRunResult> {
   return runWithTenantContextAsync(rule.tenantId, async () => {
+    // LGPD 01-03: regra antiga com perfil de renda não dispara (sem o filtro, miraria mais gente do que o planejado)
+    if (filtrosRendaIgnorados(rule.condition).length) {
+      console.warn(`[automation] regra ${rule.id} usa perfil de renda, que deixou de valer: não dispara (tenant ${rule.tenantId})`);
+      return { matched: 0, executed: false, reason: AVISO_RENDA_IGNORADA, ...(opts.simular ? { simulado: true } : {}) };
+    }
     const { clientIds, grupos } = await matchClients(prisma, rule.tenantId, rule.trigger, rule.condition);
     if (opts.simular) {
       return { matched: clientIds.length, simulado: true, grupos: grupos?.map((g) => ({ label: g.label, total: g.clientIds.length })) };

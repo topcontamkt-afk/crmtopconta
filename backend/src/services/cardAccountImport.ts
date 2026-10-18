@@ -229,8 +229,9 @@ function prepareRow(rawIn: CardAccountRow, rowNumber: number, tenantCpfSalt: str
     statusConta,
     origemCliente: isReprovado ? "comercio" : undefined,
     empresaConveniada: raw.empresa_conveniada?.trim() || undefined,
-    // LGPD 04-06: data do PRIMEIRO encerramento visto (planUpdate não regrava em quem já tem)
-    encerradoEm: encerrado ? new Date() : undefined,
+    // LGPD 04-06: data do PRIMEIRO encerramento visto (planUpdate não regrava em quem já tem). "Não" explícito na
+    // coluna = conta (re)aberta: limpa a data, senão o cliente seguiria fora das campanhas e no prazo de encerrado
+    encerradoEm: encerrado ? new Date() : filled(raw.encerrado) ? null : undefined,
     dataValidadeCartao: parseDate(raw.data_validade_cartao),
     dataNascimento: parseDate(raw.data_nascimento),
     sexo: raw.sexo?.trim() || undefined,
@@ -341,8 +342,8 @@ export function planUpdate(p: PreparedRow, existing: ClientRow, presence: FieldP
     delete update.origemCliente;
     delete update.encerradoEm;
   }
-  // LGPD 04-06: a data do encerramento é a do primeiro registro; reimportar não a regrava
-  if (existing.encerradoEm) delete update.encerradoEm;
+  // LGPD 04-06: a data do encerramento é a do primeiro registro; reimportar não a regrava (null = reaberta, limpa)
+  if (existing.encerradoEm && update.encerradoEm !== null) delete update.encerradoEm;
   // LGPD 03-01: a data de ativação da planilha nunca faz regredir o último uso já conhecido (ex.: o do extrato)
   const novoUso = update.dataUltimaUtilizacao as Date | undefined;
   if (novoUso && existing.dataUltimaUtilizacao && novoUso.getTime() <= existing.dataUltimaUtilizacao.getTime()) delete update.dataUltimaUtilizacao;

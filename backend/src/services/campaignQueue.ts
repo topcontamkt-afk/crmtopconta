@@ -4,7 +4,7 @@ import { MockSMSAdapter, TwilioSMSAdapter, ZenviaSMSAdapter } from "./channels/s
 import { MockWhatsAppAdapter, WhatsAppCloudAdapter } from "./channels/whatsapp";
 import { ZAPI_BATCH_MAX, ZapiAdapter } from "./channels/zapi";
 import { zapiCredentialsOf } from "./zapi";
-import { buildSegmentWhere, ENVIAVEL_WHERE, SegmentFilters, SegmentGroup } from "./segments";
+import { AVISO_RENDA_IGNORADA, buildSegmentWhere, ENVIAVEL_WHERE, filtrosRendaIgnorados, SegmentFilters, SegmentGroup } from "./segments";
 import { templateParams, templatePreview } from "./whatsappTemplates";
 import { unmappedPositions } from "./templateImport";
 import { makeToken, trackedButtons } from "./trackedLinks";
@@ -248,8 +248,12 @@ export async function enqueueCampaign(
   const semBase = motivoSemBaseLegal(tenant);
   if (semBase) return { audienceSize: 0, queued: 0, control: 0, skippedDedupe: 0, bloqueado: semBase };
 
-  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
+  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId }, include: { segment: true } });
   if (campaign.manual) return enqueueManualCampaign(prisma, tenantId, campaign);
+  // LGPD 01-03: segmento antigo com filtro de renda (que não vale mais) ampliaria o público em silêncio
+  if (filtrosRendaIgnorados(campaign.segment?.filters ?? campaign.adHocFilters).length) {
+    return { audienceSize: 0, queued: 0, control: 0, skippedDedupe: 0, bloqueado: AVISO_RENDA_IGNORADA };
+  }
   const audience = await buildAudience(prisma, tenantId, campaignId);
 
   const dedupeCutoff = new Date(Date.now() - campaign.dedupeWindowHrs * 60 * 60 * 1000);

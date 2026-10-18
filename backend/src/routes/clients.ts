@@ -329,6 +329,7 @@ const updateSchema = z.object({
   cidade: z.string().trim().max(120).optional(),
   // LGPD 03-03: correção de contato a pedido do titular
   telefone: z.string().max(30).optional(),
+  // LGPD 01-01: e-mail não tem finalidade no CRM; só aceita apagar (null ou vazio) o que sobrou de importações antigas
   email: z.string().trim().max(200).nullable().optional(),
   statusConta: z.enum(["ATIVO", "INATIVO", "BLOQUEADO"]).optional(),
   autorizacaoComunicacao: z.boolean().optional(),
@@ -339,7 +340,6 @@ const updateSchema = z.object({
 
 /** LGPD 03-03: dados do titular que, corrigidos à mão, ficam travados contra a reimportação. */
 export const CAMPOS_CORRIGIVEIS = ["nome", "cidade", "telefone", "email"] as const;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const { tenantId, id: userId, role } = req.user!;
@@ -348,16 +348,15 @@ router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
 
   const { motivoReautorizacao, ...campos } = parsed.data;
   const data: Record<string, unknown> = { ...campos };
-  // LGPD 03-03: telefone sempre em E.164; e-mail vazio limpa o campo
+  // LGPD 03-03: telefone sempre em E.164; e-mail só pode ser apagado
   if (parsed.data.telefone !== undefined) {
     const e164 = normalizePhone(parsed.data.telefone);
     if (!e164) return res.status(400).json({ error: "Telefone inválido" });
     data.telefone = e164;
   }
   if (parsed.data.email !== undefined) {
-    const email = parsed.data.email ? parsed.data.email.toLowerCase() : null;
-    if (email && !EMAIL_RE.test(email)) return res.status(400).json({ error: "E-mail inválido" });
-    data.email = email;
+    if (parsed.data.email) return res.status(400).json({ error: "O CRM não guarda e-mail (LGPD, minimização): só é possível apagar o que sobrou." });
+    data.email = null;
   }
 
   const existing = await prisma.client.findFirst({ where: { id: req.params.id, tenantId } });

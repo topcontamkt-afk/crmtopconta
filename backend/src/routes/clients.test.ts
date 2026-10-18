@@ -190,13 +190,13 @@ describe("LGPD 03-03: correção de telefone e e-mail", () => {
   const existente = { id: "c1", tenantId: "t1", nome: "Maria", cidade: "Natal", telefone: "+5584988887777", email: null, autorizacaoComunicacao: true, camposCorrigidos: { nome: "2026-01-01T00:00:00.000Z" } };
 
   it("normaliza o telefone, grava a trava de cada campo que mudou e audita sem valores", async () => {
-    db.client.findFirst.mockResolvedValue(existente);
     db.client.update.mockResolvedValue({ id: "c1" });
-    const r = await request(app).patch("/clients/c1").send({ telefone: "(84) 99999-8888", email: "Maria@Exemplo.com", cidade: "Natal" });
+    db.client.findFirst.mockResolvedValue({ ...existente, email: "maria@exemplo.com" });
+    const r = await request(app).patch("/clients/c1").send({ telefone: "(84) 99999-8888", email: null, cidade: "Natal" });
     expect(r.status).toBe(200);
     const data = db.client.update.mock.calls[0][0].data;
     expect(data.telefone).toBe(TEL);
-    expect(data.email).toBe("maria@exemplo.com");
+    expect(data.email).toBeNull();
     // cidade veio igual: não trava; nome antigo continua travado
     expect(Object.keys(data.camposCorrigidos).sort()).toEqual(["email", "nome", "telefone"]);
     expect(data.camposCorrigidos.nome).toBe("2026-01-01T00:00:00.000Z");
@@ -207,10 +207,10 @@ describe("LGPD 03-03: correção de telefone e e-mail", () => {
     expect(db.client.update.mock.calls[0][0].select.cpfHash).toBeUndefined();
   });
 
-  it("telefone ou e-mail inválidos: 400 e nada gravado", async () => {
+  it("telefone inválido ou e-mail novo (LGPD 01-01: o CRM não guarda e-mail): 400 e nada gravado", async () => {
     db.client.findFirst.mockResolvedValue(existente);
     expect((await request(app).patch("/clients/c1").send({ telefone: "123" })).status).toBe(400);
-    expect((await request(app).patch("/clients/c1").send({ email: "nao-e-email" })).status).toBe(400);
+    expect((await request(app).patch("/clients/c1").send({ email: "maria@exemplo.com" })).status).toBe(400);
     expect(db.client.update).not.toHaveBeenCalled();
   });
 });

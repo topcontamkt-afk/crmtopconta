@@ -4,7 +4,7 @@ import { hasRealWhatsApp } from "./campaignQueue";
 import { avaliarFrescor, mensagemFrescor } from "./dataFreshness";
 import { ManualRowInput, prepareManual } from "./manualCampaign";
 import { costConfigFrom, estimateCost } from "./messageCost";
-import { buildSegmentWhere, ENVIAVEL_WHERE, SegmentFilters, SegmentGroup } from "./segments";
+import { AVISO_RENDA_IGNORADA, buildSegmentWhere, ENVIAVEL_WHERE, filtrosRendaIgnorados, SegmentFilters, SegmentGroup } from "./segments";
 import { unmappedPositions } from "./templateImport";
 import { linkBase, trackedButtons } from "./trackedLinks";
 import { BASE_LEGAL_LABEL, baseLegalVigente, liaPendente, SEM_BASE_LEGAL } from "./baseLegal";
@@ -87,6 +87,9 @@ export async function validateWizard(
   const base = baseLegalVigente(tenant);
   if (!base) {
     add({ id: "base_legal", nivel: "erro", titulo: "Base legal não declarada", detalhe: SEM_BASE_LEGAL });
+  } else if (base === "CONSENTIMENTO") {
+    // art. 8º, §2º: a prova do consentimento é do controlador e o CRM não guarda o aceite por titular
+    add({ id: "base_legal", nivel: "aviso", titulo: `Base legal: ${BASE_LEGAL_LABEL[base]}`, detalhe: "O CRM não registra o aceite de cada pessoa: a autorização vem da planilha. Confirme que o controlador tem a prova do consentimento de todo o público." });
   } else if (liaPendente(tenant)) {
     add({ id: "base_legal", nivel: "aviso", titulo: `Base legal: ${BASE_LEGAL_LABEL[base]}, LIA pendente`, detalhe: "O teste de balanceamento (LIA) ainda não foi registrado com versão e data de aprovação. Registre em Configurações → LGPD." });
   } else {
@@ -182,6 +185,8 @@ export async function validateWizard(
     const filters = await baseFilters(prisma, tenantId, a);
     if (filters === null) {
       add({ id: "publico", nivel: "erro", titulo: "Segmento não encontrado" });
+    } else if (filtrosRendaIgnorados(filters).length) {
+      add({ id: "publico", nivel: "erro", titulo: "Segmento com filtro de renda", detalhe: AVISO_RENDA_IGNORADA });
     } else {
       const where = buildSegmentWhere(tenantId, filters);
       const eligible = { ...where, ...CONTATO_LIBERADO_WHERE, statusConta: { not: "BLOQUEADO" as const }, ...ENVIAVEL_WHERE };
