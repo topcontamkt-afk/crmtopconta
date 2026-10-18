@@ -31,13 +31,12 @@ import { prisma } from "../config/db";
  *  tenant. Linhas gravadas por uma instância antiga durante o deploy, depois da âncora, aparecem
  *  como quebra.
  *
- * Sem lock explícito na leitura do último hash: sob escrita concorrente real (rara neste volume
- * de auditoria) duas chamadas a logAudit() do mesmo tenant poderiam ler o mesmo prevHash e gerar
- * um "fork" — verifyAuditChain() detecta isso como uma quebra na sequência, igual a uma
- * adulteração de fato. Não introduz SQL cru (`$queryRaw`) para lock explícito porque o volume de
- * escrita deste log é baixo o suficiente para não justificar abrir mão da propriedade "zero SQL
- * cru" já confirmada no restante do backend. Com a cadeia por tenant, o fork só acontece entre
- * escritas concorrentes do mesmo tenant.
+ * Sem lock no banco na leitura do último hash. LGPD 05-08: logAudit() serializa as gravações de cada tenant
+ * dentro do processo (fila em middleware/audit.ts); entre instâncias diferentes duas gravações ainda podem ler o
+ * mesmo prevHash e gerar uma bifurcação. verifyAuditChain() a reconhece: a linha cujo prevHash é o hash de uma
+ * linha ANTERIOR já conferida (e não da imediatamente anterior) conta em `bifurcacoes` e a verificação continua,
+ * para que uma bifurcação provocada por logins errados em paralelo não esconda uma alteração posterior. Apagar uma
+ * linha do meio continua quebrando o elo (o filho aponta para um hash que não existe).
  *
  * LGPD 04-01 (cadeia x retenção): a anonimização precisa tirar PII de `details` de linhas antigas,
  * e reescrever `details` muda o hash de conteúdo daquela linha. Escolha: a redação é um EVENTO
@@ -188,13 +187,14 @@ export async function prepareTenantChain(tenantId: string): Promise<ChainTip> {
 }
 
 export type AuditChainVerification =
-  | { valid: true; checked: number; ancora: boolean; lacunasLegado: number; redigidas: number }
+  | { valid: true; checked: number; ancora: boolean; lacunasLegado: number; redigidas: number; bifurcacoes: number }
   | {
       valid: false;
       checked: number;
       ancora: boolean;
       lacunasLegado: number;
       redigidas: number;
+      bifurcacoes: number;
       motivo: "CONTEUDO" | "ELO" | "ANCORA";
       brokenAt: { id: string; createdAt: Date };
     };
@@ -226,12 +226,16 @@ export async function verifyAuditChain(tenantId: string): Promise<AuditChainVeri
   let checked = 0;
   let lacunasLegado = 0;
   let redigidas = 0;
+  let bifurcacoes = 0;
+  // hashes já conferidos depois da âncora (inclusive ela): pai possível de uma bifurcação
+  const conferidos = new Set<string>();
   const quebra = (row: (typeof rows)[number], motivo: "CONTEUDO" | "ELO" | "ANCORA"): AuditChainVerification => ({
     valid: false,
     checked,
     ancora,
     lacunasLegado,
     redigidas,
+    bifurcacoes,
     motivo,
     brokenAt: { id: row.id, createdAt: row.createdAt },
   });
@@ -268,12 +272,15 @@ export async function verifyAuditChain(tenantId: string): Promise<AuditChainVeri
         return quebra(row, "ANCORA");
       }
     } else if (row.prevHash !== anterior) {
-      return quebra(row, "ELO");
+      // LGPD 05-08: gravações simultâneas leram o mesmo topo; o pai existe e já foi conferido
+      if (!row.prevHash || !conferidos.has(row.prevHash)) return quebra(row, "ELO");
+      bifurcacoes++;
     }
 
+    if (i >= fimLegado && row.hash) conferidos.add(row.hash);
     anterior = row.hash;
     checked++;
   }
 
-  return { valid: true, checked, ancora, lacunasLegado, redigidas };
+  return { valid: true, checked, ancora, lacunasLegado, redigidas, bifurcacoes };
 }

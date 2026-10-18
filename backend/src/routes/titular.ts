@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { maskPhone, normalizePhone } from "../services/masking";
 import { CANAIS_PEDIDO, STATUS_PEDIDO, TIPOS_PEDIDO, pedidoVencido, prazoDoPedido } from "../services/titular";
+import { registrarOptOutTelefone } from "../services/privacy";
 
 /**
  * LGPD 03-05: registro dos pedidos de titular (art. 18) com o prazo de 15 dias do art. 19, II. Montado em
@@ -106,7 +107,12 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
 const fecharSchema = z.object({
   status: z.enum(["ATENDIDO", "NEGADO"]),
   resposta: z.string().trim().min(3).max(4000),
+  // LGPD 02-09: telefone de quem pediu para parar e não está na base (contato de lista, Inbox); só para o hash
+  telefone: z.string().max(30).optional(),
 });
+
+/** Pedidos que, atendidos, são um "pare de me mandar mensagem": o fechamento aplica o opt-out pelo telefone. */
+const PEDIDOS_OPT_OUT = new Set(["REVOGACAO", "OPOSICAO"]);
 
 /** POST /api/titular/pedidos/:id/fechar (ADMIN) — registra a resposta dada ao titular e a data. */
 router.post("/:id/fechar", requireRole("ADMIN"), async (req, res) => {
@@ -117,6 +123,19 @@ router.post("/:id/fechar", requireRole("ADMIN"), async (req, res) => {
   const pedido = await prisma.pedidoTitular.findFirst({ where: { id: req.params.id, tenantId } });
   if (!pedido) return res.status(404).json({ error: "Pedido não encontrado" });
   if (pedido.status !== "ABERTO") return res.status(409).json({ error: "Este pedido já foi fechado" });
+
+  // LGPD 02-09 (art. 8º, §5º / art. 18, §2º): atender revogação ou oposição É parar de enviar. O opt-out vale pelo
+  // telefone (supressão + todos os cadastros e listas com o número), antes de o pedido constar como atendido.
+  let optOut: { clientes: number } | null = null;
+  if (parsed.data.status === "ATENDIDO" && PEDIDOS_OPT_OUT.has(pedido.tipo)) {
+    const client = pedido.clientId ? await prisma.client.findFirst({ where: { id: pedido.clientId, tenantId }, select: { telefone: true } }) : null;
+    const telefone = client?.telefone ?? (parsed.data.telefone ? normalizePhone(parsed.data.telefone) : null);
+    if (!telefone) {
+      return res.status(400).json({ error: "Informe o telefone de quem pediu para parar: o descadastro vale pelo número.", code: "TELEFONE_OBRIGATORIO" });
+    }
+    const r = await registrarOptOutTelefone(prisma, tenantId, { telefone, canal: pedido.canal, origem: "pedido_titular" });
+    optOut = { clientes: r.clientIds.length };
+  }
 
   const respondidoEm = new Date();
   const atualizado = await prisma.pedidoTitular.update({
@@ -129,7 +148,7 @@ router.post("/:id/fechar", requireRole("ADMIN"), async (req, res) => {
     action: "CLOSE_PEDIDO_TITULAR",
     target: "PedidoTitular",
     targetId: pedido.id,
-    details: { status: parsed.data.status, tipo: pedido.tipo, noPrazo: respondidoEm.getTime() <= pedido.prazoEm.getTime() },
+    details: { status: parsed.data.status, tipo: pedido.tipo, noPrazo: respondidoEm.getTime() <= pedido.prazoEm.getTime(), ...(optOut ? { optOut } : {}) },
   });
   res.json(atualizado);
 });

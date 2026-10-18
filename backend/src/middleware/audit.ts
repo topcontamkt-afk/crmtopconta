@@ -1,15 +1,35 @@
 import { prisma } from "../config/db";
 import { computeAuditHash, nextCreatedAt, prepareTenantChain } from "../services/auditIntegrity";
 
-/** Registra uma ação no log de auditoria (LGPD/compliance): quem, o quê, quando, em qual registro. */
-export async function logAudit(params: {
+type AuditParams = {
   tenantId: string;
   userId?: string;
   action: string;
   target?: string;
   targetId?: string;
   details?: unknown;
-}) {
+};
+
+/**
+ * LGPD 05-08: fila por tenant dentro do processo. Ler o topo da cadeia e gravar são duas operações; duas gravações
+ * simultâneas do mesmo tenant liam o mesmo topo e bifurcavam a cadeia. Na Vercel uma instância atende requisições
+ * em paralelo, então isso cobre o caso comum; entre instâncias diferentes a bifurcação ainda pode ocorrer e o
+ * verificador a reconhece (verifyAuditChain, `bifurcacoes`).
+ */
+const filaPorTenant = new Map<string, Promise<unknown>>();
+
+/** Registra uma ação no log de auditoria (LGPD/compliance): quem, o quê, quando, em qual registro. */
+export function logAudit(params: AuditParams): Promise<void> {
+  const anterior = filaPorTenant.get(params.tenantId) ?? Promise.resolve();
+  const atual = anterior.catch(() => undefined).then(() => gravarAudit(params));
+  filaPorTenant.set(params.tenantId, atual);
+  void atual.finally(() => {
+    if (filaPorTenant.get(params.tenantId) === atual) filaPorTenant.delete(params.tenantId);
+  }).catch(() => undefined);
+  return atual;
+}
+
+async function gravarAudit(params: AuditParams) {
   // LGPD 08-08: encadeia com a última entrada DO MESMO tenant (grava a âncora da cadeia por
   // tenant na primeira vez). Ver services/auditIntegrity.ts.
   const tip = await prepareTenantChain(params.tenantId);

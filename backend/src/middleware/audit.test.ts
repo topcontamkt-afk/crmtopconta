@@ -111,3 +111,39 @@ describe("logTentativaAcesso / logAcessoNegado (LGPD 05-03)", () => {
     expect(data.details).toEqual({ metodo: "GET", rota: "/api/users", papel: "VIEWER", papeisExigidos: ["ADMIN"] });
   });
 });
+
+describe("logAudit — gravações simultâneas do mesmo tenant (LGPD 05-08)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    resetAnchorCache();
+  });
+
+  it("enfileira por tenant: cada gravação encadeia na anterior em vez de bifurcar", async () => {
+    // banco falso: o topo é a última linha gravada; leitura e gravação demoram (como duas idas ao banco)
+    const linhas: any[] = [{ hash: "topo-0", createdAt: new Date("2026-01-01T00:00:00Z") }];
+    const espera = () => new Promise((r) => setTimeout(r, 5));
+    mockPrisma.auditLog.findFirst.mockImplementation(async ({ where }: any) => {
+      await espera();
+      return where.action === ANCORA_CADEIA_TENANT ? { id: "ancora" } : linhas[linhas.length - 1];
+    });
+    mockPrisma.auditLog.create.mockImplementation(async ({ data }: any) => {
+      await espera();
+      linhas.push(data);
+      return data;
+    });
+
+    await Promise.all(Array.from({ length: 5 }, (_, i) => logAudit({ tenantId: "t1", action: `LOGIN_FALHA_${i}` })));
+
+    const gravadas = linhas.slice(1);
+    expect(gravadas).toHaveLength(5);
+    gravadas.forEach((l, i) => expect(l.prevHash).toBe(i === 0 ? "topo-0" : gravadas[i - 1].hash));
+  });
+
+  it("uma gravação que falha não trava a fila do tenant", async () => {
+    tenantComAncora("h0");
+    mockPrisma.auditLog.create.mockRejectedValueOnce(new Error("banco fora")).mockImplementation(async ({ data }: any) => data);
+    await expect(logAudit({ tenantId: "t1", action: "A" })).rejects.toThrow("banco fora");
+    await expect(logAudit({ tenantId: "t1", action: "B" })).resolves.toBeUndefined();
+  });
+});
+

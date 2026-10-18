@@ -42,6 +42,23 @@ describe("twoFactorVerifyLimiter", () => {
   });
 });
 
+describe("loginLimiter (LGPD 05-08)", () => {
+  function buildApp(): Express {
+    const { loginLimiter } = freshRateLimitModule();
+    const app = express();
+    app.post("/api/auth/login", loginLimiter, (_req, res) => res.status(401).json({ error: "Credenciais inválidas" }));
+    return app;
+  }
+
+  it("20 tentativas por IP a cada 15 min; a 21ª recebe 429 com { error }", async () => {
+    const app = buildApp();
+    for (let i = 0; i < 20; i++) expect((await request(app).post("/api/auth/login").send({})).status).toBe(401);
+    const res = await request(app).post("/api/auth/login").send({});
+    expect(res.status).toBe(429);
+    expect(res.body).toEqual({ error: expect.any(String) });
+  });
+});
+
 describe("webhookLimiter", () => {
   function buildApp(): Express {
     const { webhookLimiter } = freshRateLimitModule();

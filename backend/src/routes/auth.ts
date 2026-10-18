@@ -5,7 +5,7 @@ import { prisma } from "../config/db";
 import { requireAuth, signPending2FAToken, signToken, verifyPending2FAToken } from "../middleware/auth";
 import { ACOES_ACESSO_INDEVIDO, logAudit, logTentativaAcesso, origemRequisicao } from "../middleware/audit";
 import { allowedAreas } from "../services/areas";
-import { twoFactorVerifyLimiter } from "../middleware/rateLimit";
+import { loginLimiter, twoFactorVerifyLimiter } from "../middleware/rateLimit";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 import {
   isLocked,
@@ -30,7 +30,7 @@ const loginSchema = z.object({
   password: z.string().min(1),
 });
 
-router.post("/login", async (req, res) => {
+router.post("/login", loginLimiter, async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Dados inválidos" });
 
@@ -46,7 +46,7 @@ router.post("/login", async (req, res) => {
   // LGPD 05-03: e-mail inexistente não tem tenant. Gravar no AuditLog de algum controlador seria
   // atribuir a ele uma tentativa que pode não ser dele (e expor o e-mail tentado a quem não deve
   // vê-lo). Decisão: NÃO grava no AuditLog; fica só uma linha estruturada no log do servidor, com
-  // e-mail mascarado, e a tentativa continua limitada por IP no rate limit. Reter esse log por mais
+  // e-mail mascarado, e a tentativa continua limitada por IP (loginLimiter). Reter esse log por mais
   // tempo (log drain) é pendência de infraestrutura (ver docs/lgpd/correcoes).
   if (!user) {
     console.warn(JSON.stringify({ evento: ACOES_ACESSO_INDEVIDO.LOGIN_FALHA, motivo: "EMAIL_DESCONHECIDO", email: emailMascarado, ip: origem.ip, em: new Date().toISOString() }));

@@ -151,10 +151,13 @@ describe("LGPD 05-01: telefone mascarado no relatório nominal e no CSV", () => 
     expect(audit.mock.calls.at(-1)[0].details).toMatchObject({ telefoneCompleto: true, motivo: "pedido do titular 123" });
   });
 
-  it("/destinatarios mostra o telefone mascarado", async () => {
+  it("/destinatarios mostra o telefone mascarado, não vale para VIEWER e audita só a quantidade (LGPD 05-09)", async () => {
     db.campaignRecipient.findMany.mockResolvedValue([{ id: "r1", nome: "Ana", telefone: TEL, clientId: null, limiteDisponivel: null, messageEvents: [] }]);
+    expect((await request(app).get("/campaigns/camp1/destinatarios").set("x-role", "VIEWER")).status).toBe(403);
     const r = await request(app).get("/campaigns/camp1/destinatarios");
     expect(r.status).toBe(200);
     expect(r.body.destinatarios[0].telefone).toBe("*********8888");
+    expect(audit.mock.calls.at(-1)[0]).toMatchObject({ action: "READ_CAMPAIGN_RECIPIENTS", targetId: "camp1", details: { quantidade: 1 } });
+    expect(JSON.stringify(audit.mock.calls.at(-1)[0])).not.toContain("Ana");
   });
 });

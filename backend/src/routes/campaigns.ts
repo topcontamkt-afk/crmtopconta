@@ -187,8 +187,9 @@ router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
  * GET /api/campaigns/:id/destinatarios — quem entrou na lista manual, o que aconteceu com cada envio
  * e, para quem é cliente da base, se usou o limite e quantos dias depois do envio.
  */
-router.get("/:id/destinatarios", async (req, res) => {
-  const { tenantId } = req.user!;
+// LGPD 05-09: lista nominal com valores (até 5000 contatos): não vale para VIEWER e a leitura fica no AuditLog
+router.get("/:id/destinatarios", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
+  const { tenantId, id: userId } = req.user!;
   const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
 
@@ -227,6 +228,7 @@ router.get("/:id/destinatarios", async (req, res) => {
     };
   });
   const medidos = rows.filter((r) => r.naBase && r.enviadoEm);
+  await logAudit({ tenantId, userId, action: "READ_CAMPAIGN_RECIPIENTS", target: "Campaign", targetId: campaign.id, details: { quantidade: rows.length } });
   res.json({
     total: rows.length,
     naBase: rows.filter((r) => r.naBase).length,

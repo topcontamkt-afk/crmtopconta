@@ -37,6 +37,20 @@ export const twoFactorVerifyLimiter = rateLimit({
 });
 
 /**
+ * POST /api/auth/login — LGPD 05-08: a senha errada grava LOGIN_FALHA no AuditLog do controlador sem autenticação.
+ * O bloqueio por conta (authSecurity.ts) não limita tentativas em paralelo nem a conta já bloqueada; este limite por
+ * IP corta a rajada (força bruta e linhas forjadas na trilha). 20 tentativas a cada 15 minutos por IP: folga para
+ * vários usuários atrás do mesmo NAT errarem a senha algumas vezes.
+ */
+export const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: jsonRateLimitHandler,
+});
+
+/**
  * POST /webhooks/whatsapp e POST /webhooks/sms/:provider — endpoints públicos (sem
  * requireAuth), protegidos por verificação de assinatura própria de cada provedor. O limite
  * aqui é só anti-flood (não anti-força-bruta): generoso o bastante para rajadas legítimas de

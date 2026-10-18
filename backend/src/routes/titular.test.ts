@@ -14,6 +14,8 @@ jest.mock("../middleware/auth", () => ({
   requireRole: (...roles: string[]) => (req: any, res: any, next: any) => (roles.includes(req.user.role) ? next() : res.status(403).json({ error: "Sem permissão" })),
 }));
 jest.mock("../middleware/audit", () => ({ logAudit: jest.fn(async () => undefined) }));
+const registrarOptOutTelefone = jest.fn(async (..._a: any[]) => ({ clientIds: ["c1"], telefoneMasked: "*********8888" }));
+jest.mock("../services/privacy", () => ({ registrarOptOutTelefone: (...a: any[]) => registrarOptOutTelefone(...a) }));
 
 import router from "./titular";
 import { logAudit } from "../middleware/audit";
@@ -78,5 +80,40 @@ describe("LGPD 03-05: pedidos de titular", () => {
 
     db.pedidoTitular.findFirst.mockResolvedValue({ id: "p1", status: "ATENDIDO", tipo: "ACESSO", prazoEm: new Date() });
     expect((await request(app).post("/titular/pedidos/p1/fechar").set("x-role", "ADMIN").send({ status: "ATENDIDO", resposta: "de novo" })).status).toBe(409);
+  });
+});
+
+describe("LGPD 02-09: atender revogação ou oposição descadastra o número", () => {
+  const aberto = (over: any = {}) => ({ id: "p1", status: "ABERTO", tipo: "REVOGACAO", canal: "TELEFONE", clientId: "c1", prazoEm: new Date(Date.now() + 86_400_000), ...over });
+  beforeEach(() => db.pedidoTitular.update.mockImplementation(async ({ data }: any) => ({ id: "p1", ...data })));
+
+  it("com cliente ligado: opt-out pelo telefone do cadastro antes de fechar, auditado sem o número", async () => {
+    db.pedidoTitular.findFirst.mockResolvedValue(aberto());
+    db.client.findFirst.mockResolvedValue({ telefone: "+5584999998888" });
+    const r = await request(app).post("/titular/pedidos/p1/fechar").set("x-role", "ADMIN").send({ status: "ATENDIDO", resposta: "Descadastrado" });
+    expect(r.status).toBe(200);
+    expect(db.client.findFirst.mock.calls[0][0].where).toEqual({ id: "c1", tenantId: "t1" });
+    expect(registrarOptOutTelefone).toHaveBeenCalledWith(db, "t1", { telefone: "+5584999998888", canal: "TELEFONE", origem: "pedido_titular" });
+    expect(audit.mock.calls[0][0].details).toMatchObject({ tipo: "REVOGACAO", optOut: { clientes: 1 } });
+    expect(JSON.stringify(audit.mock.calls[0][0])).not.toContain("8888");
+  });
+
+  it("fora da base: exige o telefone (400) e, com ele, descadastra o número normalizado", async () => {
+    db.pedidoTitular.findFirst.mockResolvedValue(aberto({ tipo: "OPOSICAO", clientId: null }));
+    const sem = await request(app).post("/titular/pedidos/p1/fechar").set("x-role", "ADMIN").send({ status: "ATENDIDO", resposta: "Feito" });
+    expect(sem.status).toBe(400);
+    expect(sem.body.code).toBe("TELEFONE_OBRIGATORIO");
+    expect(db.pedidoTitular.update).not.toHaveBeenCalled();
+    const com = await request(app).post("/titular/pedidos/p1/fechar").set("x-role", "ADMIN").send({ status: "ATENDIDO", resposta: "Feito", telefone: "(84) 99999-8888" });
+    expect(com.status).toBe(200);
+    expect(registrarOptOutTelefone.mock.calls[0][2]).toMatchObject({ telefone: "+5584999998888" });
+  });
+
+  it("negado ou outro tipo de pedido: não mexe no opt-out", async () => {
+    db.pedidoTitular.findFirst.mockResolvedValue(aberto());
+    await request(app).post("/titular/pedidos/p1/fechar").set("x-role", "ADMIN").send({ status: "NEGADO", resposta: "Obrigação legal" });
+    db.pedidoTitular.findFirst.mockResolvedValue(aberto({ id: "p2", tipo: "ACESSO" }));
+    await request(app).post("/titular/pedidos/p2/fechar").set("x-role", "ADMIN").send({ status: "ATENDIDO", resposta: "Relatório enviado" });
+    expect(registrarOptOutTelefone).not.toHaveBeenCalled();
   });
 });

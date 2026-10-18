@@ -50,7 +50,7 @@ export default function PedidosTitular() {
   const [erro, setErro] = useState<string | null>(null);
   const [novo, setNovo] = useState({ tipo: "ACESSO", canal: "WHATSAPP", telefone: "", descricao: "", recebidoEm: "" });
   const [criando, setCriando] = useState(!!origem?.clientId);
-  const [fechando, setFechando] = useState<{ id: string; status: "ATENDIDO" | "NEGADO"; resposta: string } | null>(null);
+  const [fechando, setFechando] = useState<{ id: string; status: "ATENDIDO" | "NEGADO"; resposta: string; telefone: string; pedeTelefone: boolean } | null>(null);
 
   const carregar = useCallback(() => {
     const qs = filtro ? `?status=${filtro}` : "";
@@ -88,7 +88,9 @@ export default function PedidosTitular() {
     if (!fechando) return;
     setErro(null);
     try {
-      await api(`/titular/pedidos/${fechando.id}/fechar`, { method: "POST", body: { status: fechando.status, resposta: fechando.resposta } });
+      const body: Record<string, string> = { status: fechando.status, resposta: fechando.resposta };
+      if (fechando.pedeTelefone && fechando.telefone.trim()) body.telefone = fechando.telefone.trim();
+      await api(`/titular/pedidos/${fechando.id}/fechar`, { method: "POST", body });
       setFechando(null);
       carregar();
     } catch (e) {
@@ -161,6 +163,15 @@ export default function PedidosTitular() {
               <option value="NEGADO">Negado</option>
             </select>
           </label>
+          {fechando.pedeTelefone && fechando.status === "ATENDIDO" && (
+            <label>
+              Telefone de quem pediu para parar{" "}
+              <input value={fechando.telefone} onChange={(e) => setFechando({ ...fechando, telefone: e.target.value })} placeholder="(84) 99999-9999" />
+              <small style={{ display: "block", color: "var(--text-muted)" }}>
+                Atender revogação ou oposição descadastra o número em todos os cadastros e listas. O número não fica guardado no pedido.
+              </small>
+            </label>
+          )}
           <label>
             Resposta dada ao titular{" "}
             <textarea rows={3} value={fechando.resposta} onChange={(e) => setFechando({ ...fechando, resposta: e.target.value })} />
@@ -215,7 +226,7 @@ export default function PedidosTitular() {
                 </td>
                 <td>
                   {admin && p.status === "ABERTO" && (
-                    <button className="btn secondary" onClick={() => setFechando({ id: p.id, status: "ATENDIDO", resposta: "" })}>
+                    <button className="btn secondary" onClick={() => setFechando({ id: p.id, status: "ATENDIDO", resposta: "", telefone: "", pedeTelefone: !p.clientId && (p.tipo === "REVOGACAO" || p.tipo === "OPOSICAO") })}>
                       Fechar
                     </button>
                   )}

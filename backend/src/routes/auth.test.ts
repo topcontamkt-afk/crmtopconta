@@ -34,7 +34,7 @@ jest.mock("../middleware/auth", () => ({
     return "u1";
   },
 }));
-jest.mock("../middleware/rateLimit", () => ({ twoFactorVerifyLimiter: (_q: any, _r: any, n: any) => n() }));
+jest.mock("../middleware/rateLimit", () => ({ twoFactorVerifyLimiter: (_q: any, _r: any, n: any) => n(), loginLimiter: (_q: any, _r: any, n: any) => n() }));
 jest.mock("../services/twoFactor", () => ({
   decryptTwoFactorSecret: (s: string) => s,
   verifyToken: (code: string) => code === "123456",
