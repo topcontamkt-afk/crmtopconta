@@ -55,3 +55,17 @@ herda um celular reaproveitado. Regra adotada (enviada ao Lote 2): a importaçã
 volta sozinho quando a planilha mostra conta aberta depois do pedido (relação nova); senão fica de fora, contado, e o ADMIN
 libera com motivo auditado. No envio, ELIMINACAO por telefone não barra contato com CPF próprio diferente (número
 reaproveitado); OPT_OUT e BLOQUEIO por telefone continuam barrando o número. Revisável pela controladora.
+
+## URGENTE: bug de produção encontrado pelo Lote 4 (2026-10-18)
+`POST /api/segments` (e `/preview`) em produção (`ae033a0`): `z.union([groupSchema, filtersSchema])` com `groupSchema`
+não estrito transforma filtros simples da tela (`{ cidade: [...] }`) em `{ operator: "AND" }`, isto é, a base inteira.
+Campanha por segmento salvo pela tela vai para toda a base enviável. Reproduzido com zod. Corrigido nesta branch
+(`.strict()`, commit do Lote 4). Candidato a hotfix na `dreamy-brown` (como a PR #6) e a conferir no banco quais
+segmentos estão salvos como `{"operator":"AND"}` e quais campanhas os usaram. Decisão do usuário pendente.
+
+## Pendências do Lote 4 para a integração
+- Inbox (`routes/inbox.ts`): usar `autoReplyTextOf(account, tenant)` e `autoReplyPadraoDo(tenant)`; PUT auto-reply recusa texto sem SAIR.
+- Automação (`executeAction`): checar base legal antes de criar a campanha e gravar `baseLegal`.
+- Retenção: exportar o critério de vencidos para `routes/tenant.ts` (`vencidosWhere` copiado hoje).
+- KPIs do dashboard e contagem de segmentos ainda contam bloqueados.
+- Templates MARKETING existentes sem SAIR não podem ser editados/reenviados até ganharem rodapé ou botão.
