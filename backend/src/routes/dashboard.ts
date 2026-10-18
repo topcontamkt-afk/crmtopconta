@@ -11,6 +11,8 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma, tenantRaw } from "../config/db";
 import { requireAuth } from "../middleware/auth";
+import { logAudit } from "../middleware/audit";
+import { maskPhone } from "../services/masking";
 import { FAIXA_LABELS } from "../services/usage";
 import { addDays, clientWhere, computeKpis, DashboardFilters, rawFilterSql, todayBrt } from "../services/dashboardMetrics";
 import { loadRealHealth } from "../services/healthData";
@@ -236,7 +238,7 @@ router.get("/encerramentos", async (req, res) => {
  * alto), no mesmo corte de "uso intermediário" já usado em usage.ts (20% e 70%).
  */
 router.get("/engajamento", async (req, res) => {
-  const { tenantId } = req.user!;
+  const { tenantId, id: userId } = req.user!;
 
   const [niveisRaw, totalAniversariantes, aniversariantesRaw] = await Promise.all([
     tenantRaw.query<Array<{ nivel: string; count: bigint }>>(
@@ -266,13 +268,18 @@ router.get("/engajamento", async (req, res) => {
     >(
       `SELECT "id", "nome", "telefone", "cidade", EXTRACT(DAY FROM "dataNascimento")::int AS dia
        FROM "Client"
-       WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL
+       WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL AND "bloqueadoLgpdAt" IS NULL
          AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM CURRENT_DATE)
        ORDER BY dia ASC
        LIMIT 100`,
       tenantId
     ),
   ]);
+
+  // LGPD 01-04: lista nominal (até 100) deixa trilha: escopo e quantidade, nunca os dados
+  if (aniversariantesRaw.length) {
+    await logAudit({ tenantId, userId, action: "READ_ANIVERSARIANTES", target: "Client", details: { quantidade: aniversariantesRaw.length } });
+  }
 
   const NIVEL_LABELS: Record<string, string> = {
     sem_engajamento: "Sem engajamento",
@@ -295,7 +302,8 @@ router.get("/engajamento", async (req, res) => {
     aniversariantes: {
       mesLabel: new Date().toLocaleDateString("pt-BR", { month: "long", year: "numeric" }),
       total: Number(totalAniversariantes[0]?.count || 0),
-      itens: aniversariantesRaw.map((a) => ({ id: a.id, nome: a.nome, telefone: a.telefone, cidade: a.cidade, dia: a.dia })),
+      // LGPD 01-04: telefone sempre mascarado; o envio usa o id (o número completo nunca precisa ir à tela)
+      itens: aniversariantesRaw.map((a) => ({ id: a.id, nome: a.nome, telefone: maskPhone(a.telefone), cidade: a.cidade, dia: a.dia })),
     },
   });
 });

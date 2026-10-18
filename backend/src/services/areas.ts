@@ -59,6 +59,7 @@ const RULES: Rule[] = [
   { prefix: "/dashboard", areas: ["dashboard"] },
   { prefix: "/clients/purge", areas: ["imports"] },
   { prefix: "/clients", areas: ["clients"] },
+  { prefix: "/titular", areas: ["clients"] }, // LGPD 03-05: pedidos de titular ficam com a Base de clientes
   { prefix: "/segments/presets", areas: ["segments", "dashboard"] },
   { prefix: "/segments", methods: "GET", areas: ["segments", "campaigns"] },
   { prefix: "/segments", areas: ["segments"] },

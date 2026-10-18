@@ -1,0 +1,137 @@
+import { Router } from "express";
+import { z } from "zod";
+import { prisma } from "../config/db";
+import { requireAuth, requireRole } from "../middleware/auth";
+import { logAudit } from "../middleware/audit";
+import { maskPhone, normalizePhone } from "../services/masking";
+import { CANAIS_PEDIDO, STATUS_PEDIDO, TIPOS_PEDIDO, pedidoVencido, prazoDoPedido } from "../services/titular";
+
+/**
+ * LGPD 03-05: registro dos pedidos de titular (art. 18) com o prazo de 15 dias do art. 19, II. Montado em
+ * /api/titular/pedidos. ADMIN e OPERATOR registram e consultam; só ADMIN fecha (atendido ou negado, com a
+ * resposta dada). Não há exclusão: o registro é a prova do prazo. Tudo filtrado por tenant e auditado, sem
+ * texto livre no AuditLog (descrição e resposta podem conter dado pessoal).
+ */
+const router = Router();
+router.use(requireAuth);
+
+const listQuery = z.object({ status: z.enum(STATUS_PEDIDO).optional() });
+
+/** GET /api/titular/pedidos — abertos primeiro, pelo prazo; cada um marca se está vencido. */
+router.get("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const q = listQuery.safeParse(req.query);
+  if (!q.success) return res.status(400).json({ error: "Filtro de status inválido" });
+  const { tenantId, id: userId } = req.user!;
+
+  const pedidos = await prisma.pedidoTitular.findMany({
+    where: { tenantId, ...(q.data.status ? { status: q.data.status } : {}) },
+    orderBy: [{ status: "asc" }, { prazoEm: "asc" }],
+    take: 500,
+  });
+  const clientIds = [...new Set(pedidos.map((p) => p.clientId).filter((x): x is string => !!x))];
+  const clientes = clientIds.length
+    ? await prisma.client.findMany({ where: { tenantId, id: { in: clientIds } }, select: { id: true, nome: true } })
+    : [];
+  const nomes = new Map(clientes.map((c) => [c.id, c.nome]));
+
+  const agora = new Date();
+  const itens = pedidos
+    .map((p) => ({
+      ...p,
+      clienteNome: p.clientId ? nomes.get(p.clientId) ?? null : null,
+      vencido: pedidoVencido(p, agora),
+      diasRestantes: p.status === "ABERTO" ? Math.ceil((p.prazoEm.getTime() - agora.getTime()) / 86_400_000) : null,
+    }))
+    // vencidos no topo, depois os abertos pelo prazo, depois os fechados
+    .sort((a, b) => Number(b.vencido) - Number(a.vencido) || Number(b.status === "ABERTO") - Number(a.status === "ABERTO") || a.prazoEm.getTime() - b.prazoEm.getTime());
+
+  await logAudit({ tenantId, userId, action: "LIST_PEDIDOS_TITULAR", target: "PedidoTitular", details: { status: q.data.status ?? null, quantidade: itens.length } });
+  res.json({ itens, vencidos: itens.filter((p) => p.vencido).length });
+});
+
+const createSchema = z.object({
+  clientId: z.string().uuid().optional(),
+  telefone: z.string().max(30).optional(), // só para quem não está na base: guardado mascarado
+  tipo: z.enum(TIPOS_PEDIDO),
+  canal: z.enum(CANAIS_PEDIDO),
+  descricao: z.string().max(2000).optional(),
+  recebidoEm: z.string().datetime().optional(),
+});
+
+/** POST /api/titular/pedidos — registra o pedido; prazoEm = recebidoEm + 15 dias. */
+router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const parsed = createSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { tenantId, id: userId } = req.user!;
+  const b = parsed.data;
+
+  const recebidoEm = b.recebidoEm ? new Date(b.recebidoEm) : new Date();
+  if (recebidoEm.getTime() > Date.now() + 60_000) return res.status(400).json({ error: "A data de recebimento não pode estar no futuro" });
+
+  let telefoneMasked: string | null = null;
+  if (b.clientId) {
+    const client = await prisma.client.findFirst({ where: { id: b.clientId, tenantId }, select: { id: true, telefone: true } });
+    if (!client) return res.status(404).json({ error: "Cliente não encontrado" });
+    telefoneMasked = maskPhone(client.telefone);
+  } else if (b.telefone) {
+    const e164 = normalizePhone(b.telefone);
+    if (!e164) return res.status(400).json({ error: "Telefone inválido" });
+    telefoneMasked = maskPhone(e164);
+  }
+
+  const pedido = await prisma.pedidoTitular.create({
+    data: {
+      tenantId,
+      clientId: b.clientId ?? null,
+      telefoneMasked,
+      tipo: b.tipo,
+      canal: b.canal,
+      descricao: b.descricao?.trim() || null,
+      recebidoEm,
+      prazoEm: prazoDoPedido(recebidoEm),
+      userId,
+    },
+  });
+  await logAudit({
+    tenantId,
+    userId,
+    action: "CREATE_PEDIDO_TITULAR",
+    target: "PedidoTitular",
+    targetId: pedido.id,
+    details: { tipo: pedido.tipo, canal: pedido.canal, clientId: pedido.clientId, prazoEm: pedido.prazoEm.toISOString() },
+  });
+  res.status(201).json(pedido);
+});
+
+const fecharSchema = z.object({
+  status: z.enum(["ATENDIDO", "NEGADO"]),
+  resposta: z.string().trim().min(3).max(4000),
+});
+
+/** POST /api/titular/pedidos/:id/fechar (ADMIN) — registra a resposta dada ao titular e a data. */
+router.post("/:id/fechar", requireRole("ADMIN"), async (req, res) => {
+  const parsed = fecharSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Informe o resultado (atendido ou negado) e a resposta dada ao titular" });
+  const { tenantId, id: userId } = req.user!;
+
+  const pedido = await prisma.pedidoTitular.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!pedido) return res.status(404).json({ error: "Pedido não encontrado" });
+  if (pedido.status !== "ABERTO") return res.status(409).json({ error: "Este pedido já foi fechado" });
+
+  const respondidoEm = new Date();
+  const atualizado = await prisma.pedidoTitular.update({
+    where: { id: pedido.id },
+    data: { status: parsed.data.status, resposta: parsed.data.resposta, respondidoEm },
+  });
+  await logAudit({
+    tenantId,
+    userId,
+    action: "CLOSE_PEDIDO_TITULAR",
+    target: "PedidoTitular",
+    targetId: pedido.id,
+    details: { status: parsed.data.status, tipo: pedido.tipo, noPrazo: respondidoEm.getTime() <= pedido.prazoEm.getTime() },
+  });
+  res.json(atualizado);
+});
+
+export default router;

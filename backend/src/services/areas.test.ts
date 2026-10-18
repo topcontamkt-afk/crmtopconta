@@ -11,6 +11,9 @@ describe("areaForRequest", () => {
     expect(areaForRequest("GET", "/dashboard/overview")).toEqual(["dashboard"]);
     expect(areaForRequest("GET", "/inbox/conversations")).toEqual(["inbox"]);
     expect(areaForRequest("GET", "/inbox/resumo")).toEqual(["inbox"]);
+    expect(areaForRequest("POST", "/titular/pedidos")).toEqual(["clients"]); // LGPD 03-05
+    expect(areaForRequest("POST", "/clients/search")).toEqual(["clients"]); // LGPD 07-03
+    expect(areaForRequest("POST", "/inbox/conversations/search")).toEqual(["inbox"]);
     expect(areaForRequest("GET", "/audit-logs")).toEqual(["audit"]);
     expect(areaForRequest("PUT", "/ciclos")).toEqual(["ciclos"]);
     expect(areaForRequest("POST", "/automations/1/run")).toEqual(["automations"]);

@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Request, Response, Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
@@ -37,6 +37,8 @@ router.get("/status", async (req, res) => {
 /**
  * GET /api/inbox/resumo — leve, para o aviso de mensagem nova que roda em qualquer tela: quantas
  * conversas têm mensagem não lida e qual foi a última a chegar (o front compara com o que já viu).
+ * LGPD 07-05: só id e horário; nome e trecho da mensagem não saem daqui (o aviso aparece em qualquer
+ * tela e na notificação do sistema operacional). O conteúdo só se vê dentro da Inbox.
  */
 router.get("/resumo", async (req, res) => {
   const { tenantId } = req.user!;
@@ -45,14 +47,12 @@ router.get("/resumo", async (req, res) => {
     prisma.conversation.findFirst({
       where: { tenantId, status: "ABERTA", unreadCount: { gt: 0 }, lastInboundAt: { not: null } },
       orderBy: { lastInboundAt: "desc" },
-      include: { client: { select: { nome: true } } },
+      select: { id: true, lastInboundAt: true },
     }),
   ]);
   res.json({
     naoLidas,
-    ultima: ultima
-      ? { id: ultima.id, nome: ultima.client?.nome ?? ultima.contactName ?? "Contato sem cadastro", preview: ultima.lastPreview, em: ultima.lastInboundAt!.toISOString() }
-      : null,
+    ultima: ultima ? { id: ultima.id, em: ultima.lastInboundAt!.toISOString() } : null,
   });
 });
 
@@ -96,9 +96,22 @@ const listQuery = z.object({
   limite: z.coerce.number().int().min(1).max(100).default(50),
 });
 
-/** GET /api/inbox/conversations */
+/** LGPD 07-03: nome ou telefone procurado não vai na URL (logs de requisição). */
+const BUSCA_NA_URL = "A busca por nome ou telefone não vai mais na URL (LGPD). Use POST /api/inbox/conversations/search com o termo no corpo.";
+
+/** GET /api/inbox/conversations — só filtros não pessoais na URL. */
 router.get("/conversations", async (req, res) => {
-  const q = listQuery.safeParse(req.query);
+  if (req.query.busca !== undefined) return res.status(400).json({ error: BUSCA_NA_URL });
+  await listarConversas(req, res, req.query);
+});
+
+/** POST /api/inbox/conversations/search — LGPD 07-03: a mesma lista, com a busca e os filtros no corpo. */
+router.post("/conversations/search", async (req, res) => {
+  await listarConversas(req, res, req.body ?? {});
+});
+
+async function listarConversas(req: Request, res: Response, src: unknown) {
+  const q = listQuery.safeParse(src);
   if (!q.success) return res.status(400).json({ error: "Parâmetros inválidos" });
   const { tenantId } = req.user!;
   const { filtro, busca, limite } = q.data;
@@ -148,7 +161,7 @@ router.get("/conversations", async (req, res) => {
       };
     }),
   });
-});
+}
 
 const msgsQuery = z.object({ antes: z.string().datetime().optional(), limite: z.coerce.number().int().min(1).max(200).default(100) });
 

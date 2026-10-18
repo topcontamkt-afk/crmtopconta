@@ -394,9 +394,9 @@ export default function Inbox() {
   useEffect(() => void carregarStatus(), [carregarStatus]);
 
   const carregarLista = useCallback(() => {
-    const qs = new URLSearchParams({ filtro });
-    if (busca.trim()) qs.set("busca", busca.trim());
-    return api<{ conversas: Conversa[]; naoLidas: number }>(`/inbox/conversations?${qs}`)
+    // LGPD 07-03: o nome/telefone procurado vai no corpo, nunca na URL
+    const body = { filtro, ...(busca.trim() ? { busca: busca.trim() } : {}) };
+    return api<{ conversas: Conversa[]; naoLidas: number }>("/inbox/conversations/search", { method: "POST", body })
       .then((r) => {
         setConversas(r.conversas);
         setNaoLidas(r.naoLidas);
