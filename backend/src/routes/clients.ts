@@ -1,12 +1,16 @@
 import { Request, Response, Router } from "express";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
-import { prisma } from "../config/db";
+import { prisma, tenantRaw } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { buildSegmentWhere, SegmentFilters } from "../services/segments";
-import { maskPhone, normalizePhone } from "../services/masking";
+import { hashDocument, isValidDocument, maskPhone, normalizePhone } from "../services/masking";
 import { relatorioTitular } from "../services/titular";
+import { anonymizeClient, redigirAuditoria } from "../services/retention";
+import { estaSuprimido, phoneHash, registrarOptOutTelefone } from "../services/privacy";
+import { liberarEliminacao } from "../services/dedupe";
+import { normalizeDocumentDigits } from "../services/purchaseParsing";
 
 const router = Router();
 router.use(requireAuth);
@@ -52,6 +56,7 @@ const DETALHE_SELECT = {
   tags: true,
   bloqueadoLgpdAt: true,
   camposCorrigidos: true,
+  anonymizedAt: true,
 } satisfies Prisma.ClientSelect;
 
 function comContatoPorPapel<T extends { telefone: string; email?: string | null }>(c: T, role: Papel) {
@@ -323,6 +328,8 @@ const updateSchema = z.object({
   email: z.string().trim().max(200).nullable().optional(),
   statusConta: z.enum(["ATIVO", "INATIVO", "BLOQUEADO"]).optional(),
   autorizacaoComunicacao: z.boolean().optional(),
+  // LGPD 02-02: religar quem pediu para sair exige ADMIN e o motivo (ex.: novo consentimento registrado)
+  motivoReautorizacao: z.string().trim().max(500).optional(),
   tags: z.array(z.string()).optional(),
 });
 
@@ -331,11 +338,12 @@ export const CAMPOS_CORRIGIVEIS = ["nome", "cidade", "telefone", "email"] as con
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
-  const { tenantId, id: userId } = req.user!;
+  const { tenantId, id: userId, role } = req.user!;
   const parsed = updateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  const data: Record<string, unknown> = { ...parsed.data };
+  const { motivoReautorizacao, ...campos } = parsed.data;
+  const data: Record<string, unknown> = { ...campos };
   // LGPD 03-03: telefone sempre em E.164; e-mail vazio limpa o campo
   if (parsed.data.telefone !== undefined) {
     const e164 = normalizePhone(parsed.data.telefone);
@@ -350,12 +358,34 @@ router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
 
   const existing = await prisma.client.findFirst({ where: { id: req.params.id, tenantId } });
   if (!existing) return res.status(404).json({ error: "Cliente não encontrado" });
+  if (existing.anonymizedAt) return res.status(409).json({ error: "Cliente anonimizado: os dados não podem mais ser alterados" });
 
-  // Se a autorização estiver sendo removida, registra o opt-out (bloqueio imediato e permanente até novo consentimento explícito)
+  // LGPD 02-03: opt-out manual vale para o TELEFONE (supressão + todos os cadastros e listas com o número)
+  let optOutRegistrado = false;
   if (parsed.data.autorizacaoComunicacao === false && existing.autorizacaoComunicacao) {
-    data.optOutAt = new Date();
+    await registrarOptOutTelefone(prisma, tenantId, { telefone: existing.telefone, canal: "MANUAL", origem: "operador" });
+    data.optOutAt = existing.optOutAt ?? new Date();
+    optOutRegistrado = true;
   }
-  if (parsed.data.autorizacaoComunicacao === true) {
+
+  // LGPD 02-02: religar a comunicação de quem pediu para sair (opt-out neste cadastro ou pelo telefone/documento)
+  let reautorizacao: { motivo: string; optOutDesde: string | null; supressoesRemovidas: number } | null = null;
+  if (parsed.data.autorizacaoComunicacao === true && !existing.autorizacaoComunicacao) {
+    const sup = await estaSuprimido(prisma, tenantId, { telefone: existing.telefone, docHash: existing.cpfHash });
+    if (existing.bloqueadoLgpdAt || sup === "BLOQUEIO" || sup === "ELIMINACAO") {
+      return res.status(409).json({ error: "Titular com bloqueio ou pedido de eliminação: a comunicação não pode ser religada" });
+    }
+    if (existing.optOutAt || sup === "OPT_OUT") {
+      if (role !== "ADMIN") return res.status(403).json({ error: "Só administradores religam a comunicação de quem pediu para sair" });
+      const motivo = motivoReautorizacao ?? "";
+      if (motivo.length < 5) return res.status(400).json({ error: "Informe o motivo (ex.: novo consentimento do titular) para religar a comunicação" });
+      const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { cpfSalt: true } });
+      const ph = tenant?.cpfSalt ? phoneHash(tenant.cpfSalt, existing.telefone) : null;
+      const removidas = await prisma.supressaoTitular.deleteMany({
+        where: { tenantId, motivo: "OPT_OUT", OR: [...(ph ? [{ phoneHash: ph }] : []), { docHash: existing.cpfHash }] },
+      });
+      reautorizacao = { motivo, optOutDesde: existing.optOutAt?.toISOString() ?? null, supressoesRemovidas: removidas.count };
+    }
     data.optOutAt = null;
   }
 
@@ -376,8 +406,11 @@ router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
     action: "UPDATE_CLIENT",
     target: "Client",
     targetId: existing.id,
-    details: { fieldsChanged: Object.keys(parsed.data), camposCorrigidos: corrigidos },
+    details: { fieldsChanged: Object.keys(campos), camposCorrigidos: corrigidos, ...(optOutRegistrado ? { optOut: "MANUAL" } : {}) },
   });
+  if (reautorizacao) {
+    await logAudit({ tenantId, userId, action: "REAUTORIZACAO_COMUNICACAO", target: "Client", targetId: existing.id, details: reautorizacao });
+  }
   res.json(updated);
 });
 
@@ -404,9 +437,11 @@ router.post("/bulk", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
     } else if (action === "BLOCK") {
       await prisma.client.update({ where: { id: c.id }, data: { statusConta: "BLOQUEADO" } });
     } else if (action === "OPT_OUT") {
+      // LGPD 02-03: o opt-out manual vale para o telefone (supressão), não só para o cadastro
+      await registrarOptOutTelefone(prisma, tenantId, { telefone: c.telefone, canal: "MANUAL", origem: "operador_em_massa" });
       await prisma.client.update({
         where: { id: c.id },
-        data: { autorizacaoComunicacao: false, optOutAt: new Date() },
+        data: { autorizacaoComunicacao: false, optOutAt: c.optOutAt ?? new Date() },
       });
     }
   }
@@ -416,12 +451,117 @@ router.post("/bulk", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
 });
 
 /**
- * POST /api/clients/purge — "Limpar base": apaga TODOS os clientes do tenant (e as movimentações
- * e eventos de mensagem que dependem deles). Usado para descartar uma base importada por engano
- * antes de reimportar. Irreversível, só ADMIN, exige a frase de confirmação. Campanhas, segmentos,
- * templates e histórico de importações são preservados; a ação fica na Auditoria (só contagens).
+ * LGPD 03-01 / 04-01: eliminação dos dados de UM titular a pedido (art. 18, VI). Só ADMIN, com motivo e a frase de
+ * confirmação. Grava a supressão por documento/telefone (a reimportação não recria o titular), anonimiza o
+ * cliente e tudo o que se liga a ele (services/retention.ts) e audita sem PII. Se veio de um pedido de
+ * eliminação aberto, o pedido fica atendido.
+ */
+export const CONFIRMA_ELIMINACAO = "ELIMINAR DADOS";
+const anonSchema = z.object({
+  motivo: z.string().trim().min(5).max(500),
+  pedidoId: z.string().uuid().optional(),
+  confirmacao: z.literal(CONFIRMA_ELIMINACAO),
+});
+
+router.post("/:id/anonymize", requireRole("ADMIN"), async (req, res) => {
+  const parsed = anonSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: `Informe o motivo e confirme digitando: ${CONFIRMA_ELIMINACAO}` });
+  const { tenantId, id: userId } = req.user!;
+  const existing = await prisma.client.findFirst({ where: { id: req.params.id, tenantId }, select: { id: true, anonymizedAt: true } });
+  if (!existing) return res.status(404).json({ error: "Cliente não encontrado" });
+  if (existing.anonymizedAt) return res.status(409).json({ error: "Os dados deste cliente já foram eliminados" });
+  const { motivo, pedidoId } = parsed.data;
+  const pedido = pedidoId ? await prisma.pedidoTitular.findFirst({ where: { id: pedidoId, tenantId }, select: { id: true, tipo: true, status: true } }) : null;
+  if (pedidoId && !pedido) return res.status(404).json({ error: "Pedido do titular não encontrado" });
+
+  const r = await anonymizeClient(prisma, tenantId, existing.id, { motivo, origem: "PEDIDO_TITULAR", pedidoId: pedidoId ?? null, userId });
+  if (!r) return res.status(404).json({ error: "Cliente não encontrado" });
+
+  if (pedido && pedido.tipo === "ELIMINACAO" && pedido.status === "ABERTO") {
+    await prisma.pedidoTitular.update({
+      where: { id: pedido.id },
+      data: { status: "ATENDIDO", respondidoEm: new Date(), resposta: "Dados eliminados (anonimização) no CRM." },
+    });
+  }
+  res.json(r);
+});
+
+/**
+ * LGPD 03-01: liberação manual da supressão por ELIMINACAO de um documento (ex.: o titular voltou a ser cliente e a
+ * planilha não traz data de abertura nova). O CPF/CNPJ só é usado para calcular o hash, nunca é gravado nem logado.
+ */
+const liberarSchema = z.object({ cpf: z.string().min(1).max(30), motivo: z.string().trim().min(5).max(500) });
+
+router.post("/supressao/liberar", requireRole("ADMIN"), async (req, res) => {
+  const parsed = liberarSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: "Informe o CPF/CNPJ e o motivo" });
+  const { tenantId, id: userId } = req.user!;
+  const doc = normalizeDocumentDigits(parsed.data.cpf);
+  if (!doc || !isValidDocument(doc)) return res.status(400).json({ error: "CPF/CNPJ inválido" });
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { cpfSalt: true } });
+  if (!tenant?.cpfSalt) return res.status(500).json({ error: "Tenant sem salt" });
+  const removidas = await liberarEliminacao(prisma, tenantId, hashDocument(doc, tenant.cpfSalt), { motivo: parsed.data.motivo, origem: "manual", userId });
+  if (removidas === 0) return res.status(404).json({ error: "Não há supressão por eliminação para este documento" });
+  res.json({ removidas });
+});
+
+/**
+ * POST /api/clients/purge — "Limpar base": apaga TODOS os clientes do tenant. Usado para descartar uma base
+ * importada por engano antes de reimportar. Irreversível, só ADMIN, exige a frase de confirmação.
+ *
+ * LGPD 04-05: apaga na ordem das chaves estrangeiras (compras e histórico de conta têm FK RESTRICT e antes
+ * derrubavam tudo) e não deixa órfão com dado pessoal: as conversas da Inbox dos clientes (telefone, nome do
+ * perfil, texto e mídia) são apagadas, os destinatários de listas manuais ligados a cliente são anonimizados,
+ * e o estado de desfazer importação vai junto. Tudo numa transação só (um bloco no banco, com o tenant da
+ * sessão: nada é interpolado). Antes, o opt-out e o bloqueio de cada cliente viram supressão por
+ * telefone/documento, para a reimportação não religar ninguém (LGPD 02-02). Depois, a PII de AuditLog antigos
+ * dos clientes é redigida sem quebrar a cadeia. Campanhas, segmentos, templates e o histórico de importações ficam.
  */
 const PURGE_CONFIRMATION = "LIMPAR BASE";
+
+export const PURGE_SQL = `DO $purge$
+DECLARE t text := current_setting('app.tenant_id');
+BEGIN
+  DELETE FROM "WaMediaBlob" WHERE "tenantId" = t AND "messageId" IN (
+    SELECT m."id" FROM "WaMessage" m JOIN "Conversation" c ON c."id" = m."conversationId" WHERE c."tenantId" = t AND c."clientId" IS NOT NULL);
+  DELETE FROM "WaMessage" WHERE "tenantId" = t AND "conversationId" IN (SELECT "id" FROM "Conversation" WHERE "tenantId" = t AND "clientId" IS NOT NULL);
+  DELETE FROM "Conversation" WHERE "tenantId" = t AND "clientId" IS NOT NULL;
+  UPDATE "CampaignRecipient" SET "nome" = 'Contato anonimizado', "telefone" = 'anon-' || "id", "cpfHash" = NULL, "cpfMasked" = NULL,
+    "limiteDisponivel" = NULL, "clientId" = NULL WHERE "tenantId" = t AND "clientId" IS NOT NULL;
+  DELETE FROM "MessageEvent" WHERE "clientId" IN (SELECT "id" FROM "Client" WHERE "tenantId" = t);
+  DELETE FROM "Movement" WHERE "clientId" IN (SELECT "id" FROM "Client" WHERE "tenantId" = t);
+  DELETE FROM "AccountSnapshot" WHERE "tenantId" = t;
+  DELETE FROM "Purchase" WHERE "tenantId" = t;
+  DELETE FROM "ImportChange" WHERE "tenantId" = t;
+  DELETE FROM "Notification" WHERE "tenantId" = t AND "relatedType" = 'Client';
+  DELETE FROM "Client" WHERE "tenantId" = t;
+END
+$purge$;`;
+
+/** LGPD 02-02: antes de apagar, o opt-out e o bloqueio de cada cliente viram supressão (só hashes), em lote. */
+async function preservarSupressoes(tenantId: string): Promise<number> {
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { cpfSalt: true } });
+  if (!tenant?.cpfSalt) return 0;
+  const clientes = await prisma.client.findMany({
+    where: { tenantId, anonymizedAt: null, OR: [{ optOutAt: { not: null } }, { bloqueadoLgpdAt: { not: null } }] },
+    select: { telefone: true, cpfHash: true, optOutAt: true, bloqueadoLgpdAt: true },
+  });
+  if (clientes.length === 0) return 0;
+  const novas = clientes.flatMap((c) => {
+    const ph = phoneHash(tenant.cpfSalt, c.telefone);
+    const docHash = c.cpfHash.startsWith("anon-") ? null : c.cpfHash;
+    return [
+      ...(c.optOutAt ? [{ tenantId, phoneHash: ph, docHash, motivo: "OPT_OUT", canal: "MANUAL", origem: "limpar_base" }] : []),
+      ...(c.bloqueadoLgpdAt ? [{ tenantId, phoneHash: ph, docHash, motivo: "BLOQUEIO", canal: "MANUAL", origem: "limpar_base" }] : []),
+    ];
+  });
+  const chave = (s: { phoneHash: string | null; docHash: string | null; motivo: string }) => `${s.motivo}|${s.phoneHash}|${s.docHash}`;
+  const existentes = await prisma.supressaoTitular.findMany({ where: { tenantId, motivo: { in: ["OPT_OUT", "BLOQUEIO"] } }, select: { phoneHash: true, docHash: true, motivo: true } });
+  const ja = new Set(existentes.map(chave));
+  const faltam = novas.filter((n) => !ja.has(chave(n)) && (n.phoneHash || n.docHash));
+  if (faltam.length) await prisma.supressaoTitular.createMany({ data: faltam });
+  return faltam.length;
+}
 
 router.post("/purge", requireRole("ADMIN"), async (req, res) => {
   const { tenantId, id: userId } = req.user!;
@@ -429,22 +569,29 @@ router.post("/purge", requireRole("ADMIN"), async (req, res) => {
     return res.status(400).json({ error: `Confirmação inválida. Digite exatamente: ${PURGE_CONFIRMATION}` });
   }
 
-  const [messageEvents, movements, clients] = await prisma.$transaction([
-    prisma.messageEvent.deleteMany({ where: { client: { tenantId } } }),
-    prisma.movement.deleteMany({ where: { client: { tenantId } } }),
-    prisma.client.deleteMany({ where: { tenantId } }),
+  const doTenant = { client: { tenantId } };
+  const [ids, movements, messageEvents, compras, historicoConta, conversas] = await Promise.all([
+    prisma.client.findMany({ where: { tenantId }, select: { id: true } }),
+    prisma.movement.count({ where: doTenant }),
+    prisma.messageEvent.count({ where: doTenant }),
+    prisma.purchase.count({ where: { tenantId } }),
+    prisma.accountSnapshot.count({ where: { tenantId } }),
+    prisma.conversation.count({ where: { tenantId, clientId: { not: null } } }),
   ]);
+  const supressoesGravadas = await preservarSupressoes(tenantId);
+  await tenantRaw.execute(PURGE_SQL);
   // Segmentos dinâmicos passam a refletir a base vazia até a próxima recontagem.
   await prisma.segmentDefinition.updateMany({ where: { tenantId }, data: { lastCount: 0, lastRefreshedAt: new Date() } });
 
-  await logAudit({
-    tenantId,
-    userId,
-    action: "PURGE_CLIENTS",
-    target: "Client",
-    details: { clients: clients.count, movements: movements.count, messageEvents: messageEvents.count },
-  });
-  res.json({ clients: clients.count, movements: movements.count, messageEvents: messageEvents.count });
+  const clientIds = ids.map((c) => c.id);
+  let auditoriaRedigida = 0;
+  for (let i = 0; i < clientIds.length; i += 1000) {
+    auditoriaRedigida += await redigirAuditoria(prisma, tenantId, clientIds.slice(i, i + 1000), "LIMPAR_BASE");
+  }
+
+  const resumo = { clients: clientIds.length, movements, messageEvents, compras, historicoConta, conversas, supressoesGravadas, auditoriaRedigida };
+  await logAudit({ tenantId, userId, action: "PURGE_CLIENTS", target: "Client", details: resumo });
+  res.json(resumo);
 });
 
 export default router;

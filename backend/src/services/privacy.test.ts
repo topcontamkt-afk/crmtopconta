@@ -4,6 +4,7 @@
  */
 import {
   canonicalPhone,
+  contatoSuprimido,
   CONTATO_LIBERADO_WHERE,
   estaSuprimido,
   motivoBloqueioCliente,
@@ -168,5 +169,37 @@ describe("regras de cliente", () => {
     expect(motivoBloqueioCliente({ autorizacaoComunicacao: true, optOutAt: new Date() })).toMatch(/opt-out/);
     expect(motivoBloqueioCliente({ autorizacaoComunicacao: true, bloqueadoLgpdAt: new Date() })).toMatch(/bloqueado/);
     expect(motivoBloqueioCliente(null)).toBeNull();
+  });
+});
+
+// LGPD 03-01 (correção): ELIMINACAO por telefone não pode fazer sumir o novo dono de um número reaproveitado
+describe("ELIMINACAO por telefone x número reaproveitado", () => {
+  const TEL = "+5584999998888";
+  const supressoes = () => [{ id: "s1", tenantId: "t1", phoneHash: phoneHash(SALT, TEL), docHash: "doc-eliminado", motivo: "ELIMINACAO" }];
+
+  it("contato com CPF próprio, diferente e não suprimido, passa", async () => {
+    const { prisma } = fakePrisma({ supressoes: supressoes() });
+    const lote = await suprimidosEmLote(prisma, "t1", { telefones: [TEL], docHashes: ["doc-novo"] });
+    expect(contatoSuprimido(lote, { telefone: TEL, cpfHash: "doc-novo" })).toBe(false);
+    expect(await estaSuprimido(prisma, "t1", { telefone: TEL, docHash: "doc-novo" })).toBeNull();
+    const r = await semSuprimidos(prisma, "t1", [{ id: "novo-dono", telefone: TEL, cpfHash: "doc-novo" }]);
+    expect(r.map((x) => x.id)).toEqual(["novo-dono"]);
+  });
+
+  it("contato de lista manual sem documento é barrado; o próprio documento eliminado também", async () => {
+    const { prisma } = fakePrisma({ supressoes: supressoes() });
+    const lote = await suprimidosEmLote(prisma, "t1", { telefones: [TEL], docHashes: ["doc-eliminado"] });
+    expect(contatoSuprimido(lote, { telefone: TEL, cpfHash: null })).toBe(true);
+    expect(contatoSuprimido(lote, { telefone: TEL, cpfHash: "doc-eliminado" })).toBe(true);
+    expect(await estaSuprimido(prisma, "t1", { telefone: "558499998888" })).toBe("ELIMINACAO");
+  });
+
+  it("OPT_OUT e BLOQUEIO por telefone continuam bloqueando mesmo com CPF diferente", async () => {
+    for (const motivo of ["OPT_OUT", "BLOQUEIO"]) {
+      const { prisma } = fakePrisma({ supressoes: [...supressoes(), { id: "s2", tenantId: "t1", phoneHash: phoneHash(SALT, TEL), docHash: null, motivo }] });
+      const lote = await suprimidosEmLote(prisma, "t1", { telefones: [TEL], docHashes: ["doc-novo"] });
+      expect(contatoSuprimido(lote, { telefone: TEL, cpfHash: "doc-novo" })).toBe(true);
+      expect(lote.motivos.get(TEL)).toBe(motivo);
+    }
   });
 });

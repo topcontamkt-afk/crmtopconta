@@ -4,16 +4,25 @@ import { hashCPF } from "./masking";
 const CPF = "529.982.247-25";
 const SALT = "salt";
 
-function fake(existing: any) {
+jest.mock("../middleware/audit", () => ({ logAudit: jest.fn(async () => undefined) }));
+
+function fake(existing: any, opts: { supressoes?: any[]; tenant?: any } = {}) {
   const updates: any[] = [];
   const changes: any[] = [];
+  const supressoes = [...(opts.supressoes ?? [])];
   const prisma: any = {
-    tenant: { findUniqueOrThrow: jest.fn(async () => ({ cpfSalt: SALT })) },
+    tenant: { findUniqueOrThrow: jest.fn(async () => ({ cpfSalt: SALT, ...opts.tenant })), findUnique: jest.fn(async () => ({ cpfSalt: SALT })) },
+    supressaoTitular: {
+      findMany: jest.fn(async ({ where }: any) => supressoes.filter((r) => (where.docHash?.in ?? []).includes(r.docHash))),
+      deleteMany: jest.fn(async () => ({ count: 1 })),
+    },
+    campaignRecipient: { findMany: jest.fn(async () => []) },
     importJob: { create: jest.fn(async ({ data }: any) => ({ id: "job1", ...data })), update: jest.fn(async () => ({})) },
     importChange: { createMany: jest.fn(async ({ data }: any) => void changes.push(...data)) },
     client: {
       findUnique: jest.fn(async () => existing),
       findFirst: jest.fn(async () => null),
+      findMany: jest.fn(async () => []),
       update: jest.fn(async (a: any) => void updates.push(a)),
       create: jest.fn(async () => ({ id: "novo" })),
     },
@@ -61,4 +70,41 @@ describe("runImport (genérico) — arquivo sem as colunas de limite/saldo/statu
   });
 });
 
-void hashCPF;
+// LGPD 03-01 / 03-03 / 03-04 no formato genérico (e Google Sheets)
+describe("runImport (genérico) — LGPD", () => {
+  const HASH = hashCPF(CPF, SALT);
+
+  it("documento eliminado a pedido: linha ignorada (aviso, não erro); com abertura posterior volta como novo", async () => {
+    const sup = { tenantId: "t1", docHash: HASH, motivo: "ELIMINACAO", createdAt: new Date("2026-10-01T00:00:00Z") };
+    const a = fake(null, { supressoes: [sup] });
+    const r = await runImport(a.prisma, "t1", [linha], "u1", "csv");
+    expect(a.prisma.client.create).not.toHaveBeenCalled();
+    expect(r.result.eliminadosAPedido).toBe(1);
+    expect(a.prisma.importJob.update.mock.calls[0][0].data.status).toBe("CONCLUIDO");
+
+    const b = fake(null, { supressoes: [sup] });
+    const r2 = await runImport(b.prisma, "t1", [{ ...linha, data_abertura_conta: "2026-10-12" }], "u1", "csv");
+    expect(b.prisma.client.create).toHaveBeenCalled();
+    expect(b.prisma.supressaoTitular.deleteMany).toHaveBeenCalledWith({ where: { tenantId: "t1", motivo: "ELIMINACAO", docHash: HASH } });
+    expect(r2.result.supressoesLiberadas).toBe(1);
+  });
+
+  it("cliente bloqueado não é atualizado; correção manual é preservada e contada", async () => {
+    const bloqueado = fake({ ...existente(), bloqueadoLgpdAt: new Date() });
+    const r = await runImport(bloqueado.prisma, "t1", [linha], "u1", "csv");
+    expect(bloqueado.updates).toHaveLength(0);
+    expect(r.result.bloqueadosLgpd).toBe(1);
+
+    const corrigido = fake({ ...existente(), nome: "Maria Corrigida", camposCorrigidos: { nome: "2026-10-10" } }, { tenant: { correcaoManualVence: true } });
+    const r2 = await runImport(corrigido.prisma, "t1", [linha], "u1", "csv");
+    expect(corrigido.updates[0].data).not.toHaveProperty("nome");
+    expect(r2.result.camposPreservadosCorrecao).toBe(1);
+  });
+
+  it("o fallback por telefone nunca casa com cliente anonimizado", async () => {
+    const f = fake(null);
+    await runImport(f.prisma, "t1", [linha], "u1", "csv");
+    expect(f.prisma.client.findFirst.mock.calls[0][0].where).toMatchObject({ tenantId: "t1", anonymizedAt: null });
+  });
+});
+

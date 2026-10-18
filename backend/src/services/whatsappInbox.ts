@@ -3,6 +3,7 @@ import { AppPrismaClient } from "../config/db";
 import { logAudit } from "../middleware/audit";
 import { InboundMessage, isOptOutMessage, phoneCandidates, previewOf } from "./whatsappPayload";
 import { registrarOptOutTelefone } from "./privacy";
+import { prazoDoPedido } from "./titular";
 
 /**
  * Grava uma mensagem recebida do cliente: acha (ou cria) a conversa, liga ao cliente pelo telefone,
@@ -166,6 +167,28 @@ export async function storeInboundMessage(
       targetId: client?.id,
       details: { conversationId: conversation.id, wamid: m.wamid, telefone: r.telefoneMasked, clientIds: r.clientIds },
     });
+    // LGPD 02-03: o "PARAR" é uma revogação do consentimento (art. 18, IX) e entra na fila de pedidos do
+    // titular já atendida (o opt-out foi aplicado agora). Sem o texto da mensagem: só o fato e o telefone mascarado.
+    try {
+      await prisma.pedidoTitular.create({
+        data: {
+          tenantId,
+          clientId: client?.id ?? null,
+          telefoneMasked: r.telefoneMasked,
+          tipo: "REVOGACAO",
+          canal: "WHATSAPP",
+          status: "ATENDIDO",
+          descricao: null,
+          recebidoEm: m.timestamp,
+          prazoEm: prazoDoPedido(m.timestamp),
+          respondidoEm: new Date(),
+          resposta: "Opt-out registrado automaticamente",
+        },
+      });
+    } catch (err) {
+      // o opt-out já valeu; o registro do pedido não pode derrubar o webhook
+      console.error("[whatsappInbox] falha ao registrar pedido de revogação", (err as Error).message);
+    }
     optedOut = true;
   }
 

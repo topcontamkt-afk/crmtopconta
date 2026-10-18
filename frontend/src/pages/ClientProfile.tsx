@@ -20,6 +20,7 @@ interface ClientDetail {
   autorizacaoComunicacao: boolean;
   tags: string[];
   bloqueadoLgpdAt: string | null;
+  anonymizedAt?: string | null;
   camposCorrigidos: Record<string, string> | null;
   movements: { id: string; tipo: string; valor: string; data: string }[];
   messageEvents: {
@@ -94,6 +95,34 @@ export default function ClientProfile() {
     }
   }
 
+  // LGPD 03-01 / 04-01: eliminação dos dados a pedido do titular (art. 18, VI). Irreversível: pede o motivo
+  // e a frase de confirmação; o servidor grava a supressão (a reimportação não recria o cliente).
+  async function eliminarDados() {
+    if (!client) return;
+    const motivo = window.prompt(
+      "ELIMINAR os dados pessoais deste cliente? Não dá para desfazer: nome, telefone, documento, conversas, mídias e históricos " +
+        "ligados a ele são apagados ou anonimizados, e a importação não o recria.\n\nInforme o motivo (ex.: pedido do titular por e-mail em 10/10):"
+    );
+    if (!motivo || motivo.trim().length < 5) return;
+    const frase = window.prompt('Para confirmar, digite exatamente: ELIMINAR DADOS');
+    if (frase !== "ELIMINAR DADOS") return setErro("Confirmação não conferiu. Nada foi apagado.");
+    setErro(null);
+    try {
+      const r = await api<{ copiasExternas?: { provedor: string; conversas: number; aviso: string }[] }>(`/clients/${client.id}/anonymize`, {
+        method: "POST",
+        body: { motivo: motivo.trim(), confirmacao: frase },
+      });
+      // LGPD 04-08: a cópia que fica no aparelho/Z-API não é apagada pelo sistema
+      const externas = (r.copiasExternas ?? []).map((c) => c.aviso).filter(Boolean);
+      setAviso(
+        "Dados do titular eliminados." + (externas.length ? ` Atenção: ${externas.join(" ")}` : "")
+      );
+      carregar();
+    } catch (e) {
+      setErro((e as Error).message);
+    }
+  }
+
   // LGPD 03-02: relatório completo do titular (acesso e portabilidade), em JSON
   async function baixarRelatorio() {
     if (!client) return;
@@ -115,6 +144,11 @@ export default function ClientProfile() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <h2>
           {client.nome}{" "}
+          {client.anonymizedAt && (
+            <span className="badge" title="Dados pessoais eliminados (LGPD)">
+              Dados eliminados em {fmtData(client.anonymizedAt)}
+            </span>
+          )}
           {client.bloqueadoLgpdAt && (
             <span className="badge danger" title="Tratamento suspenso a pedido do titular">
               Tratamento suspenso (LGPD) desde {fmtData(client.bloqueadoLgpdAt)}
@@ -137,9 +171,14 @@ export default function ClientProfile() {
               Baixar relatório do titular
             </button>
           )}
-          {admin && (
+          {admin && !client.anonymizedAt && (
             <button className="btn secondary" onClick={alternarBloqueio}>
               {client.bloqueadoLgpdAt ? "Retomar tratamento" : "Suspender tratamento"}
+            </button>
+          )}
+          {admin && !client.anonymizedAt && (
+            <button className="btn danger" onClick={eliminarDados}>
+              Eliminar dados do titular
             </button>
           )}
         </div>

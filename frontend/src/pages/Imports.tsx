@@ -108,8 +108,11 @@ export default function Imports() {
   async function handlePurge() {
     setPurgeMsg(null);
     try {
-      const r = await api<{ clients: number }>("/clients/purge", { method: "POST", body: { confirm: purgeText } });
-      setPurgeMsg(`Base limpa: ${r.clients} clientes removidos. Já pode importar a planilha correta.`);
+      const r = await api<{ clients: number; supressoesGravadas?: number }>("/clients/purge", { method: "POST", body: { confirm: purgeText } });
+      setPurgeMsg(
+        `Base limpa: ${r.clients} clientes removidos. Já pode importar a planilha correta.` +
+          (r.supressoesGravadas ? ` ${r.supressoesGravadas} pedido(s) de opt-out/bloqueio guardado(s) para valer na reimportação.` : "")
+      );
       setPurgeText("");
       load();
     } catch (err: any) {
@@ -278,12 +281,24 @@ export default function Imports() {
     let errors = 0;
     let unmatched = 0;
     let merchantsCreated = 0;
+    // LGPD 03-01 / 03-03 / 03-04: o que a importação deixou de fora ou preservou de propósito
+    const lgpd = { eliminadosAPedido: 0, bloqueadosLgpd: 0, supressoesLiberadas: 0, camposPreservadosCorrecao: 0 };
 
     try {
       for (let i = 0; i < totalBatches; i++) {
         const batch = rows.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE);
         setUploadStatus(`Importando lote ${i + 1} de ${totalBatches} (${added + updated} de ${rows.length} processados até agora)...`);
-        const resp = await api<{ addedCount: number; updatedCount: number; errorCount: number; unmatchedRows?: number; merchantsCreated?: number }>(
+        const resp = await api<{
+          addedCount: number;
+          updatedCount: number;
+          errorCount: number;
+          unmatchedRows?: number;
+          merchantsCreated?: number;
+          eliminadosAPedido?: number;
+          bloqueadosLgpd?: number;
+          supressoesLiberadas?: number;
+          camposPreservadosCorrecao?: number;
+        }>(
           FORMAT_CONFIG[format].endpoint,
           { method: "POST", body: { rows: batch, loteId, ...protecao, ...extraBody() } }
         );
@@ -292,7 +307,17 @@ export default function Imports() {
         errors += resp.errorCount;
         unmatched += resp.unmatchedRows ?? 0;
         merchantsCreated += resp.merchantsCreated ?? 0;
+        lgpd.eliminadosAPedido += resp.eliminadosAPedido ?? 0;
+        lgpd.bloqueadosLgpd += resp.bloqueadosLgpd ?? 0;
+        lgpd.supressoesLiberadas += resp.supressoesLiberadas ?? 0;
+        lgpd.camposPreservadosCorrecao += resp.camposPreservadosCorrecao ?? 0;
       }
+      const avisosLgpd = [
+        lgpd.eliminadosAPedido > 0 ? `${lgpd.eliminadosAPedido} linha(s) ignorada(s): titular pediu a eliminação dos dados` : "",
+        lgpd.bloqueadosLgpd > 0 ? `${lgpd.bloqueadosLgpd} linha(s) ignorada(s): tratamento bloqueado a pedido do titular` : "",
+        lgpd.supressoesLiberadas > 0 ? `${lgpd.supressoesLiberadas} titular(es) voltou(aram) por conta aberta depois do pedido de eliminação` : "",
+        lgpd.camposPreservadosCorrecao > 0 ? `${lgpd.camposPreservadosCorrecao} campo(s) corrigido(s) à mão mantido(s) (a planilha não sobrescreve correção)` : "",
+      ].filter(Boolean);
       setUploadStatus(
         format === "compras"
           ? `Compras importadas: ${added} novas, ${updated} já existiam, ${merchantsCreated} lojista(s) novo(s), ${errors} linha(s) com erro.` +
@@ -300,7 +325,8 @@ export default function Imports() {
                 ? ` ${unmatched} transação(ões) ficaram de fora porque o cliente ainda não está na base: importe os clientes e envie este arquivo de novo (não duplica).`
                 : "")
           : `Importado: ${added} novos, ${updated} atualizados, ${errors} com erro/aviso.` +
-              (errors > 0 ? " Veja o detalhe no histórico abaixo." : "")
+              (errors > 0 ? " Veja o detalhe no histórico abaixo." : "") +
+              (avisosLgpd.length ? ` LGPD: ${avisosLgpd.join("; ")}.` : "")
       );
       resetUpload();
       load();
@@ -335,15 +361,21 @@ export default function Imports() {
     if (!window.confirm(`Desfazer a importação de “${nome}”?\n\nOs clientes voltam ao estado de antes (os criados por ela serão removidos). Alterações feitas depois nesses clientes serão perdidas.`)) return;
     setUndoing(l.loteId);
     setUndoMsg(null);
-    let restaurados = 0, removidos = 0, mantidos = 0;
+    let restaurados = 0, removidos = 0, mantidos = 0, protegidos = 0;
     try {
       for (let guard = 0; guard < 500; guard++) {
-        const r = await api<{ restaurados: number; removidos: number; mantidos: number; restantes: number; concluido: boolean }>(`/imports/lotes/${l.loteId}/desfazer`, { method: "POST" });
-        restaurados += r.restaurados; removidos += r.removidos; mantidos += r.mantidos;
+        const r = await api<{ restaurados: number; removidos: number; mantidos: number; protegidos?: number; restantes: number; concluido: boolean }>(`/imports/lotes/${l.loteId}/desfazer`, { method: "POST" });
+        restaurados += r.restaurados; removidos += r.removidos; mantidos += r.mantidos; protegidos += r.protegidos ?? 0;
         setUndoMsg(`Desfazendo... ${restaurados + removidos + mantidos} cliente(s) processado(s), faltam ${r.restantes}.`);
         if (r.concluido) break;
       }
-      setUndoMsg(`Importação desfeita: ${restaurados} cliente(s) restaurado(s), ${removidos} removido(s)` + (mantidos > 0 ? `, ${mantidos} mantido(s) por terem mudado depois.` : "."));
+      setUndoMsg(
+        `Importação desfeita: ${restaurados} cliente(s) restaurado(s), ${removidos} removido(s)` +
+          (mantidos > 0 ? `, ${mantidos} mantido(s) por terem mudado depois` : "") +
+          // LGPD 04-04: desfazer nunca devolve os dados de quem foi anonimizado, bloqueado ou pediu eliminação
+          (protegidos > 0 ? `, ${protegidos} não restaurado(s) por pedido LGPD do titular` : "") +
+          "."
+      );
     } catch (e) {
       setUndoMsg(e instanceof Error ? e.message : "Não consegui desfazer");
     } finally {
@@ -611,8 +643,9 @@ export default function Imports() {
         <div className="card" style={{ marginTop: 16, borderColor: "var(--danger, #d9534f)" }}>
           <h3>Limpar base</h3>
           <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
-            Apaga <strong>todos os clientes</strong>, com movimentações e eventos de mensagem. Use quando subiu a
-            planilha errada. Não dá para desfazer. Campanhas, segmentos, templates e o histórico de importações são mantidos.
+            Apaga <strong>todos os clientes</strong>, com movimentações, compras, histórico de conta, eventos de mensagem e
+            as conversas da Inbox desses clientes. Use quando subiu a planilha errada. Não dá para desfazer. Quem pediu
+            para sair continua bloqueado na reimportação. Campanhas, segmentos, templates e o histórico de importações são mantidos.
           </p>
           <div className="form-row">
             <label>Digite LIMPAR BASE para confirmar</label>

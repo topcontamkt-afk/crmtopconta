@@ -38,7 +38,23 @@ import { prisma } from "../config/db";
  * escrita deste log é baixo o suficiente para não justificar abrir mão da propriedade "zero SQL
  * cru" já confirmada no restante do backend. Com a cadeia por tenant, o fork só acontece entre
  * escritas concorrentes do mesmo tenant.
+ *
+ * LGPD 04-01 (cadeia x retenção): a anonimização precisa tirar PII de `details` de linhas antigas,
+ * e reescrever `details` muda o hash de conteúdo daquela linha. Escolha: a redação é um EVENTO
+ * ENCADEADO (action AUDIT_REDACAO_LGPD) gravado ANTES de reescrever as linhas. Para cada linha
+ * redigida ele sela: o `hash` original da linha (o elo, que não muda), o hash dos metadados
+ * (tenant, usuário, ação, alvo, data, prevHash) e o hash dos `details` NOVOS — nunca o conteúdo
+ * antigo. A verificação aceita a diferença de conteúdo de uma linha só se um evento de redação
+ * POSTERIOR na cadeia a cobre e os três hashes batem; qualquer outra mudança (outro texto, outro
+ * campo, linha sem evento) continua sendo CONTEUDO. Alternativas descartadas: não reescrever
+ * (deixaria PII no AuditLog) e hash sobre um resumo sem PII (exigiria nova coluna e transição para
+ * as linhas antigas). Quem consegue gravar no banco já conseguiria recalcular a cadeia inteira;
+ * a redação legítima fica explícita e verificável, não silenciosa.
+ * Limitação: linhas redigidas pela versão antiga da retenção (sem evento) aparecem como CONTEUDO.
  */
+
+/** LGPD 04-01: ação do evento encadeado que registra a redação de PII em linhas antigas. */
+export const ACAO_REDACAO_AUDITORIA = "AUDIT_REDACAO_LGPD";
 
 /** LGPD 08-08: ação da entrada-âncora que inicia a cadeia por tenant. */
 export const ANCORA_CADEIA_TENANT = "AUDIT_CADEIA_POR_TENANT";
@@ -70,6 +86,36 @@ function canonicalize(value: unknown): unknown {
 export function computeAuditHash(entry: AuditEntryForHash, prevHash: string | null): string {
   const payload = JSON.stringify({ prevHash, entry: canonicalize(entry) });
   return crypto.createHash("sha256").update(payload).digest("hex");
+}
+
+const sha256 = (v: unknown) => crypto.createHash("sha256").update(JSON.stringify(canonicalize(v))).digest("hex");
+
+/** LGPD 04-01: hash só do `details` (o conteúdo novo, depois da redação). */
+export function hashDetalhes(details: unknown): string {
+  return sha256(details ?? null);
+}
+
+type LinhaAuditoria = Omit<AuditEntryForHash, "details"> & { prevHash: string | null; hash: string | null };
+
+/** LGPD 04-01: hash de tudo da linha, menos `details` (o que a redação NÃO pode mudar). */
+export function hashMetadados(row: LinhaAuditoria): string {
+  return sha256({
+    tenantId: row.tenantId,
+    userId: row.userId,
+    action: row.action,
+    target: row.target,
+    targetId: row.targetId,
+    createdAt: row.createdAt,
+    prevHash: row.prevHash,
+    hash: row.hash,
+  });
+}
+
+export type RegistroRedacao = { id: string; hash: string; meta: string; detalhes: string };
+
+/** LGPD 04-01: o que o evento de redação sela de uma linha encadeada que vai ter `details` reescrito. */
+export function registroRedacao(row: LinhaAuditoria & { id: string; hash: string }, novosDetalhes: unknown): RegistroRedacao {
+  return { id: row.id, hash: row.hash, meta: hashMetadados(row), detalhes: hashDetalhes(novosDetalhes) };
 }
 
 export type ChainTip = { hash: string | null; createdAt: Date | null };
@@ -142,12 +188,13 @@ export async function prepareTenantChain(tenantId: string): Promise<ChainTip> {
 }
 
 export type AuditChainVerification =
-  | { valid: true; checked: number; ancora: boolean; lacunasLegado: number }
+  | { valid: true; checked: number; ancora: boolean; lacunasLegado: number; redigidas: number }
   | {
       valid: false;
       checked: number;
       ancora: boolean;
       lacunasLegado: number;
+      redigidas: number;
       motivo: "CONTEUDO" | "ELO" | "ANCORA";
       brokenAt: { id: string; createdAt: Date };
     };
@@ -166,14 +213,25 @@ export async function verifyAuditChain(tenantId: string): Promise<AuditChainVeri
   const ancora = ancoraIdx !== -1;
   const fimLegado = ancora ? ancoraIdx : rows.length;
 
+  // LGPD 04-01: redações registradas na cadeia (a mais recente de cada linha vale)
+  const redacoes = new Map<string, { reg: RegistroRedacao; idx: number }>();
+  rows.forEach((r, idx) => {
+    if (r.action !== ACAO_REDACAO_AUDITORIA) return;
+    const linhas = (r.details as { linhas?: unknown } | null)?.linhas;
+    if (!Array.isArray(linhas)) return;
+    for (const l of linhas as RegistroRedacao[]) if (l && typeof l.id === "string") redacoes.set(l.id, { reg: l, idx });
+  });
+
   let anterior: string | null = null;
   let checked = 0;
   let lacunasLegado = 0;
+  let redigidas = 0;
   const quebra = (row: (typeof rows)[number], motivo: "CONTEUDO" | "ELO" | "ANCORA"): AuditChainVerification => ({
     valid: false,
     checked,
     ancora,
     lacunasLegado,
+    redigidas,
     motivo,
     brokenAt: { id: row.id, createdAt: row.createdAt },
   });
@@ -192,7 +250,14 @@ export async function verifyAuditChain(tenantId: string): Promise<AuditChainVeri
       },
       row.prevHash
     );
-    if (recomputed !== row.hash) return quebra(row, "CONTEUDO");
+    if (recomputed !== row.hash) {
+      // LGPD 04-01: conteúdo diferente só é aceito se um evento de redação posterior cobre exatamente esta linha
+      const r = redacoes.get(row.id);
+      const coberta =
+        !!r && r.idx > i && r.reg.hash === row.hash && r.reg.meta === hashMetadados(row) && r.reg.detalhes === hashDetalhes(row.details);
+      if (!coberta) return quebra(row, "CONTEUDO");
+      redigidas++;
+    }
 
     if (i < fimLegado) {
       // Era global: o elo anterior pode ser a linha de outro tenant. Não é quebra, é lacuna.
@@ -210,5 +275,5 @@ export async function verifyAuditChain(tenantId: string): Promise<AuditChainVeri
     checked++;
   }
 
-  return { valid: true, checked, ancora, lacunasLegado };
+  return { valid: true, checked, ancora, lacunasLegado, redigidas };
 }

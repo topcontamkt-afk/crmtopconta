@@ -100,7 +100,8 @@ export async function suprimir(
 /**
  * Motivo da supressão do contato (OPT_OUT | ELIMINACAO | BLOQUEIO) ou null. Além da tabela de supressão,
  * considera o opt-out já gravado nos registros por telefone (Client.optOutAt e CampaignRecipient.optOutAt
- * de QUALQUER registro com esse número), o que cobre os pedidos anteriores à tabela.
+ * de QUALQUER registro com esse número), o que cobre os pedidos anteriores à tabela. Mesma regra de
+ * `contatoSuprimido` (número reaproveitado com documento próprio passa pela ELIMINACAO do telefone).
  */
 export async function estaSuprimido(
   prisma: AppPrismaClient,
@@ -108,18 +109,22 @@ export async function estaSuprimido(
   contato: { telefone?: string | null; docHash?: string | null }
 ): Promise<string | null> {
   const lote = await suprimidosEmLote(prisma, tenantId, { telefones: [contato.telefone], docHashes: [contato.docHash] });
-  const c = canonicalPhone(contato.telefone);
-  if (c && lote.telefones.has(c)) return lote.motivos.get(c) ?? "OPT_OUT";
   if (contato.docHash && lote.docHashes.has(contato.docHash)) return lote.motivos.get(`doc:${contato.docHash}`) ?? "OPT_OUT";
-  return null;
+  if (!contatoSuprimido(lote, { telefone: contato.telefone, cpfHash: contato.docHash })) return null;
+  const c = canonicalPhone(contato.telefone);
+  return (c && lote.motivos.get(c)) || "OPT_OUT";
 }
 
 export interface LoteSupressao {
   /** telefones canônicos suprimidos */
   telefones: Set<string>;
   docHashes: Set<string>;
-  /** motivo por telefone canônico ou por `doc:<hash>` */
+  /** motivo por telefone canônico ou por `doc:<hash>` (o que sempre bloqueia tem prioridade sobre ELIMINACAO) */
   motivos: Map<string, string>;
+  /** todos os motivos de cada telefone canônico suprimido */
+  motivosPorTelefone: Map<string, Set<string>>;
+  /** documentos das supressões por ELIMINACAO de cada telefone (null = eliminação sem documento, ex.: lista manual) */
+  docsEliminadosPorTelefone: Map<string, Set<string | null>>;
 }
 
 const CHUNK = 1000;
@@ -134,15 +139,23 @@ export async function suprimidosEmLote(
   tenantId: string,
   contatos: { telefones?: (string | null | undefined)[]; docHashes?: (string | null | undefined)[] }
 ): Promise<LoteSupressao> {
-  const out: LoteSupressao = { telefones: new Set(), docHashes: new Set(), motivos: new Map() };
+  const out: LoteSupressao = { telefones: new Set(), docHashes: new Set(), motivos: new Map(), motivosPorTelefone: new Map(), docsEliminadosPorTelefone: new Map() };
   const canon = [...new Set((contatos.telefones ?? []).map(canonicalPhone).filter((c): c is string => !!c))];
   const docs = [...new Set((contatos.docHashes ?? []).filter((d): d is string => !!d))];
   if (canon.length === 0 && docs.length === 0) return out;
 
-  const marcarTelefone = (c: string | null, motivo: string) => {
+  const marcarTelefone = (c: string | null, motivo: string, docHash: string | null = null) => {
     if (!c) return;
     out.telefones.add(c);
-    if (!out.motivos.has(c)) out.motivos.set(c, motivo);
+    // OPT_OUT/BLOQUEIO sempre bloqueiam; ELIMINACAO por telefone não (número reaproveitado): o texto mostra o primeiro
+    const atual = out.motivos.get(c);
+    if (!atual || (atual === "ELIMINACAO" && motivo !== "ELIMINACAO")) out.motivos.set(c, motivo);
+    if (!out.motivosPorTelefone.has(c)) out.motivosPorTelefone.set(c, new Set());
+    out.motivosPorTelefone.get(c)!.add(motivo);
+    if (motivo === "ELIMINACAO") {
+      if (!out.docsEliminadosPorTelefone.has(c)) out.docsEliminadosPorTelefone.set(c, new Set());
+      out.docsEliminadosPorTelefone.get(c)!.add(docHash);
+    }
   };
 
   // 1) tabela de supressão (hash do telefone canônico / hash do documento)
@@ -155,7 +168,7 @@ export async function suprimidosEmLote(
   for (const parte of chunks([...hashes.map((h) => ({ phoneHash: h })), ...docs.map((d) => ({ docHash: d }))])) {
     const rows = await prisma.supressaoTitular.findMany({ where: { tenantId, OR: parte }, select: { phoneHash: true, docHash: true, motivo: true } });
     for (const r of rows) {
-      if (r.phoneHash && porHash.has(r.phoneHash)) marcarTelefone(porHash.get(r.phoneHash)!, r.motivo);
+      if (r.phoneHash && porHash.has(r.phoneHash)) marcarTelefone(porHash.get(r.phoneHash)!, r.motivo, r.docHash ?? null);
       if (r.docHash && docs.includes(r.docHash)) {
         out.docHashes.add(r.docHash);
         if (!out.motivos.has(`doc:${r.docHash}`)) out.motivos.set(`doc:${r.docHash}`, r.motivo);
@@ -174,10 +187,23 @@ export async function suprimidosEmLote(
   return out;
 }
 
-/** O contato está no lote de supressão (pelo telefone ou pelo documento)? */
+/**
+ * O contato está no lote de supressão (pelo telefone ou pelo documento)?
+ *
+ * LGPD 03-01: a ELIMINACAO gravada por TELEFONE não bloqueia um contato com documento (`cpfHash`) próprio,
+ * diferente do eliminado e não suprimido: operadoras reaproveitam o número, e o novo dono não pode sumir em
+ * silêncio. Ela continua bloqueando o contato sem documento (lista manual) e o próprio documento eliminado.
+ * OPT_OUT e BLOQUEIO por telefone bloqueiam sempre.
+ */
 export function contatoSuprimido(lote: LoteSupressao, contato: { telefone?: string | null; cpfHash?: string | null }): boolean {
+  if (contato.cpfHash && lote.docHashes.has(contato.cpfHash)) return true;
   const c = canonicalPhone(contato.telefone);
-  return (!!c && lote.telefones.has(c)) || (!!contato.cpfHash && lote.docHashes.has(contato.cpfHash));
+  if (!c || !lote.telefones.has(c)) return false;
+  const motivos = lote.motivosPorTelefone?.get(c);
+  if (!motivos || [...motivos].some((m) => m !== "ELIMINACAO")) return true;
+  // só eliminação neste número: sem documento, bloqueia; com documento, só se for o próprio eliminado
+  if (!contato.cpfHash) return true;
+  return lote.docsEliminadosPorTelefone?.get(c)?.has(contato.cpfHash) ?? false;
 }
 
 /** Tira da lista quem está suprimido (telefone ou documento). Uma passada em lote, para públicos grandes. */

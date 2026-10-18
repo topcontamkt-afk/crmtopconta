@@ -3,7 +3,7 @@ import { assertUndoable, groupLotes, reviveBefore, undoLoteBatch, UndoError } fr
 const T0 = new Date("2026-10-10T10:00:00Z");
 const job = (over: Record<string, unknown> = {}) => ({ id: "j1", tenantId: "t1", loteId: "L1", formato: "cartoes", startedAt: T0, desfeitaEm: null, ...over });
 
-function fake(opts: { jobs?: any[]; changes?: any[]; posterior?: any; clientUpdate?: (a: any) => any; clientDelete?: (a: any) => any } = {}) {
+function fake(opts: { jobs?: any[]; changes?: any[]; posterior?: any; clientUpdate?: (a: any) => any; clientDelete?: (a: any) => any; clientes?: any[]; eliminados?: string[] } = {}) {
   const changes = [...(opts.changes ?? [])];
   const log: Record<string, any[]> = { update: [], delete: [], movement: [], snap: [], jobUpdate: [] };
   const prisma: any = {
@@ -20,10 +20,12 @@ function fake(opts: { jobs?: any[]; changes?: any[]; posterior?: any; clientUpda
       }),
     },
     client: {
+      findMany: jest.fn(async ({ where }: any) => (opts.clientes ?? []).filter((c) => where.id.in.includes(c.id))),
       update: jest.fn(async (a: any) => { log.update.push(a); return opts.clientUpdate?.(a) ?? {}; }),
       delete: jest.fn(async (a: any) => { log.delete.push(a); return opts.clientDelete?.(a) ?? {}; }),
     },
     movement: { deleteMany: jest.fn(async (a: any) => void log.movement.push(a)) },
+    supressaoTitular: { findMany: jest.fn(async ({ where }: any) => (opts.eliminados ?? []).filter((d) => where.docHash.in.includes(d)).map((docHash) => ({ docHash }))) },
     accountSnapshot: { deleteMany: jest.fn(async (a: any) => void log.snap.push(a)) },
   };
   return { prisma, log, changes };
@@ -54,7 +56,7 @@ describe("undoLoteBatch", () => {
   it("restaura os atualizados, apaga os criados e fecha o lote ao zerar a fila", async () => {
     const { prisma, log } = fake({ changes: [ch("1", "ATUALIZADO", { limiteTotal: "1500.00", saldoDisponivel: "400.00", dataCadastro: "2026-01-02T00:00:00.000Z" }), ch("2", "CRIADO")] });
     const r = await undoLoteBatch(prisma, "t1", "u1", "L1");
-    expect(r).toEqual({ restaurados: 1, removidos: 1, mantidos: 0, ausentes: 0, restantes: 0, concluido: true });
+    expect(r).toEqual({ restaurados: 1, protegidos: 0, removidos: 1, mantidos: 0, ausentes: 0, restantes: 0, concluido: true });
     expect(log.update[0].where).toEqual({ id: "c-1" });
     expect(log.update[0].data.limiteTotal).toBe("1500.00");
     expect(log.update[0].data.dataCadastro).toBeInstanceOf(Date);
@@ -83,6 +85,29 @@ describe("undoLoteBatch", () => {
     });
     const r = await undoLoteBatch(prisma, "t1", "u1", "L1");
     expect(r).toMatchObject({ restaurados: 0, ausentes: 1, mantidos: 1, concluido: true });
+  });
+});
+
+// LGPD 04-04: desfazer não pode trazer de volta nome/telefone/CPF de quem foi anonimizado depois da importação
+describe("undoLoteBatch — nunca reidentifica", () => {
+  const ch = (id: string, before: any) => ({ id, clientId: `c-${id}`, kind: "ATUALIZADO", before });
+  const antes = { nome: "Maria Silva", telefone: "+5584999998888", cpfHash: "hash-real" };
+
+  it("cliente anonimizado, bloqueado ou com documento eliminado não recebe o estado anterior", async () => {
+    const { prisma, log } = fake({
+      changes: [ch("1", antes), ch("2", antes), ch("3", { ...antes, cpfHash: "hash-eliminado" }), ch("4", { ...antes, cpfHash: "outro" })],
+      clientes: [
+        { id: "c-1", anonymizedAt: new Date(), bloqueadoLgpdAt: null, cpfHash: "anon-c-1" },
+        { id: "c-2", anonymizedAt: null, bloqueadoLgpdAt: new Date(), cpfHash: "x" },
+        { id: "c-3", anonymizedAt: null, bloqueadoLgpdAt: null, cpfHash: "y" },
+        { id: "c-4", anonymizedAt: null, bloqueadoLgpdAt: null, cpfHash: "z" },
+      ],
+      eliminados: ["hash-eliminado"],
+    });
+    const r = await undoLoteBatch(prisma, "t1", "u1", "L1");
+    expect(r).toMatchObject({ restaurados: 1, protegidos: 3, concluido: true });
+    expect(log.update.map((u: any) => u.where.id)).toEqual(["c-4"]);
+    expect(prisma.client.findMany.mock.calls[0][0].where).toMatchObject({ tenantId: "t1" });
   });
 });
 

@@ -11,7 +11,9 @@ jest.mock("../config/db", () => ({
 
 import { prisma } from "../config/db";
 import {
+  ACAO_REDACAO_AUDITORIA,
   ANCORA_CADEIA_TENANT,
+  registroRedacao,
   computeAuditHash,
   getLastAuditHash,
   prepareTenantChain,
@@ -101,7 +103,7 @@ describe("verifyAuditChain — cadeia por tenant (LGPD 08-08)", () => {
     const rows = [a, ...chain([entryAt("t1", "A", 1), entryAt("t1", "B", 2)], a.hash)];
     mockPrisma.auditLog.findMany.mockResolvedValue(rows);
 
-    await expect(verifyAuditChain("t1")).resolves.toEqual({ valid: true, checked: 3, ancora: true, lacunasLegado: 0 });
+    await expect(verifyAuditChain("t1")).resolves.toEqual({ valid: true, checked: 3, ancora: true, lacunasLegado: 0, redigidas: 0 });
   });
 
   it("detecta adulteração no meio da cadeia e aponta a linha exata", async () => {
@@ -127,7 +129,7 @@ describe("verifyAuditChain — cadeia por tenant (LGPD 08-08)", () => {
 
   it("cadeia vazia (só entradas pré-hash-chain, já filtradas pela query) → valid true, checked 0", async () => {
     mockPrisma.auditLog.findMany.mockResolvedValue([]);
-    await expect(verifyAuditChain("t1")).resolves.toEqual({ valid: true, checked: 0, ancora: false, lacunasLegado: 0 });
+    await expect(verifyAuditChain("t1")).resolves.toEqual({ valid: true, checked: 0, ancora: false, lacunasLegado: 0, redigidas: 0 });
   });
 
   it("eliminar os dados de OUTRO tenant não afeta a verificação deste (antes quebrava para todos)", async () => {
@@ -162,12 +164,12 @@ describe("verifyAuditChain — cadeia por tenant (LGPD 08-08)", () => {
 
       const result = await verifyAuditChain("t1");
       // L3 e L6 apontam para linhas de t2 (lacunas legadas); L1 é o início da cadeia global.
-      expect(result).toEqual({ valid: true, checked: 7, ancora: true, lacunasLegado: 2 });
+      expect(result).toEqual({ valid: true, checked: 7, ancora: true, lacunasLegado: 2, redigidas: 0 });
     });
 
     it("tenant que ainda não gravou desde o deploy (sem âncora): legado conferido sem falso alarme", async () => {
       mockPrisma.auditLog.findMany.mockResolvedValue(only(legadoGlobal(), "t2"));
-      await expect(verifyAuditChain("t2")).resolves.toEqual({ valid: true, checked: 2, ancora: false, lacunasLegado: 2 });
+      await expect(verifyAuditChain("t2")).resolves.toEqual({ valid: true, checked: 2, ancora: false, lacunasLegado: 2, redigidas: 0 });
     });
 
     it("adulteração de conteúdo no legado continua detectada", async () => {
@@ -205,6 +207,52 @@ describe("verifyAuditChain — cadeia por tenant (LGPD 08-08)", () => {
 
       await expect(verifyAuditChain("t1")).resolves.toMatchObject({ valid: false, motivo: "ELO", brokenAt: { id: intrusa.id } });
     });
+  });
+});
+
+// LGPD 04-01: a retenção tira PII de `details` antigos sem quebrar a prova de integridade
+describe("verifyAuditChain — redação de PII registrada como evento encadeado", () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function cenario() {
+    const a = anchorAfter("t1", [], 0);
+    const [upd, outra] = chain(
+      [
+        { ...entryAt("t1", "UPDATE_CLIENT", 1, { nome: "João Silva", telefone: "+5584999998888", statusConta: "ATIVO" }), target: "Client", targetId: "c1" },
+        entryAt("t1", "B", 2),
+      ],
+      a.hash
+    );
+    const redigido = { nome: "[redacted-anonimizacao]", telefone: "[redacted-anonimizacao]", statusConta: "ATIVO" };
+    return { a, upd, outra, redigido };
+  }
+
+  it("linha reescrita coberta por um evento de redação posterior → cadeia íntegra, sem PII", async () => {
+    const { a, upd, outra, redigido } = cenario();
+    const evento = chain([entryAt("t1", ACAO_REDACAO_AUDITORIA, 3, { linhas: [registroRedacao(upd, redigido)] })], outra.hash)[0];
+    const reescrita = { ...upd, details: redigido };
+    mockPrisma.auditLog.findMany.mockResolvedValue([a, reescrita, outra, evento]);
+
+    await expect(verifyAuditChain("t1")).resolves.toEqual({ valid: true, checked: 4, ancora: true, lacunasLegado: 0, redigidas: 1 });
+    expect(JSON.stringify([a, reescrita, outra, evento])).not.toContain("99998888");
+  });
+
+  it("sem o evento (como a retenção antiga fazia), reescrever details quebra a cadeia (CONTEUDO)", async () => {
+    const { a, upd, outra, redigido } = cenario();
+    mockPrisma.auditLog.findMany.mockResolvedValue([a, { ...upd, details: redigido }, outra]);
+    await expect(verifyAuditChain("t1")).resolves.toMatchObject({ valid: false, motivo: "CONTEUDO", brokenAt: { id: upd.id } });
+  });
+
+  it("conteúdo diferente do selado ou metadado alterado continuam sendo adulteração", async () => {
+    const { a, upd, outra, redigido } = cenario();
+    const evento = chain([entryAt("t1", ACAO_REDACAO_AUDITORIA, 3, { linhas: [registroRedacao(upd, redigido)] })], outra.hash)[0];
+
+    mockPrisma.auditLog.findMany.mockResolvedValue([a, { ...upd, details: { ...redigido, statusConta: "BLOQUEADO" } }, outra, evento]);
+    await expect(verifyAuditChain("t1")).resolves.toMatchObject({ valid: false, motivo: "CONTEUDO" });
+
+    mockPrisma.auditLog.findMany.mockResolvedValue([a, { ...upd, details: redigido, targetId: "c2" }, outra, evento]);
+    await expect(verifyAuditChain("t1")).resolves.toMatchObject({ valid: false, motivo: "CONTEUDO" });
+
   });
 });
 
@@ -262,6 +310,6 @@ describe("getLastAuditHash / prepareTenantChain (LGPD 08-08)", () => {
     const ancora = { id: "ancora", ...mockPrisma.auditLog.create.mock.calls[0][0].data };
 
     mockPrisma.auditLog.findMany.mockResolvedValue([...legado, ancora]);
-    await expect(verifyAuditChain("t1")).resolves.toEqual({ valid: true, checked: 3, ancora: true, lacunasLegado: 1 });
+    await expect(verifyAuditChain("t1")).resolves.toEqual({ valid: true, checked: 3, ancora: true, lacunasLegado: 1, redigidas: 0 });
   });
 });

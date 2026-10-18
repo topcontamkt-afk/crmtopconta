@@ -22,9 +22,13 @@ export interface Kpis {
   faixas: Record<string, number>;
 }
 
+// LGPD 03-04 / 04-01: o dashboard mede a base em tratamento. Cliente anonimizado (eliminação/retenção) ou
+// com tratamento bloqueado a pedido do titular fica fora de KPIs, públicos e oportunidades.
 export function clientWhere(tenantId: string, filters: DashboardFilters = {}): Prisma.ClientWhereInput {
   return {
     tenantId,
+    anonymizedAt: null,
+    bloqueadoLgpdAt: null,
     ...(filters.cidade ? { cidade: filters.cidade } : {}),
     ...(filters.empresaConveniada ? { empresaConveniada: filters.empresaConveniada } : {}),
   };
@@ -39,6 +43,8 @@ export function rawFilterSql(filters: DashboardFilters, startIndex: number, alia
   const parts: string[] = [];
   const params: string[] = [];
   const col = (name: string) => (alias ? `${alias}."${name}"` : `"${name}"`); // alias é literal do código, nunca entrada
+  // LGPD 03-04 / 04-01: mesma exclusão de clientWhere (anonimizados e bloqueados), sempre presente
+  parts.push(`AND ${col("anonymizedAt")} IS NULL AND ${col("bloqueadoLgpdAt")} IS NULL`);
   if (filters.cidade) {
     params.push(filters.cidade);
     parts.push(`AND ${col("cidade")} = $${startIndex + params.length - 1}`);

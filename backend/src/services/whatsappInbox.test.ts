@@ -5,7 +5,7 @@ jest.mock("../middleware/audit", () => ({ logAudit: jest.fn(async () => undefine
 import { logAudit } from "../middleware/audit";
 
 function makeFake(opts: { client?: any; mesmoTelefone?: any[]; duplicate?: boolean; evento?: any; lastInboundAt?: Date | null } = {}) {
-  const calls: Record<string, any[]> = { msgCreate: [], convUpdate: [], clientUpdate: [], eventoUpdate: [], recipientUpdate: [], supressao: [] };
+  const calls: Record<string, any[]> = { msgCreate: [], convUpdate: [], clientUpdate: [], eventoUpdate: [], recipientUpdate: [], supressao: [], pedido: [] };
   const prisma: any = {
     tenant: { findUnique: jest.fn(async () => ({ cpfSalt: "salt-t1" })) },
     supressaoTitular: {
@@ -34,6 +34,7 @@ function makeFake(opts: { client?: any; mesmoTelefone?: any[]; duplicate?: boole
       }),
     },
     campaignRecipient: { updateMany: jest.fn(async (a: any) => void calls.recipientUpdate.push(a)) },
+    pedidoTitular: { create: jest.fn(async (a: any) => void calls.pedido.push(a)) },
     messageEvent: {
       findFirst: jest.fn(async () => opts.evento ?? null),
       update: jest.fn(async (a: any) => void calls.eventoUpdate.push(a)),
@@ -133,6 +134,26 @@ describe("storeInboundMessage", () => {
     const r = await storeInboundMessage(prisma, "t1", "acc1", msg({ body: "Me tira dessa lista, por favor" }));
     expect(r.optedOut).toBe(true);
     expect(calls.supressao).toHaveLength(1);
+  });
+
+  // LGPD 02-03: o PARAR vira um pedido do titular (revogação) já atendido, sem o texto livre da mensagem
+  it("PARAR cria PedidoTitular REVOGACAO atendido, sem texto livre", async () => {
+    const { prisma, calls } = makeFake({ client: { id: "c1" } });
+    await storeInboundMessage(prisma, "t1", "acc1", msg({ body: "PARAR, não quero mais" }));
+    expect(calls.pedido).toHaveLength(1);
+    const d = calls.pedido[0].data;
+    expect(d).toMatchObject({ tenantId: "t1", clientId: "c1", tipo: "REVOGACAO", canal: "WHATSAPP", status: "ATENDIDO", descricao: null });
+    expect(d.respondidoEm).toBeInstanceOf(Date);
+    expect(d.prazoEm.getTime()).toBeGreaterThan(d.recebidoEm.getTime());
+    expect(JSON.stringify(d)).not.toMatch(/PARAR|não quero|5584999998888/);
+
+    const sem = makeFake();
+    await storeInboundMessage(sem.prisma, "t1", "acc1", msg({ body: "PARAR" }));
+    expect(sem.calls.pedido[0].data.clientId).toBeNull();
+
+    const comum = makeFake({ client: { id: "c1" } });
+    await storeInboundMessage(comum.prisma, "t1", "acc1", msg({ body: "Oi" }));
+    expect(comum.calls.pedido).toHaveLength(0);
   });
 
   it("mensagem comum não descadastra", async () => {
