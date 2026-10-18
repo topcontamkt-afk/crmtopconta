@@ -1,5 +1,6 @@
 import { AppPrismaClient } from "../config/db";
 import { credentialsOf } from "./whatsappAccount";
+import { zapiCredentialsOf, zapiSendText, ZapiError } from "./zapi";
 import { baseMime } from "./whatsappMedia";
 import {
   assertJanelaAberta,
@@ -43,13 +44,16 @@ export async function sendReply(
 
   const conversation = await prisma.conversation.findFirst({
     where: { id: conversationId, tenantId },
-    include: { account: { select: { phoneNumberId: true, active: true, credentials: true } } },
+    include: { account: { select: { phoneNumberId: true, active: true, credentials: true, provider: true } } },
   });
   if (!conversation) throw new SendError("NAO_ENCONTRADA", "Conversa não encontrada.");
-  const token = deps.token ?? credentialsOf(conversation.account).accessToken;
-  assertJanelaAberta(conversation.lastInboundAt, now);
   if (!conversation.account.active) throw new SendError("META", "O número do WhatsApp desta conversa está desativado.");
 
+  // Conversa que veio pela Z-API (não oficial): responde pela própria Z-API, só texto, sem janela de 24h.
+  if (conversation.account.provider === "ZAPI") return sendZapiReply(prisma, tenantId, userId, conversation, input, deps, now);
+
+  const token = deps.token ?? credentialsOf(conversation.account).accessToken;
+  assertJanelaAberta(conversation.lastInboundAt, now);
   const phoneNumberId = conversation.account.phoneNumberId;
   let wamid: string;
   let row: { type: string; body: string | null; mediaId: string | null; mediaMime: string | null; mediaFilename: string | null };
@@ -88,6 +92,34 @@ export async function sendReply(
     where: { id: conversation.id },
     data: { lastMessageAt: now, lastPreview: `Você: ${previewOf(row)}`.slice(0, 140) },
   });
+  return message;
+}
+
+async function sendZapiReply(
+  prisma: AppPrismaClient,
+  tenantId: string,
+  userId: string,
+  conversation: { id: string; waId: string; account: { phoneNumberId: string; credentials: unknown } },
+  input: ReplyInput,
+  deps: ReplyDeps,
+  now: Date
+) {
+  if (input.tipo !== "text") throw new SendError("TIPO_INVALIDO", "Pela Z-API só dá para enviar texto por enquanto (anexos ainda não).");
+  const texto = input.texto.trim();
+  if (!texto) throw new SendError("TIPO_INVALIDO", "Escreva uma mensagem.");
+  if (texto.length > TEXT_MAX_CHARS) throw new SendError("TIPO_INVALIDO", `A mensagem passa de ${TEXT_MAX_CHARS} caracteres.`);
+  const creds = zapiCredentialsOf(conversation.account);
+  if (!creds) throw new SendError("SEM_TOKEN", "Credenciais da Z-API não configuradas (Configurações > WhatsApp).");
+  let wamid: string;
+  try {
+    wamid = await zapiSendText(creds, conversation.waId, texto, {}, deps.fetchImpl);
+  } catch (e) {
+    throw new SendError("META", e instanceof ZapiError ? e.message : `Falha ao enviar pela Z-API: ${(e as Error).message}`);
+  }
+  const message = await prisma.waMessage.create({
+    data: { tenantId, conversationId: conversation.id, direction: "SAIDA", wamid, type: "text", body: texto, status: "sent", sentByUserId: userId, timestamp: now },
+  });
+  await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: now, lastPreview: `Você: ${texto}`.slice(0, 140) } });
   return message;
 }
 
@@ -160,9 +192,10 @@ export async function sendTemplateReply(
   const now = deps.now ?? new Date();
   const conversation = await prisma.conversation.findFirst({
     where: { id: conversationId, tenantId },
-    include: { account: { select: { phoneNumberId: true, active: true, credentials: true } }, client: true },
+    include: { account: { select: { phoneNumberId: true, active: true, credentials: true, provider: true } }, client: true },
   });
   if (!conversation) throw new SendError("NAO_ENCONTRADA", "Conversa não encontrada.");
+  if (conversation.account.provider === "ZAPI") throw new SendError("TEMPLATE_INDISPONIVEL", "Conversas pela Z-API não usam template: responda em texto.");
   if (!conversation.account.active) throw new SendError("META", "O número do WhatsApp desta conversa está desativado.");
   const token = deps.token ?? credentialsOf(conversation.account).accessToken;
   if (conversation.client && (!conversation.client.autorizacaoComunicacao || conversation.client.optOutAt)) {

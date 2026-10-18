@@ -170,7 +170,7 @@ function presentWhatsApp(account: any) {
 }
 
 router.get("/whatsapp", requireAuth, async (req, res) => {
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId: req.user!.tenantId }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId: req.user!.tenantId, provider: "META" }, orderBy: { createdAt: "asc" } });
   res.json(presentWhatsApp(account));
 });
 
@@ -191,10 +191,10 @@ router.put("/whatsapp", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const { phoneNumberId, wabaId } = parsed.data;
 
   // Cross-tenant de propósito: phoneNumberId é único no banco inteiro (o webhook só conhece esse id).
-  const sameNumber = await withCrossTenantAccess(() => prisma.whatsAppAccount.findFirst({ where: { phoneNumberId } }));
+  const sameNumber = await withCrossTenantAccess(() => prisma.whatsAppAccount.findFirst({ where: { phoneNumberId, provider: "META" } }));
   if (sameNumber && sameNumber.tenantId !== tenantId) return res.status(409).json({ error: "Este número já está conectado a outra conta." });
 
-  const current = await prisma.whatsAppAccount.findFirst({ where: { tenantId }, orderBy: { createdAt: "asc" } });
+  const current = await prisma.whatsAppAccount.findFirst({ where: { tenantId, provider: "META" }, orderBy: { createdAt: "asc" } });
   const old = credentialsOf(current && current.credentials ? current : null);
   const hadStored = !!current?.credentials;
   const accessToken = parsed.data.accessToken || (hadStored ? old.accessToken : undefined);
@@ -222,7 +222,7 @@ router.put("/whatsapp", requireAuth, requireRole("ADMIN"), async (req, res) => {
 /** POST /api/integrations/whatsapp/test — valida token + número + WABA na Meta e guarda o resultado. */
 router.post("/whatsapp/test", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const { tenantId } = req.user!;
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, provider: "META" }, orderBy: { createdAt: "asc" } });
   const token = credentialsOf(account).accessToken;
   if (!account || !token) return res.status(409).json({ error: "Salve o Phone Number ID, o WABA ID e o Access Token antes de testar." });
 
@@ -277,7 +277,7 @@ router.post("/whatsapp/test", requireAuth, requireRole("ADMIN"), async (req, res
 /** POST /api/integrations/whatsapp/subscribe — inscreve o app na conta (WABA) para a Meta enviar os webhooks. */
 router.post("/whatsapp/subscribe", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const { tenantId, id: userId } = req.user!;
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, provider: "META" }, orderBy: { createdAt: "asc" } });
   const token = credentialsOf(account).accessToken;
   if (!account?.wabaId || !token) return res.status(409).json({ error: "Salve o WABA ID e o Access Token antes." });
   try {
@@ -298,7 +298,7 @@ router.post("/whatsapp/subscribe", requireAuth, requireRole("ADMIN"), async (req
 /** DELETE /api/integrations/whatsapp — desconecta: apaga as credenciais e desativa a conta (o histórico de conversas fica). */
 router.delete("/whatsapp", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const { tenantId, id: userId } = req.user!;
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, provider: "META" }, orderBy: { createdAt: "asc" } });
   if (!account) return res.status(404).json({ error: "Nenhuma conta conectada." });
   await prisma.whatsAppAccount.update({ where: { id: account.id }, data: { active: false, credentials: Prisma.DbNull, accessTokenHint: null, appSecretHint: null } });
   await logAudit({ tenantId, userId, action: "DISCONNECT_WHATSAPP", target: "WhatsAppAccount", targetId: account.id });
@@ -322,7 +322,7 @@ router.get("/webhooks/whatsapp", async (req, res) => {
   if (req.query["hub.mode"] === "subscribe" && token) {
     const envToken = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
     // Cross-tenant de propósito: o desafio da Meta não traz tenant; o token é que identifica a conta.
-    const account = await withCrossTenantAccess(() => prisma.whatsAppAccount.findFirst({ where: { verifyToken: token } }));
+    const account = await withCrossTenantAccess(() => prisma.whatsAppAccount.findFirst({ where: { verifyToken: token, provider: "META" } }));
     if (account || (envToken && token === envToken)) return res.status(200).send(req.query["hub.challenge"]);
   }
   res.sendStatus(403);
@@ -342,7 +342,7 @@ async function accountForPayload(body: any) {
   const list = [...ids];
   // Cross-tenant de propósito (webhook público): é por estes ids que se descobre o tenant.
   return withCrossTenantAccess(() =>
-    prisma.whatsAppAccount.findFirst({ where: { active: true, OR: [{ phoneNumberId: { in: list } }, { wabaId: { in: list } }] } })
+    prisma.whatsAppAccount.findFirst({ where: { active: true, provider: "META", OR: [{ phoneNumberId: { in: list } }, { wabaId: { in: list } }] } })
   );
 }
 
@@ -385,7 +385,7 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
       for (const m of messages) {
         try {
           const account = await withCrossTenantAccess(() =>
-            prisma.whatsAppAccount.findFirst({ where: { phoneNumberId: m.phoneNumberId, active: true } })
+            prisma.whatsAppAccount.findFirst({ where: { phoneNumberId: m.phoneNumberId, active: true, provider: "META" } })
           );
           if (!account) {
             console.warn(`[webhooks/whatsapp] phone_number_id ${m.phoneNumberId} sem conta cadastrada — mensagem ignorada`);
@@ -415,7 +415,7 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
       for (const st of statuses) {
         try {
           const account = await withCrossTenantAccess(() =>
-            prisma.whatsAppAccount.findFirst({ where: { phoneNumberId: st.phoneNumberId, active: true } })
+            prisma.whatsAppAccount.findFirst({ where: { phoneNumberId: st.phoneNumberId, active: true, provider: "META" } })
           );
           if (!account) continue;
           await runWithTenantContextAsync(account.tenantId, () => applyOutboundStatus(prisma, account.tenantId, st));
@@ -430,7 +430,7 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
       for (const ev of parseTemplateEvents(req.body)) {
         try {
           const account = await withCrossTenantAccess(() =>
-            prisma.whatsAppAccount.findFirst({ where: { wabaId: ev.wabaId, active: true } })
+            prisma.whatsAppAccount.findFirst({ where: { wabaId: ev.wabaId, active: true, provider: "META" } })
           );
           if (!account) continue;
           await runWithTenantContextAsync(account.tenantId, () => applyTemplateEvent(prisma, account.tenantId, ev));

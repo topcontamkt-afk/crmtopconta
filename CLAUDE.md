@@ -329,6 +329,23 @@ conferência real é `middleware/areaAccess.ts`, montado em `app.use("/api", are
 tela liberada e o Layout chama `refreshUser()` ao abrir. Tela: Usuários ganhou a coluna e o editor "Acessos" (caixinhas + atalhos Marketing/Atendimento/Analista) e as caixinhas no formulário de novo usuário;
 `PATCH /api/users/:id` aceita `areas` (lista = restringe, null = todas), auditado. SQL: `backend/prisma/sql/2026-10-acesso-por-area.sql` (rodar antes do deploy; ninguém perde acesso ao publicar).
 
+### WhatsApp: Meta (oficial) ou Z-API (não oficial) — conexão ativa em Configurações
+
+Duas conexões convivem; `Tenant.whatsappProvider` (META|ZAPI, padrão META) diz qual **ENVIA** (campanhas). **Receber** vale para as duas conectadas (cada uma tem o seu webhook) e a Inbox mostra as conversas
+das duas; cada resposta sai pela conexão de ONDE a conversa veio. A Z-API é uma linha de `WhatsAppAccount` com `provider="ZAPI"`: `phoneNumberId="zapi:<instanceId>"` (único), `credentials` cifrado
+`{token, clientToken}`, `verifyToken` = segredo da URL do webhook, `accessTokenHint/appSecretHint` = dicas dos 4 últimos caracteres. **Todo código da Meta filtra `provider: "META"`** (nova consulta a
+`WhatsAppAccount` da Meta precisa disso, senão enxerga a linha da Z-API). `services/zapi.ts` (puro/injetável, formato conferido na documentação oficial github.com/Z-API/z-api-docs): base
+`https://api.z-api.io/instances/{ID}/token/{TOKEN}/...`, cabeçalho `Client-Token` (opcional), `status`, `device`, `qr-code/image`, `send-text` (id em `messageId`), `update-every-webhooks` (só HTTPS) e
+`parseZapiWebhook` (só `ReceivedCallback` de contato individual, ignora grupo/canal/`fromMe`/edição; `MessageStatusCallback` vira sent/delivered/read). Webhook PÚBLICO
+`POST /api/integrations/webhooks/zapi/:secret` (`routes/zapiWebhook.ts`; a Z-API não assina, então segredo na URL + conferência do `instanceId`): grava na MESMA Inbox via `storeInboundMessage` (liga ao
+cliente pelo telefone, opt-out PARAR/SAIR vale), baixa a mídia na hora para `WaMediaBlob` (`zapiMedia.ts`: só https e host com nome, até 4 MB; `mediaId="zapi"` marca origem) e **não** manda resposta
+automática (essa é só do número da Meta). Responder pela Inbox em conversa da Z-API (`sendZapiReply` em `whatsappReply.ts`): só texto, SEM janela de 24h, sem template, sem anexo (ainda). Campanha com Z-API
+ativa (`campaignQueue.resolveProviders`): adaptador `channels/zapi.ts` manda só o TEXTO do template (variáveis preenchidas; sem imagem/botão/link rastreado), com pausa aleatória e `delayMessage`, em lotes de
+no máximo `ZAPI_BATCH_MAX` (4) por chamada (a tela repete); sem Z-API configurada o disparo é BLOQUEADO (não cai na Meta). O assistente (`campaignWizard.ts`) avisa o risco e que imagem/botão não vão. Tela:
+Configurações → WhatsApp (`components/WhatsAppProviderCard.tsx`, só ADMIN): escolha da conexão ativa (só aceita configurada), instância/token/token de segurança, Testar conexão, QR code (renova a cada
+8 s), "Configurar webhooks automaticamente" e a URL secreta para colar à mão. API em `routes/tenantWhatsapp.ts` (`/api/tenant/whatsapp`, ADMIN, área livre). **Ainda não testado contra a Z-API real.**
+Z-API viola os termos do WhatsApp: risco de bloqueio do número (usar número separado do oficial). SQL: `backend/prisma/sql/2026-10-whatsapp-zapi.sql` (rodar antes do deploy).
+
 ### Templates do WhatsApp (Meta) — Fase 4
 
 `services/whatsappTemplates.ts` (validação das regras da Meta, nosso `{{nome}}` → `{{1}}`, payload com exemplos, Graph API de criar/listar/excluir

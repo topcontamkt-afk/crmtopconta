@@ -103,6 +103,9 @@ model Tenant {
   custoMarketingUsd Decimal? @db.Decimal(10, 6)
   custoUtilidadeUsd Decimal? @db.Decimal(10, 6)
   cambioUsdBrl      Decimal? @db.Decimal(10, 4)
+  // Qual conexão de WhatsApp o sistema usa para ENVIAR (campanhas): META (oficial, com template) ou ZAPI
+  // (não oficial, texto livre). Receber vale para as duas conectadas. Configurações → WhatsApp.
+  whatsappProvider  String   @default("META")
   createdAt         DateTime @default(now())
 
   users              User[]
@@ -697,6 +700,9 @@ model WhatsAppAccount {
   id               String    @id @default(uuid())
   tenantId         String
   tenant           Tenant    @relation(fields: [tenantId], references: [id])
+  // META = Cloud API oficial (tudo que existia). ZAPI = Z-API (não oficial, QR code): `phoneNumberId` guarda
+  // "zapi:<instanceId>", `credentials` guarda { token, clientToken } cifrados e `verifyToken` é o segredo da URL do webhook.
+  provider         String    @default("META")
   phoneNumberId    String    @unique
   wabaId           String?
   appId            String? // ID do app da Meta: necessário para enviar a imagem de exemplo de templates com cabeçalho

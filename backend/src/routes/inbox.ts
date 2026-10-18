@@ -22,11 +22,15 @@ router.use(requireAuth);
 /** GET /api/inbox/status — o WhatsApp está conectado? (a configuração fica em Integrações) */
 router.get("/status", async (req, res) => {
   const { tenantId } = req.user!;
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { whatsappProvider: true } });
+  const ativo = tenant?.whatsappProvider === "ZAPI" ? "ZAPI" : "META";
+  // A Inbox mostra as conversas das duas conexões; o "conectado?" vale para a conexão ATIVA (Configurações → WhatsApp)
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: ativo }, orderBy: { createdAt: "asc" } });
   const cred = credentialsOf(account && account.credentials ? account : null);
   res.json({
+    provider: ativo,
     account: account ? { id: account.id, phoneNumberId: account.phoneNumberId, displayName: account.displayName, displayPhone: account.displayPhone } : null,
-    config: { appSecret: !!cred.appSecret, accessToken: !!cred.accessToken },
+    config: ativo === "ZAPI" ? { appSecret: true, accessToken: true } : { appSecret: !!cred.appSecret, accessToken: !!cred.accessToken },
   });
 });
 
@@ -55,7 +59,7 @@ router.get("/resumo", async (req, res) => {
 /** GET /api/inbox/auto-reply — configuração da resposta automática da conta ativa. */
 router.get("/auto-reply", async (req, res) => {
   const { tenantId } = req.user!;
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: "META" }, orderBy: { createdAt: "asc" } });
   if (!account) return res.status(404).json({ error: "WhatsApp não conectado" });
   res.json({
     ativa: account.autoReplyEnabled,
@@ -74,7 +78,7 @@ router.put("/auto-reply", requireRole("ADMIN"), async (req, res) => {
   const parsed = autoReplySchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Dados inválidos" });
   const { tenantId } = req.user!;
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: "META" }, orderBy: { createdAt: "asc" } });
   if (!account) return res.status(404).json({ error: "WhatsApp não conectado" });
   const texto = parsed.data.texto.trim();
   if (parsed.data.ativa && !texto) return res.status(400).json({ error: "Escreva a mensagem da resposta automática." });
@@ -101,15 +105,16 @@ router.get("/conversations", async (req, res) => {
 
   const where: any = { tenantId, status: "ABERTA" };
   if (filtro === "nao_lidas") where.unreadCount = { gt: 0 };
-  if (filtro === "janela_aberta") where.lastInboundAt = { gte: new Date(Date.now() - 24 * 3600_000) };
+  // Z-API não tem janela de 24h: essas conversas contam sempre como abertas
+  if (filtro === "janela_aberta") where.OR = [{ lastInboundAt: { gte: new Date(Date.now() - 24 * 3600_000) } }, { account: { is: { provider: "ZAPI" } } }];
   if (filtro === "sem_cliente") where.clientId = null;
   if (busca?.trim()) {
     const t = busca.trim();
-    where.OR = [
+    where.AND = [{ OR: [
       { contactName: { contains: t, mode: "insensitive" } },
       { client: { is: { nome: { contains: t, mode: "insensitive" } } } },
       ...(/\d{4,}/.test(t) ? [{ waId: { contains: t.replace(/\D/g, "") } }] : []),
-    ];
+    ] }];
   }
 
   const [rows, naoLidas] = await Promise.all([
@@ -117,7 +122,7 @@ router.get("/conversations", async (req, res) => {
       where,
       orderBy: { lastMessageAt: "desc" },
       take: limite,
-      include: { client: { select: { id: true, nome: true, cidade: true } } },
+      include: { client: { select: { id: true, nome: true, cidade: true } }, account: { select: { provider: true } } },
     }),
     prisma.conversation.count({ where: { tenantId, status: "ABERTA", unreadCount: { gt: 0 } } }),
   ]);
@@ -126,8 +131,10 @@ router.get("/conversations", async (req, res) => {
   res.json({
     naoLidas,
     conversas: rows.map((c) => {
-      const ate = janelaAte(c.lastInboundAt);
+      const zapi = c.account.provider === "ZAPI";
+      const ate = zapi ? null : janelaAte(c.lastInboundAt);
       return {
+        canal: c.account.provider,
         id: c.id,
         nome: c.client?.nome ?? c.contactName ?? "Contato sem cadastro",
         cidade: c.client?.cidade ?? null,
@@ -136,7 +143,7 @@ router.get("/conversations", async (req, res) => {
         preview: c.lastPreview,
         ultimaMensagemEm: c.lastMessageAt.toISOString(),
         naoLidas: c.unreadCount,
-        janelaAberta: !!ate && ate.getTime() > agora,
+        janelaAberta: zapi || (!!ate && ate.getTime() > agora),
         janelaAte: ate?.toISOString() ?? null,
       };
     }),
@@ -152,7 +159,10 @@ router.get("/conversations/:id/messages", async (req, res) => {
   const { tenantId } = req.user!;
   const conversa = await prisma.conversation.findFirst({
     where: { id: req.params.id, tenantId },
-    include: { client: { select: { id: true, nome: true, cidade: true, limiteTotal: true, saldoDisponivel: true, faixaUso: true, autorizacaoComunicacao: true, optOutAt: true } } },
+    include: {
+      client: { select: { id: true, nome: true, cidade: true, limiteTotal: true, saldoDisponivel: true, faixaUso: true, autorizacaoComunicacao: true, optOutAt: true } },
+      account: { select: { provider: true } },
+    },
   });
   if (!conversa) return res.status(404).json({ error: "Conversa não encontrada" });
 
@@ -163,14 +173,16 @@ router.get("/conversations/:id/messages", async (req, res) => {
   });
   mensagens.reverse();
 
-  const ate = janelaAte(conversa.lastInboundAt);
+  const zapi = conversa.account.provider === "ZAPI";
+  const ate = zapi ? null : janelaAte(conversa.lastInboundAt);
   const c = conversa.client;
   res.json({
     conversa: {
       id: conversa.id,
       nome: c?.nome ?? conversa.contactName ?? "Contato sem cadastro",
       telefone: maskPhone(conversa.waId),
-      janelaAberta: !!ate && ate.getTime() > Date.now(),
+      canal: conversa.account.provider,
+      janelaAberta: zapi || (!!ate && ate.getTime() > Date.now()),
       janelaAte: ate?.toISOString() ?? null,
       naoLidas: conversa.unreadCount,
     },

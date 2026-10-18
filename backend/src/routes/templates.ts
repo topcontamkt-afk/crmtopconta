@@ -32,7 +32,7 @@ router.use(requireAuth);
 
 /** Conta WhatsApp do tenant + token: o que é preciso para falar com a Meta sobre templates. */
 async function metaContext(tenantId: string) {
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: "META" }, orderBy: { createdAt: "asc" } });
   const token = credentialsOf(account).accessToken;
   return {
     account,

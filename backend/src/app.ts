@@ -33,6 +33,8 @@ import purchaseRoutes from "./routes/purchases";
 import cicloRoutes from "./routes/ciclos";
 import voiceRoutes, { voiceWebhook } from "./routes/voice";
 import { areaAccess } from "./middleware/areaAccess";
+import zapiWebhookRoutes from "./routes/zapiWebhook";
+import tenantWhatsappRoutes from "./routes/tenantWhatsapp";
 
 /**
  * Criação do Express app, sem app.listen() nem inicialização do scheduler — para poder ser
@@ -84,12 +86,14 @@ app.use("/api/imports", importRoutes);
 app.use("/api/segments", segmentRoutes);
 app.use("/api/campaigns", campaignRoutes);
 app.use("/api/automations", automationRoutes);
+app.use("/api/integrations/webhooks/zapi", zapiWebhookRoutes); // público: segredo na URL
 app.use("/api/integrations", integrationRoutes);
 app.use("/api/inbox", inboxRoutes);
 app.use("/api/audit-logs", auditRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/templates", templateRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/tenant/whatsapp", tenantWhatsappRoutes);
 app.use("/api/tenant", tenantRoutes);
 app.use("/api/purchases", purchaseRoutes);
 app.use("/api/ciclos", cicloRoutes);

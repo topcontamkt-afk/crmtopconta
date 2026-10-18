@@ -65,13 +65,25 @@ export async function validateWizard(
 
   const [template, tenant, real] = await Promise.all([
     prisma.messageTemplate.findFirst({ where: { id: input.templateId, tenantId }, include: { media: { select: { id: true } } } }),
-    prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { custoMarketingUsd: true, custoUtilidadeUsd: true, cambioUsdBrl: true, cpfSalt: true } }),
+    prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { custoMarketingUsd: true, custoUtilidadeUsd: true, cambioUsdBrl: true, cpfSalt: true, whatsappProvider: true } }),
     hasRealWhatsApp(prisma, tenantId),
   ]);
+
+  const zapi = tenant.whatsappProvider === "ZAPI";
 
   // 1) template
   if (!template || template.channel !== "WHATSAPP") {
     add({ id: "template", nivel: "erro", titulo: "Template não encontrado", detalhe: "Volte ao passo 1 e escolha um template." });
+  } else if (zapi) {
+    // Z-API manda só o TEXTO do template (variáveis preenchidas): não precisa de aprovação da Meta
+    if (unmappedPositions(template.variableMap as any).length) {
+      add({ id: "template", nivel: "erro", titulo: "Variáveis do template sem significado", detalhe: `Defina o que ${unmappedPositions(template.variableMap as any).map((n) => `{{${n}}}`).join(", ")} representa, no passo 1.` });
+    } else {
+      add({ id: "template", nivel: "ok", titulo: "Texto do template", detalhe: template.name });
+    }
+    if (template.headerFormat === "IMAGE" || trackedButtons(template).length > 0 || (Array.isArray(template.buttons) && template.buttons.length > 0) || (Array.isArray(template.quickReplies) && template.quickReplies.length > 0)) {
+      add({ id: "zapi_formato", nivel: "aviso", titulo: "Imagem e botões não vão pela Z-API", detalhe: "Só o texto é enviado. O link rastreado do botão também não vai." });
+    }
   } else if (template.status !== "APROVADO") {
     add({ id: "template", nivel: "erro", titulo: "Template não aprovado", detalhe: `Status: ${template.metaStatus ?? template.status}. Só template aprovado pela Meta pode ser enviado.` });
   } else if (real && template.metaStatus !== "APPROVED") {
@@ -86,12 +98,19 @@ export async function validateWizard(
     add({ id: "template", nivel: "ok", titulo: "Template aprovado pela Meta", detalhe: template.name });
   }
 
-  if (template && trackedButtons(template).length > 0) {
+  if (template && !zapi && trackedButtons(template).length > 0) {
     add({ id: "link", nivel: "ok", titulo: "Link rastreado no botão", detalhe: `Cada cliente recebe um link único (${linkBase()}/r/…); o clique aparece no relatório.` });
   }
 
   // 2) conexão
-  if (real) add({ id: "conexao", nivel: "ok", titulo: "WhatsApp conectado" });
+  if (zapi) {
+    if (real) {
+      add({ id: "conexao", nivel: "ok", titulo: "WhatsApp ativo: Z-API" });
+      add({ id: "zapi_risco", nivel: "aviso", titulo: "Z-API é não oficial", detalhe: "O envio sai devagar, em lotes pequenos, e há risco de o WhatsApp bloquear o número. Prefira a Meta para campanhas grandes." });
+    } else {
+      add({ id: "conexao", nivel: "erro", titulo: "Z-API não configurada", detalhe: "O WhatsApp ativo é a Z-API, mas ela não está configurada. Veja Configurações → WhatsApp." });
+    }
+  } else if (real) add({ id: "conexao", nivel: "ok", titulo: "WhatsApp conectado" });
   else add({ id: "conexao", nivel: "aviso", titulo: "Nenhum WhatsApp real conectado", detalhe: "O envio será simulado (nada sai de verdade). Configure em Integrações." });
 
   // 3) público

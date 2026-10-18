@@ -1,5 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api/client";
+import { useAuth } from "../context/AuthContext";
+import WhatsAppProviderCard from "../components/WhatsAppProviderCard";
 
 interface TenantSettings {
   id: string;
@@ -17,6 +19,7 @@ interface ChannelCfg {
 }
 
 export default function Settings() {
+  const { user } = useAuth();
   const [settings, setSettings] = useState<TenantSettings | null>(null);
   const [retentionDays, setRetentionDays] = useState(1095);
   const [maxMsgsPerMinute, setMaxMsgsPerMinute] = useState(600);
@@ -59,6 +62,8 @@ export default function Settings() {
   return (
     <div>
       <h2>Configurações</h2>
+
+      {user?.role === "ADMIN" && <WhatsAppProviderCard />}
 
       <form className="card" style={{ marginBottom: 16 }} onSubmit={saveSettings}>
         <h3>Política de retenção &amp; rate limit</h3>

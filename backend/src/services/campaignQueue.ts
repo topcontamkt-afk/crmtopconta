@@ -2,6 +2,8 @@ import { AppPrismaClient } from "../config/db";
 import { ChannelAdapter, SendResult } from "./channels/types";
 import { MockSMSAdapter, TwilioSMSAdapter, ZenviaSMSAdapter } from "./channels/sms";
 import { MockWhatsAppAdapter, WhatsAppCloudAdapter } from "./channels/whatsapp";
+import { ZAPI_BATCH_MAX, ZapiAdapter } from "./channels/zapi";
+import { zapiCredentialsOf } from "./zapi";
 import { buildSegmentWhere, ENVIAVEL_WHERE, SegmentFilters, SegmentGroup } from "./segments";
 import { templateParams, templatePreview } from "./whatsappTemplates";
 import { unmappedPositions } from "./templateImport";
@@ -55,6 +57,17 @@ async function resolveProviders(
   tenantId: string,
   channel: "WHATSAPP" | "SMS"
 ): Promise<ResolvedProvider[]> {
+  // Conexão ativa em Configurações → WhatsApp: Z-API (não oficial, texto livre) no lugar da Meta. Sem credencial
+  // válida devolve lista VAZIA: o disparo bloqueia com aviso em vez de cair na Meta sem o usuário perceber.
+  if (channel === "WHATSAPP") {
+    const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { whatsappProvider: true } });
+    if (tenant?.whatsappProvider === "ZAPI") {
+      const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, provider: "ZAPI", active: true }, orderBy: { createdAt: "asc" } });
+      const creds = zapiCredentialsOf(account);
+      return creds ? [{ name: "zapi", adapter: new ZapiAdapter(creds) }] : [];
+    }
+  }
+
   const configs = await prisma.channelConfig.findMany({
     where: { tenantId, channel, active: true },
     orderBy: { priority: "asc" },
@@ -77,7 +90,7 @@ async function resolveProviders(
 
   // WhatsApp configurado pela tela de Integrações (WhatsAppAccount, credenciais cifradas)
   if (channel === "WHATSAPP") {
-    const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+    const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: "META" }, orderBy: { createdAt: "asc" } });
     const token = credentialsOf(account).accessToken;
     if (account && token && account.credentials) return [{ name: "whatsapp_cloud_api", adapter: new WhatsAppCloudAdapter(account.phoneNumberId, token) }];
   }
@@ -131,6 +144,9 @@ export async function resolveWhatsAppTemplate(
   providers: ResolvedProvider[]
 ): Promise<{ template: any | null; bloqueado?: string }> {
   if (campaign.channel !== "WHATSAPP") return { template: null };
+  if (providers.length === 0) return { template: null, bloqueado: "O WhatsApp ativo (Z-API) não está configurado. Veja Configurações → WhatsApp." };
+  // Z-API: texto livre (o texto do template, com as variáveis preenchidas); nada é enviado como template da Meta
+  if (providers[0].name === "zapi") return { template: null };
   const real = providers.some((p) => p.name !== "mock");
   const template = campaign.templateId ? await prisma.messageTemplate.findFirst({ where: { id: campaign.templateId, tenantId: campaign.tenantId } }) : null;
   const usable = !!template && template.channel === "WHATSAPP" && template.status === "APROVADO" && !!template.metaName && template.metaStatus === "APPROVED";
@@ -293,7 +309,10 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
 
   const alreadySentThisMinute = await sentInLastMinute(prisma, campaign.tenantId);
   const tenantBudget = Math.max(0, tenant.maxMsgsPerMinute - alreadySentThisMinute);
-  const batchSize = Math.min(limit, campaign.throttlePerMin, tenantBudget);
+  // Z-API é sessão do WhatsApp Web: lote pequeno (cada envio espera um intervalo) para não estourar o tempo
+  // da função nem derrubar o número. O restante sai nas próximas chamadas (a tela repete até acabar).
+  const teto = providers[0]?.name === "zapi" ? ZAPI_BATCH_MAX : Infinity;
+  const batchSize = Math.min(limit, campaign.throttlePerMin, tenantBudget, teto);
 
   if (batchSize <= 0) {
     return { processed: 0, remaining: await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } }), results: [], throttled: true };

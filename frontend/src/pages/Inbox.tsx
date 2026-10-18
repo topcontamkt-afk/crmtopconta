@@ -4,6 +4,7 @@ import { api, getToken } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 
 interface Status {
+  provider?: "META" | "ZAPI";
   account: { phoneNumberId: string; wabaId: string | null; displayName: string | null; displayPhone: string | null; active: boolean } | null;
   webhookUrl: string;
   config: { appSecret: boolean; verifyToken: boolean; accessToken: boolean };
@@ -19,6 +20,7 @@ interface Conversa {
   naoLidas: number;
   janelaAberta: boolean;
   janelaAte: string | null;
+  canal?: "META" | "ZAPI";
 }
 interface Mensagem {
   id: string;
@@ -32,7 +34,7 @@ interface Mensagem {
   em: string;
 }
 interface Thread {
-  conversa: { id: string; nome: string; telefone: string; janelaAberta: boolean; janelaAte: string | null; naoLidas: number };
+  conversa: { id: string; nome: string; telefone: string; canal?: "META" | "ZAPI"; janelaAberta: boolean; janelaAte: string | null; naoLidas: number };
   cliente: { nome: string; cidade: string | null; perfil: string | null; limiteTotal: number; saldoDisponivel: number; faixaUso: string; podeReceberCampanha: boolean; optOutEm: string | null } | null;
   mensagens: Mensagem[];
 }
@@ -211,7 +213,7 @@ function TemplatePicker({ conversaId, onEnviada }: { conversaId: string; onEnvia
   );
 }
 
-function Composer({ conversaId, janelaAberta, podeEnviar, onEnviada }: { conversaId: string; janelaAberta: boolean; podeEnviar: boolean; onEnviada: () => void }) {
+function Composer({ conversaId, janelaAberta, podeEnviar, semAnexo, onEnviada }: { conversaId: string; janelaAberta: boolean; podeEnviar: boolean; semAnexo?: boolean; onEnviada: () => void }) {
   const [texto, setTexto] = useState("");
   const [arquivo, setArquivo] = useState<File | null>(null);
   const [erro, setErro] = useState<string | null>(null);
@@ -275,7 +277,7 @@ function Composer({ conversaId, janelaAberta, podeEnviar, onEnviada }: { convers
       )}
       <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
         <input ref={input} type="file" accept={ACEITOS} hidden onChange={(e) => { escolher(e.target.files?.[0]); e.target.value = ""; }} />
-        <button type="button" className="btn secondary" title="Anexar imagem, PDF, áudio ou vídeo (até 3 MB)" onClick={() => input.current?.click()} disabled={enviando}>📎</button>
+        {!semAnexo && <button type="button" className="btn secondary" title="Anexar imagem, PDF, áudio ou vídeo (até 3 MB)" onClick={() => input.current?.click()} disabled={enviando}>📎</button>}
         <textarea
           rows={2}
           style={{ flex: 1, resize: "vertical", minHeight: 44 }}
@@ -329,7 +331,7 @@ function AutoReplyPanel({ podeEditar, onFechar }: { podeEditar: boolean; onFecha
         <button type="button" className="btn secondary" style={{ padding: "2px 10px" }} onClick={onFechar}>Fechar</button>
       </div>
       <p className="seg-hint" style={{ marginTop: 4 }}>
-        Quando um cliente escreve para este número, ele recebe esta mensagem a cada mensagem dele{cfg ? `, até ${cfg.maximo} vezes a cada ${cfg.janelaHoras} horas por conversa` : ""}. Quem pede para parar (PARAR/SAIR) não recebe.
+        Quando um cliente escreve para o número da Meta, ele recebe esta mensagem a cada mensagem dele{cfg ? `, até ${cfg.maximo} vezes a cada ${cfg.janelaHoras} horas por conversa` : ""}. Quem pede para parar (PARAR/SAIR) não recebe.
       </p>
       <label style={{ display: "flex", gap: 8, alignItems: "center", margin: "8px 0" }}>
         <input type="checkbox" checked={ativa} disabled={!podeEditar || !cfg} onChange={(e) => setAtiva(e.target.checked)} />
@@ -447,10 +449,17 @@ export default function Inbox() {
         <div className="card" style={{ maxWidth: 640 }}>
           <h3>WhatsApp ainda não conectado</h3>
           <p className="seg-hint">
-            Para receber e responder mensagens aqui, conecte o número da Meta em <Link to="/integrations">Integrações → WhatsApp</Link>. Lá você
-            informa o Phone Number ID, o WABA ID, o Access Token e o App Secret, e copia a URL e o token de verificação do webhook.
+            {status.provider === "ZAPI" ? (
+              <>O WhatsApp ativo é a Z-API, mas ela não está configurada. Configure em <Link to="/settings">Configurações → WhatsApp</Link>.</>
+            ) : (
+              <>
+                Para receber e responder mensagens aqui, conecte o número da Meta em <Link to="/integrations">Integrações → WhatsApp</Link>. Lá você
+                informa o Phone Number ID, o WABA ID, o Access Token e o App Secret, e copia a URL e o token de verificação do webhook. Para usar a Z-API, veja{" "}
+                <Link to="/settings">Configurações → WhatsApp</Link>.
+              </>
+            )}
           </p>
-          <Link to="/integrations" className="btn" style={{ textDecoration: "none" }}>Ir para Integrações</Link>
+          <Link to={status.provider === "ZAPI" ? "/settings" : "/integrations"} className="btn" style={{ textDecoration: "none" }}>{status.provider === "ZAPI" ? "Ir para Configurações" : "Ir para Integrações"}</Link>
         </div>
       </div>
     );
@@ -504,7 +513,7 @@ export default function Inbox() {
             {conversas.map((c) => (
               <button key={c.id} className={`inbox-item${sel === c.id ? " active" : ""}`} onClick={() => setSel(c.id)}>
                 <div className="top">
-                  <span>{c.nome}</span>
+                  <span>{c.nome}{c.canal === "ZAPI" && <span className="inbox-chip" style={{ marginLeft: 6, background: "var(--warning-soft)", color: "var(--warning)", fontSize: 10 }}>Z-API</span>}</span>
                   <time>{hora(c.ultimaMensagemEm)}</time>
                 </div>
                 <div className="prev">
@@ -533,9 +542,13 @@ export default function Inbox() {
                 </div>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {thread.cliente?.optOutEm && <span className="inbox-chip closed">Pediu descadastro</span>}
-                  <span className={`inbox-chip ${thread.conversa.janelaAberta ? "open" : "closed"}`}>
-                    {thread.conversa.janelaAberta ? `Janela de 24h aberta · ${restante}` : "Janela de 24h fechada · só template"}
-                  </span>
+                  {thread.conversa.canal === "ZAPI" ? (
+                    <span className="inbox-chip closed">Z-API (não oficial) · sem janela de 24h</span>
+                  ) : (
+                    <span className={`inbox-chip ${thread.conversa.janelaAberta ? "open" : "closed"}`}>
+                      {thread.conversa.janelaAberta ? `Janela de 24h aberta · ${restante}` : "Janela de 24h fechada · só template"}
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="inbox-msgs">
@@ -557,6 +570,7 @@ export default function Inbox() {
               <Composer
                 conversaId={thread.conversa.id}
                 janelaAberta={thread.conversa.janelaAberta}
+                semAnexo={thread.conversa.canal === "ZAPI"}
                 podeEnviar={user?.role === "ADMIN" || user?.role === "OPERATOR"}
                 onEnviada={() => { void carregarThread(); void carregarLista(); }}
               />

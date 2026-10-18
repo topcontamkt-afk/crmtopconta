@@ -35,7 +35,7 @@ export async function recordOutboundTemplateMessage(
   wamid: string,
   renderedBody: string
 ): Promise<void> {
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: "META" }, orderBy: { createdAt: "asc" } });
   if (!account) return;
   const digits = client.telefone.replace(/\D/g, "");
   if (!digits) return;

@@ -49,7 +49,7 @@ export function generateVerifyToken(): string {
 /** Token da conta ativa do tenant (ou da conta indicada). */
 export async function accessTokenFor(prisma: AppPrismaClient, tenantId: string, accountId?: string): Promise<string | undefined> {
   const account = await prisma.whatsAppAccount.findFirst({
-    where: { tenantId, active: true, ...(accountId ? { id: accountId } : {}) },
+    where: { tenantId, active: true, provider: "META", ...(accountId ? { id: accountId } : {}) },
     orderBy: { createdAt: "asc" },
   });
   return credentialsOf(account).accessToken;

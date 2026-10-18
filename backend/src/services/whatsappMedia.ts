@@ -103,6 +103,8 @@ export async function getOrCacheMessageMedia(
   const cached = await prisma.waMediaBlob.findFirst({ where: { tenantId, messageId: message.id } });
   if (cached) return { data: Buffer.from(cached.data), mime: cached.mime };
   if (!message.mediaId) throw new MediaError("INDISPONIVEL", "Mensagem sem mídia");
+  // Z-API: o arquivo só existe se foi baixado e guardado na hora do webhook (não há como buscar depois)
+  if (message.mediaId === "zapi") throw new MediaError("INDISPONIVEL", "O arquivo da Z-API não foi guardado (passou de 4 MB ou o link expirou).");
 
   const fetched = await fetchMetaMedia(message.mediaId, token, fetchImpl);
   try {
