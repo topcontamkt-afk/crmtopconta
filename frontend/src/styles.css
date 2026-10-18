@@ -332,11 +332,9 @@ a { color: var(--primary); }
 
 .main {
   flex: 1;
+  min-width: 0; /* tabelas largas não empurram a página para fora */
   padding: 24px;
-  max-width: 1440px;
-}
-/* Dashboard usa a largura toda da tela: em monitor largo o limite de 1440px deixava uma faixa vazia à direita */
-.main:has(.pd) {
+  /* Todas as telas usam a largura toda: em monitor largo o limite de 1440px deixava uma faixa vazia à direita */
   max-width: none;
 }
 
@@ -1031,7 +1029,7 @@ input, select, textarea {
 .wa-modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 
 /* ---- Assistente de campanhas (pages/campaigns/CampaignWizard.tsx) ---- */
-.cw { max-width: 1180px; }
+.cw { max-width: none; }
 .cw-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 16px 0; }
 .cw-step { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; cursor: default; text-align: left; }
 .cw-step.done { cursor: pointer; color: var(--text); }
@@ -1101,7 +1099,7 @@ input, select, textarea {
 .tpl-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .tpl-chip { padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-alt); color: var(--text-muted); font-size: 12px; cursor: pointer; }
 .tpl-chip.active { border-color: var(--success, #35c17a); color: var(--success, #35c17a); background: rgba(53, 193, 122, 0.08); }
-.tpl-content { max-width: 380px; color: var(--text-muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.tpl-content { max-width: 640px; color: var(--text-muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 
 /* Dashboard: filtro por datas, cartões que ocupam a altura da linha e mini-indicadores */
 .pd-dates { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
