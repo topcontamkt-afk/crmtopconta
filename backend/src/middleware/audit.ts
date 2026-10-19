@@ -67,18 +67,27 @@ export const ACOES_ACESSO_INDEVIDO = {
   IMPORTACAO_PLANILHA_NEGADA: "IMPORT_GOOGLE_SHEETS_NEGADO",
 } as const;
 
+type ReqComCabecalhos = { headers: Record<string, string | string[] | undefined>; ip?: string };
+
+function cabecalho(req: ReqComCabecalhos, nome: string): string | undefined {
+  const v = req.headers[nome];
+  return (Array.isArray(v) ? v[0] : v)?.trim() || undefined;
+}
+
+/**
+ * IP de quem chamou. Na Cloudflare vale só o `CF-Connecting-IP`, que a própria plataforma preenche
+ * (X-Forwarded-For e afins o cliente pode forjar); fora dela (testes, Node) cai no req.ip.
+ */
+export function ipDoCliente(req: ReqComCabecalhos): string | undefined {
+  return (cabecalho(req, "cf-connecting-ip") || req.ip || "").slice(0, 64) || undefined;
+}
+
 /**
  * LGPD 05-03: "de onde veio" a tentativa, guardado nos detalhes (o AuditLog não tem colunas ip/
- * userAgent; acrescentá-las é pendência de schema). Na Vercel o IP do cliente vem do cabeçalho
- * que a própria plataforma preenche; fora dela cai no req.ip. User-Agent truncado.
+ * userAgent; acrescentá-las é pendência de schema). User-Agent truncado.
  */
-export function origemRequisicao(req: { headers: Record<string, string | string[] | undefined>; ip?: string }) {
-  const h = (nome: string) => {
-    const v = req.headers[nome];
-    return (Array.isArray(v) ? v[0] : v)?.trim() || undefined;
-  };
-  const ip = (h("x-vercel-forwarded-for") || h("x-real-ip") || h("x-forwarded-for")?.split(",")[0] || req.ip || "").trim();
-  return { ip: ip.slice(0, 64) || null, userAgent: h("user-agent")?.slice(0, 200) ?? null };
+export function origemRequisicao(req: ReqComCabecalhos) {
+  return { ip: ipDoCliente(req) ?? null, userAgent: cabecalho(req, "user-agent")?.slice(0, 200) ?? null };
 }
 
 /**

@@ -15,7 +15,9 @@
     // a API e o link rastreado nunca caem no index.html da SPA
     "run_worker_first": ["/api/*", "/r/*"]
   },
-  "vars": { "APP_ENV": "local" },
+  // Segredos (JWT_SECRET, CREDENTIALS_ENCRYPTION_KEY…): `.dev.vars` no local (fora do git) e
+  // `wrangler secret put --env hml` na homologação. Mesma origem da SPA: o CORS só libera ela.
+  "vars": { "APP_ENV": "local", "ALLOWED_ORIGINS": "http://localhost:8787,http://localhost:5173" },
   "d1_databases": [
     { "binding": "DB", "database_name": "crmtopconta-local", "database_id": "00000000-0000-0000-0000-000000000000" }
   ],
@@ -31,7 +33,7 @@
         "not_found_handling": "single-page-application",
         "run_worker_first": ["/api/*", "/r/*"]
       },
-      "vars": { "APP_ENV": "hml" },
+      "vars": { "APP_ENV": "hml", "ALLOWED_ORIGINS": "https://crmtopconta-hml.topcontamkt.workers.dev" },
       "d1_databases": [
         { "binding": "DB", "database_name": "crmtopconta-hml", "database_id": "9945cc44-3f12-404f-8505-96d68bd21a6e" }
       ],

@@ -1,8 +1,8 @@
-import "dotenv/config";
-// Validação fail-fast de variáveis de ambiente — precisa ser o próximo import depois de
-// "dotenv/config" (que carrega o .env local) e antes de qualquer outro módulo que leia
-// process.env (rotas, serviços), para travar o processo/cold-start imediatamente com uma
-// mensagem clara em vez de falhar de forma obscura só quando a rota afetada for chamada.
+// Validação fail-fast de variáveis de ambiente — precisa ser o primeiro import, antes de qualquer
+// outro módulo que leia process.env (rotas, serviços), para travar o cold start com uma mensagem
+// clara em vez de falhar de forma obscura só quando a rota afetada for chamada. No Worker,
+// process.env vem das vars/secrets do wrangler (`.dev.vars` no local); o `.env` (dotenv) só vale
+// no servidor Node (src/index.ts).
 import { env } from "./config/env";
 import express from "express";
 import cors from "cors";

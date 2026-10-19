@@ -1,19 +1,28 @@
-// Entrada do Worker. A SPA sai direto dos assets; aqui só chega /api/* e /r/* (run_worker_first).
-// Fase 2: o banco já é o Prisma 7 + D1 com o isolamento por tenant (src/config/db.ts). A API real
-// (Express) entra na Fase 3; até lá, só o health responde e o resto devolve 503.
+// Entrada do Worker. A SPA sai direto dos assets; aqui só chega /api/* e /r/* (run_worker_first),
+// que vão para o mesmo Express de sempre (src/app.ts) via `httpServerHandler` (nodejs_compat).
+// O banco é o Prisma 7 + D1 com o isolamento por tenant (src/config/db.ts).
 import { env } from "cloudflare:workers";
+import { httpServerHandler } from "cloudflare:node";
 import { PrismaD1 } from "@prisma/adapter-d1";
 import { configureDatabase, prisma } from "../src/config/db";
 import { withCrossTenantAccess } from "../src/config/tenantGuard";
+import app from "../src/app";
+import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 
 interface Env {
   DB: D1Database;
   MEDIA?: R2Bucket;
-  ASSETS: Fetcher;
+  ASSETS: { fetch(request: Request): Promise<Response> };
   APP_ENV: string;
 }
 
-configureDatabase(() => new PrismaD1((env as unknown as Env).DB));
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+configureDatabase(() => new PrismaD1((env as any).DB));
+
+// O Express escuta numa porta "virtual" do workerd; o handler entrega cada Request a ela.
+const PORT = 3000;
+app.listen(PORT);
+const express = httpServerHandler({ port: PORT }) as { fetch(request: Request, env: Env, ctx: unknown): Promise<Response> };
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -34,13 +43,12 @@ async function health(env: Env) {
   }
 }
 
+// Tipos do Node (Request/Response globais) em vez dos da Cloudflare: ver worker/cloudflare.d.ts.
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
     const { pathname } = new URL(request.url);
     if (pathname === "/api/health") return health(env);
-    if (pathname.startsWith("/api/") || pathname.startsWith("/r/")) {
-      return json({ error: "API em migração para a Cloudflare", code: "EM_MIGRACAO" }, 503);
-    }
+    if (pathname.startsWith("/api/") || pathname.startsWith("/r/")) return express.fetch(request, env, ctx);
     return env.ASSETS.fetch(request);
   },
-} satisfies ExportedHandler<Env>;
+};

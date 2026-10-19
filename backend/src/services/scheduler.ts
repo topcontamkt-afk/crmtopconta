@@ -1,4 +1,3 @@
-import cron from "node-cron";
 import { prisma } from "../config/db";
 import { runImport } from "./importService";
 import { DEFAULT_COLUMN_MAPPING, fetchSheetRows } from "./googleSheets";
@@ -152,19 +151,4 @@ function cronMatchesNow(expr: string, date: Date): boolean {
     matches(month, date.getMonth() + 1) &&
     matches(dow, date.getDay())
   );
-}
-
-/**
- * Orquestra os jobs periódicos via node-cron, em processo — usado apenas no servidor de longa
- * duração (dev local ou um host tipo Railway/Render). Em serverless (Vercel), NÃO é chamada;
- * os mesmos jobs rodam via Vercel Cron Jobs batendo em /api/cron/* (ver routes/cron.ts).
- */
-export function startScheduler() {
-  cron.schedule("* * * * *", () => runSheetSyncJob().catch((e) => console.error("[scheduler] sheet-sync:", e)));
-  cron.schedule("* * * * *", () => runSegmentRefreshJob().catch((e) => console.error("[scheduler] segments-refresh:", e)));
-  cron.schedule("*/5 * * * *", () => runAutomationJob().catch((e) => console.error("[scheduler] automations:", e)));
-  cron.schedule("* * * * *", () => runCampaignDispatchJob().catch((e) => console.error("[scheduler] dispatch:", e)));
-  cron.schedule("0 3 * * *", () => runRetentionJob().catch((e) => console.error("[scheduler] retention:", e)));
-  cron.schedule("30 6 * * *", () => runSnapshotJobEntry().catch((e) => console.error("[scheduler] snapshot:", e)));
-  cron.schedule("0 4 * * *", () => runBiExportJob().catch((e) => console.error("[scheduler] bi-export:", e)));
 }

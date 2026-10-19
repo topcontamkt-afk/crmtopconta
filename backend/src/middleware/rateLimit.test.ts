@@ -3,7 +3,7 @@ import request from "supertest";
 
 /**
  * Cada teste chama jest.resetModules() e faz require("./rateLimit") de novo antes de montar o
- * app de teste. O MemoryStore do express-rate-limit é criado uma vez, no import do módulo, e
+ * app de teste. O MemoryStore do express-rate-limit é criado uma vez por limitador (na 1ª requisição), e
  * fica vivo (com os contadores acumulando) enquanto a instância do módulo existir — sem isso,
  * os testes iriam interferir uns nos outros (todos batendo do mesmo IP de loopback do
  * supertest) e o limite pareceria disparar antes ou depois do esperado dependendo da ordem de
@@ -56,6 +56,17 @@ describe("loginLimiter (LGPD 05-08)", () => {
     const res = await request(app).post("/api/auth/login").send({});
     expect(res.status).toBe(429);
     expect(res.body).toEqual({ error: expect.any(String) });
+  });
+
+  it("na Cloudflare conta por CF-Connecting-IP; X-Forwarded-For forjado não abre orçamento novo", async () => {
+    const app = buildApp();
+    const de = (ip: string, xff?: string) => {
+      const r = request(app).post("/api/auth/login").set("cf-connecting-ip", ip);
+      return (xff ? r.set("x-forwarded-for", xff) : r).send({});
+    };
+    for (let i = 0; i < 20; i++) expect((await de("203.0.113.1", `10.0.0.${i}`)).status).toBe(401);
+    expect((await de("203.0.113.1", "10.9.9.9")).status).toBe(429);
+    expect((await de("203.0.113.2")).status).toBe(401); // outro IP real, outro orçamento
   });
 });
 

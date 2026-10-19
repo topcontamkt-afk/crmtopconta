@@ -86,7 +86,7 @@ describe("POST /auth/login — tentativas no AuditLog (LGPD 05-03)", () => {
 
   it("senha errada grava LOGIN_FALHA no tenant do usuário, com e-mail mascarado e origem", async () => {
     findUnique.mockResolvedValue(usuario());
-    const r = await request(app).post("/auth/login").set("x-real-ip", "203.0.113.7").set("user-agent", "curl/8").send({ email: "joao.silva@empresa.com", password: "senha-errada" });
+    const r = await request(app).post("/auth/login").set("cf-connecting-ip", "203.0.113.7").set("user-agent", "curl/8").send({ email: "joao.silva@empresa.com", password: "senha-errada" });
     expect(r.status).toBe(401);
     expect(logTentativaAcesso).toHaveBeenCalledTimes(1);
     expect(logTentativaAcesso.mock.calls[0][0]).toMatchObject({
