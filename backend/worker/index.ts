@@ -5,6 +5,7 @@ import { env, waitUntil } from "cloudflare:workers";
 import { httpServerHandler } from "cloudflare:node";
 import { PrismaD1 } from "@prisma/adapter-d1";
 import { configureBackground } from "../src/config/background";
+import { configureMediaStore, r2MediaStore } from "../src/services/mediaStore";
 import { configureDatabase, prisma } from "../src/config/db";
 import { withCrossTenantAccess } from "../src/config/tenantGuard";
 import app from "../src/app";
@@ -20,6 +21,8 @@ interface Env {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 configureDatabase(() => new PrismaD1((env as any).DB));
 configureBackground(waitUntil);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+configureMediaStore(r2MediaStore((env as any).MEDIA));
 
 // O Express escuta numa porta "virtual" do workerd; o handler entrega cada Request a ela.
 const PORT = 3000;

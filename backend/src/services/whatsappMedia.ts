@@ -1,4 +1,5 @@
 import { AppPrismaClient } from "../config/db";
+import { loadMessageMedia, saveMessageMedia } from "./mediaStore";
 
 /**
  * Mídia recebida pelo WhatsApp (imagem, áudio, vídeo, documento, figurinha). O webhook só traz o
@@ -100,17 +101,18 @@ export async function getOrCacheMessageMedia(
   token: string | undefined,
   fetchImpl?: FetchLike
 ): Promise<CachedMedia> {
-  const cached = await prisma.waMediaBlob.findFirst({ where: { tenantId, messageId: message.id } });
-  if (cached) return { data: Buffer.from(cached.data), mime: cached.mime };
+  const cached = await loadMessageMedia(prisma, tenantId, message.id);
+  if (cached) return cached;
   if (!message.mediaId) throw new MediaError("INDISPONIVEL", "Mensagem sem mídia");
   // Z-API: o arquivo só existe se foi baixado e guardado na hora do webhook (não há como buscar depois)
   if (message.mediaId === "zapi") throw new MediaError("INDISPONIVEL", "O arquivo da Z-API não foi guardado (passou de 4 MB ou o link expirou).");
 
   const fetched = await fetchMetaMedia(message.mediaId, token, fetchImpl);
   try {
-    await prisma.waMediaBlob.create({ data: { tenantId, messageId: message.id, mime: fetched.mime, size: fetched.data.length, data: new Uint8Array(fetched.data) } });
-  } catch {
-    // outra requisição guardou ao mesmo tempo (messageId é único): serve o que já baixamos
+    await saveMessageMedia(prisma, tenantId, message.id, { mime: fetched.mime, data: new Uint8Array(fetched.data) });
+  } catch (e) {
+    // sem a cópia, a próxima abertura busca de novo na Meta: serve o que já baixamos
+    console.warn(`[inbox] mídia não guardada: ${(e as Error).message}`);
   }
   return fetched;
 }

@@ -5,6 +5,7 @@ import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tena
 import { ACAO_REDACAO_AUDITORIA, registroRedacao, RegistroRedacao } from "./auditIntegrity";
 import { suprimir, variantesTelefone } from "./privacy";
 import { IMPORT_CHANGE_TTL_DIAS } from "./importUndo";
+import { deleteMessageMedia } from "./mediaStore";
 
 /**
  * Retenção, anonimização e eliminação (LGPD art. 15, 16 e 18, VI).
@@ -220,7 +221,7 @@ async function limparContato(
   if (convIds.length) {
     const msgs = await prisma.waMessage.findMany({ where: { tenantId, conversationId: { in: convIds } }, select: { id: true } });
     if (msgs.length) {
-      midias = (await prisma.waMediaBlob.deleteMany({ where: { tenantId, messageId: { in: msgs.map((m) => m.id) } } })).count;
+      midias = await deleteMessageMedia(prisma, { tenantId, messageId: { in: msgs.map((m) => m.id) } });
       mensagensInbox = (
         await prisma.waMessage.updateMany({
           where: { tenantId, conversationId: { in: convIds } },
@@ -465,7 +466,7 @@ export async function retencaoInbox(
   let midias = 0;
   if (antigas.length) {
     const ids = antigas.map((m) => m.id);
-    midias += (await prisma.waMediaBlob.deleteMany({ where: { tenantId, messageId: { in: ids } } })).count;
+    midias += await deleteMessageMedia(prisma, { tenantId, messageId: { in: ids } });
     mensagens = (await prisma.waMessage.updateMany({ where: { tenantId, id: { in: ids } }, data: { body: null, mediaFilename: null, mediaId: null, errorText: null } })).count;
   }
 
@@ -478,7 +479,7 @@ export async function retencaoInbox(
     await prisma.conversation.update({ where: { id: c.id }, data: { waId: `${ANON_PREFIX}${c.id}`, contactName: null, lastPreview: null } });
   }
 
-  midias += (await prisma.waMediaBlob.deleteMany({ where: { tenantId, createdAt: { lte: diasAtras(agora, tenant.mediaRetentionDays) } } })).count;
+  midias += await deleteMessageMedia(prisma, { tenantId, createdAt: { lte: diasAtras(agora, tenant.mediaRetentionDays) } });
   return { mensagens, conversas: paradas.length, midias };
 }
 

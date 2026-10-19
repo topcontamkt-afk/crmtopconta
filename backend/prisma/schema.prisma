@@ -117,10 +117,10 @@ model Tenant {
   retentionBasis            String? // fundamento do prazo de retenção (04-07)
   retentionDaysAfterClosure Int? // prazo após o encerramento da conta; nulo = retentionDays (04-06)
   inboxRetentionDays        Int? // prazo de conversas da Inbox; nulo = retentionDays (04-02)
-  mediaRetentionDays        Int      @default(90) // prazo das cópias de mídia do WhatsApp (04-02)
-  correcaoManualVence       Boolean  @default(true) // correção feita no CRM não é sobrescrita pela planilha (03-03)
+  mediaRetentionDays        Int       @default(90) // prazo das cópias de mídia do WhatsApp (04-02)
+  correcaoManualVence       Boolean   @default(true) // correção feita no CRM não é sobrescrita pela planilha (03-03)
 
-  createdAt         DateTime @default(now())
+  createdAt DateTime @default(now())
 
   users              User[]
   clients            Client[]
@@ -166,8 +166,8 @@ model User {
   // Acesso por área do sistema (services/areas.ts). `areasRestritas=false` = vê todas as áreas (padrão e
   // quem já existia); true = só as de `areas`. ADMIN sempre vê tudo. O papel (role) continua dizendo o que
   // a pessoa pode FAZER dentro da área; isto diz ONDE ela pode entrar.
-  areasRestritas Boolean  @default(false)
-  areas          Json     @default("[]") // string[] de services/areas.ts
+  areasRestritas Boolean @default(false)
+  areas          Json    @default("[]") // string[] de services/areas.ts
 
   // Segurança de login (rate limiting anti brute-force) — armazenado no banco (não em memória
   // do processo) para funcionar de forma consistente entre invocações serverless distintas.
@@ -256,12 +256,12 @@ model Client {
   tags      ClientTag[]
   purchases Purchase[]
 
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  lastImportJobId String?
-  anonymizedAt    DateTime? // preenchido pelo job de retenção/right-to-be-forgotten (LGPD)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  lastImportJobId  String?
+  anonymizedAt     DateTime? // preenchido pelo job de retenção/right-to-be-forgotten (LGPD)
   // LGPD 03-04: tratamento suspenso a pedido do titular (fora de campanha, segmento, export e automação).
-  bloqueadoLgpdAt DateTime?
+  bloqueadoLgpdAt  DateTime?
   // LGPD 03-03: campos corrigidos à mão a pedido do titular ({ campo: ISODate }); a importação não os sobrescreve
   // quando Tenant.correcaoManualVence.
   camposCorrigidos Json?
@@ -532,11 +532,11 @@ model AuditLog {
   prevHash  String?
   hash      String?
 
-  @@index([tenantId, createdAt])
   // Um elo só tem um filho: duas gravações que leram o mesmo topo da cadeia não bifurcam, a segunda
   // falha e tenta de novo (middleware/audit.ts). A 1ª entrada do tenant aponta para GENESIS:{tenantId},
   // porque NULL não conta como repetido no índice único.
   @@unique([tenantId, prevHash])
+  @@index([tenantId, createdAt])
 }
 
 model SheetConnection {
@@ -625,7 +625,8 @@ model TemplateMedia {
   mime       String
   filename   String
   size       Int
-  data       Bytes
+  // arquivo no R2 (services/mediaStore.ts); o D1 não guarda linha acima de 2 MB
+  storageKey String
   createdAt  DateTime        @default(now())
   updatedAt  DateTime        @updatedAt
 }
@@ -827,14 +828,15 @@ model WaMessage {
 /// Cópia local da mídia recebida (a Meta só guarda por tempo limitado). Limitada a 4 MB porque a
 /// Vercel não devolve respostas maiores que ~4,5 MB; arquivos maiores não são guardados.
 model WaMediaBlob {
-  id        String   @id @default(uuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id])
-  messageId String   @unique
-  mime      String
-  size      Int
-  data      Bytes
-  createdAt DateTime @default(now())
+  id         String   @id @default(uuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  messageId  String   @unique
+  mime       String
+  size       Int
+  // arquivo no R2 (services/mediaStore.ts); o D1 não guarda linha acima de 2 MB
+  storageKey String
+  createdAt  DateTime @default(now())
 
   @@index([tenantId])
 }

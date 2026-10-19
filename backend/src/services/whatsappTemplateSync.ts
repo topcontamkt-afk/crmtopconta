@@ -2,6 +2,7 @@ import { AppPrismaClient } from "../config/db";
 import { explainTemplateIssue, listMetaTemplates, mapMetaStatus, MetaTemplate, TEMPLATE_CATEGORIES } from "./whatsappTemplates";
 import { TemplateEvent } from "./whatsappPayload";
 import { importMetaTemplate } from "./templateImport";
+import { saveTemplateMedia } from "./mediaStore";
 
 /**
  * Mantém o status dos templates locais igual ao da Meta, por webhook (tempo real) e pela
@@ -103,9 +104,7 @@ async function importOne(prisma: AppPrismaClient, tenantId: string, m: MetaTempl
   if (imp.headerFormat === "IMAGE" && imp.headerExampleUrl) {
     const img = await fetchHeaderImage(imp.headerExampleUrl, fetchImpl);
     if (img) {
-      await prisma.templateMedia.create({
-        data: { tenantId, templateId: created.id, mime: img.mime, filename: `${m.name}.${img.mime === "image/png" ? "png" : "jpg"}`, size: img.data.length, data: new Uint8Array(img.data) },
-      });
+      await saveTemplateMedia(prisma, tenantId, created.id, { mime: img.mime, filename: `${m.name}.${img.mime === "image/png" ? "png" : "jpg"}`, data: new Uint8Array(img.data) });
     }
   }
 }

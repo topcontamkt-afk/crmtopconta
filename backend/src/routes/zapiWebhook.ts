@@ -6,6 +6,7 @@ import { storeInboundMessage } from "../services/whatsappInbox";
 import { applyOutboundStatus } from "../services/whatsappReply";
 import { instanceIdOf, parseZapiWebhook, zapiStatusToOurs } from "../services/zapi";
 import { downloadZapiMedia } from "../services/zapiMedia";
+import { saveMessageMedia } from "../services/mediaStore";
 
 /**
  * Webhook PÚBLICO da Z-API: POST /api/integrations/webhooks/zapi/:secret. A Z-API não assina o corpo, então o
@@ -42,7 +43,9 @@ router.post("/:secret", webhookLimiter, async (req, res) => {
           return null;
         });
         if (file) {
-          await prisma.waMediaBlob.create({ data: { tenantId: account.tenantId, messageId: r.messageId, mime: file.mime, size: file.data.length, data: new Uint8Array(file.data) } }).catch(() => undefined);
+          await saveMessageMedia(prisma, account.tenantId, r.messageId, { mime: file.mime, data: new Uint8Array(file.data) }).catch((e) =>
+            console.warn(`[webhooks/zapi] mídia não guardada: ${(e as Error).message}`)
+          );
         }
       }
     });

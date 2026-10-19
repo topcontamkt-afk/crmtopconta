@@ -20,6 +20,7 @@ import { templateContext } from "./messageContext";
 import { sendTemplateMessage, templateParams, templatePreview } from "./whatsappTemplates";
 import { unmappedPositions } from "./templateImport";
 import { makeToken, trackedButtons } from "./trackedLinks";
+import { loadTemplateMedia, saveMessageMedia } from "./mediaStore";
 
 /**
  * Responde a um cliente dentro de uma conversa: confere a janela de 24 horas, envia pela Meta e só
@@ -101,9 +102,9 @@ export async function sendReply(
   });
   // A cópia local permite mostrar o arquivo enviado sem baixá-lo de volta da Meta.
   if (blob) {
-    await prisma.waMediaBlob
-      .create({ data: { tenantId, messageId: message.id, mime: blob.mime, size: blob.data.length, data: new Uint8Array(blob.data) } })
-      .catch(() => undefined);
+    await saveMessageMedia(prisma, tenantId, message.id, { mime: blob.mime, data: new Uint8Array(blob.data) }).catch((e) =>
+      console.warn(`[inbox] cópia do arquivo enviado não guardada: ${(e as Error).message}`)
+    );
   }
   await prisma.conversation.update({
     where: { id: conversation.id },
@@ -244,9 +245,9 @@ export async function sendTemplateReply(
   const { params, texto } = previewTemplateFor(template, conversation);
   let headerImageId: string | undefined;
   if (template.headerFormat === "IMAGE") {
-    const media = await prisma.templateMedia.findFirst({ where: { templateId: template.id, tenantId } });
+    const media = await loadTemplateMedia(prisma, tenantId, template.id);
     if (!media) throw new SendError("TEMPLATE_INDISPONIVEL", "Este template precisa da imagem do cabeçalho (Templates).");
-    headerImageId = await uploadMedia(conversation.account.phoneNumberId, token, Buffer.from(media.data), media.mime, media.filename, deps.fetchImpl);
+    headerImageId = await uploadMedia(conversation.account.phoneNumberId, token, media.data, media.mime, media.filename, deps.fetchImpl);
   }
   const wamid = await sendTemplateMessage(conversation.account.phoneNumberId, token, conversation.waId, template.metaName!, template.language, params, deps.fetchImpl, headerImageId, trackedButtons(template).map((b) => ({ index: b.index, token: makeToken("n", template.id, b.index) })));
   const message = await prisma.waMessage.create({

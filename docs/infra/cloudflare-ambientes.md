@@ -73,6 +73,16 @@ O deploy usa o token da conta compartilhada em `backend/.dev.cloudflare` (fora d
 - **Envio simulado** só com `MESSAGING_MODE=mock` (local e homologação, no `wrangler.jsonc`), no lugar do
   antigo "NODE_ENV diferente de production".
 - **QR code do 2FA** em SVG (o PNG dependia de canvas/zlib do Node).
+- **Google Sheets sem `googleapis`** (`services/googleApi.ts`): JWT RS256 da Service Account assinado por
+  WebCrypto e trocado por token de acesso (cache por escopo); a API REST do Sheets é chamada por `fetch`.
+  Bundle do Worker: 1,83 MB compactado.
+- **Mídias no R2** (`services/mediaStore.ts`, migration `0003_midia_no_r2`): o D1 não aceita linha acima de
+  2 MB e as mídias vão até 4 MB. `WaMediaBlob` e `TemplateMedia` guardam só metadados e `storageKey`
+  (`t/{tenantId}/wa/{messageId}` e `t/{tenantId}/tpl/{templateId}`). Gravar: objeto e depois linha. Apagar:
+  objetos e depois linhas, para que uma falha do R2 deixe as linhas e a retenção tente de novo, em vez de
+  sobrar arquivo com dado pessoal sem registro. Excluir template apaga a imagem antes (a cascata do banco
+  não alcança o R2). Pendente na Fase 4: o `PURGE_SQL` de `routes/clients.ts` apaga linhas de `WaMediaBlob`
+  direto no SQL e precisa passar a apagar os objetos.
 
 ## Estado
 
@@ -82,8 +92,9 @@ O deploy usa o token da conta compartilhada em `backend/.dev.cloudflare` (fora d
   3 MB), inicialização de 20 ms, sem erro de CPU no plano grátis.
 - **Fase 3, em andamento** (só local, sem deploy): a API inteira roda no `wrangler dev` (login, 2FA, clientes,
   etiquetas, segmentos, usuários, relatório do titular, auditoria). Ainda falham com 500 as telas que usam SQL
-  cru do Postgres (dashboard, oportunidades, uso no período, comércio, ciclos), que é a Fase 4. Migration
-  `0002_auditoria_elo_unico` aplicada só no D1 local; na homologação, aplicar antes do próximo deploy.
+  cru do Postgres (dashboard, oportunidades, uso no período, comércio, ciclos), que é a Fase 4. Migrations
+  `0002_auditoria_elo_unico` e `0003_midia_no_r2` aplicadas só no D1 local; na homologação, aplicar antes do
+  próximo deploy.
 
 ## Decisão pendente para a Fase 3: onde o Worker roda (latência do D1)
 

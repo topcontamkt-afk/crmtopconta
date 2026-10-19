@@ -15,6 +15,7 @@ import { decryptSecret, isEncryptedPayload } from "./crypto";
 import { brl, recipientContext, renderTemplate, templateContext, usesLimiteDisponivel } from "./messageContext";
 import { comRodape, montarRodape } from "./templateVariables";
 import { baseLegalVigente, motivoSemBaseLegal } from "./baseLegal";
+import { loadTemplateMedia } from "./mediaStore";
 export { recipientContext, renderTemplate, templateContext, usesLimiteDisponivel };
 
 /**
@@ -197,12 +198,12 @@ export async function prepareHeaderImage(
   providers: ResolvedProvider[]
 ): Promise<{ imageId?: string; bloqueado?: string }> {
   if (!template || template.headerFormat !== "IMAGE") return {};
-  const media = await prisma.templateMedia.findFirst({ where: { templateId: template.id, tenantId } });
+  const media = await loadTemplateMedia(prisma, tenantId, template.id);
   if (!media) return { bloqueado: `O template "${template.name}" precisa da imagem do cabeçalho (Templates > imagem).` };
   const provider = providers.find((p) => p.adapter.uploadHeaderImage);
   if (!provider) return { bloqueado: "Nenhum provedor de WhatsApp consegue enviar a imagem do cabeçalho." };
   try {
-    return { imageId: await provider.adapter.uploadHeaderImage!(Buffer.from(media.data), media.mime, media.filename) };
+    return { imageId: await provider.adapter.uploadHeaderImage!(media.data, media.mime, media.filename) };
   } catch (e: any) {
     return { bloqueado: `Não consegui enviar a imagem do cabeçalho à Meta: ${e.message}` };
   }
