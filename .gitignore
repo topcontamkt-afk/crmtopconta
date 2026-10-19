@@ -4,3 +4,8 @@ dist/
 *.tsbuildinfo
 backend/node_modules/
 frontend/node_modules/
+
+# Cloudflare (credenciais e estado local do wrangler)
+.dev.cloudflare
+.dev.vars*
+.wrangler/
