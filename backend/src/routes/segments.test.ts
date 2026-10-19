@@ -52,3 +52,24 @@ describe("LGPD 01-03: renda fora dos segmentos", () => {
     expect(db.client.count.mock.calls[0][0].where).toEqual({ tenantId: "t1", cidade: { in: ["Natal"] } });
   });
 });
+
+describe("filtros simples não viram grupo vazio", () => {
+  it("POST /segments guarda os filtros simples como vieram e conta só o público deles", async () => {
+    const r = await request(app).post("/segments").send({ name: "Natal", filters: { cidade: ["Natal"] } });
+    expect(r.status).toBe(201);
+    expect(db.segmentDefinition.create.mock.calls[0][0].data.filters).toEqual({ cidade: ["Natal"] });
+    expect(db.client.count.mock.calls[0][0].where).toEqual({ tenantId: "t1", cidade: { in: ["Natal"] } });
+  });
+
+  it("POST /segments/preview conta com os filtros simples (antes contava a base inteira)", async () => {
+    const r = await request(app).post("/segments/preview").send({ cidade: ["Natal"] });
+    expect(r.status).toBe(200);
+    expect(db.client.count.mock.calls[0][0].where).toEqual({ tenantId: "t1", cidade: { in: ["Natal"] } });
+  });
+
+  it("o formato de grupo continua aceito", async () => {
+    const r = await request(app).post("/segments").send({ name: "G", filters: { operator: "AND", conditions: { cidade: ["Natal"] } } });
+    expect(r.status).toBe(201);
+    expect(db.segmentDefinition.create.mock.calls[0][0].data.filters).toEqual({ operator: "AND", conditions: { cidade: ["Natal"] } });
+  });
+});
