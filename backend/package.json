@@ -12,7 +12,10 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "ts-node prisma/seed.ts",
-    "test": "jest --runInBand"
+    "test": "jest --runInBand",
+    "cf:build-front": "npm --prefix ../frontend run build",
+    "cf:dev": "npm run cf:build-front && wrangler dev",
+    "cf:deploy:hml": "npm run cf:build-front && wrangler deploy --env hml"
   },
   "dependencies": {
     "@prisma/client": "^5.19.1",
@@ -33,6 +36,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261003.1",
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
@@ -49,6 +53,14 @@
     "ts-jest": "^29.2.5",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "wrangler": "^4.147.0"
+  },
+  "allowScripts": {
+    "@prisma/client@5.22.0": true,
+    "@prisma/engines@5.22.0": true,
+    "esbuild@0.28.1": true,
+    "prisma@5.22.0": true,
+    "workerd@1.20261001.1": true
   }
 }

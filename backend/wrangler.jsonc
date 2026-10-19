@@ -1,0 +1,41 @@
+// Worker do CRM na Cloudflare (migração do zero, ver docs/infra/cloudflare-fase0.md).
+// Um só Worker serve a SPA (frontend/dist) e a API. O nível de cima é o ambiente LOCAL
+// (`wrangler dev`, D1/R2 simulados pelo Miniflare); `env.hml` é a homologação no workers.dev.
+// Bindings não são herdados entre ambientes: cada `env.*` repete os seus.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "crmtopconta-local",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "../frontend/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    // a API e o link rastreado nunca caem no index.html da SPA
+    "run_worker_first": ["/api/*", "/r/*"]
+  },
+  "vars": { "APP_ENV": "local" },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "crmtopconta-local", "database_id": "00000000-0000-0000-0000-000000000000" }
+  ],
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "crmtopconta-local-media" }],
+  "env": {
+    "hml": {
+      "name": "crmtopconta-hml",
+      "workers_dev": true,
+      "preview_urls": false,
+      "assets": {
+        "directory": "../frontend/dist",
+        "binding": "ASSETS",
+        "not_found_handling": "single-page-application",
+        "run_worker_first": ["/api/*", "/r/*"]
+      },
+      "vars": { "APP_ENV": "hml" },
+      "d1_databases": [
+        { "binding": "DB", "database_name": "crmtopconta-hml", "database_id": "9945cc44-3f12-404f-8505-96d68bd21a6e" }
+      ]
+      // R2 `crmtopconta-hml-media` entra aqui quando o R2 for ativado na conta.
+    }
+  }
+}
