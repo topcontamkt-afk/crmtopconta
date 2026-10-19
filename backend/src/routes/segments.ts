@@ -44,12 +44,16 @@ const filtersSchema = z.object({
 });
 
 // Grupo de filtros combináveis (AND/OR aninhados) — segment builder avançado (Fase 2).
+// `.strict()`: sem ele, filtros simples ({ cidade: [...] }) passavam como "grupo" com as chaves descartadas
+// ({ operator: "AND" }), e o segmento salvo pela tela virava a base inteira.
 const groupSchema: z.ZodType<any> = z.lazy(() =>
-  z.object({
-    operator: z.enum(["AND", "OR"]).default("AND"),
-    conditions: filtersSchema.optional(),
-    groups: z.array(groupSchema).optional(),
-  })
+  z
+    .object({
+      operator: z.enum(["AND", "OR"]).default("AND"),
+      conditions: filtersSchema.optional(),
+      groups: z.array(groupSchema).optional(),
+    })
+    .strict()
 );
 
 // Aceita tanto o formato simples (flat) quanto o avançado (grupo), para compatibilidade
