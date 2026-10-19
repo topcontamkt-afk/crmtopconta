@@ -1,4 +1,5 @@
-import { parseManualRows } from "./manualCampaign";
+import { matchManualAudience, parseManualRows } from "./manualCampaign";
+import { phoneHash } from "./privacy";
 import { recipientContext, renderTemplate, templateContext, usesLimiteDisponivel } from "./messageContext";
 import { TEMPLATE_VARIABLES } from "./templateVariables";
 
@@ -77,5 +78,51 @@ describe("limite disponível na mensagem", () => {
     expect(usesLimiteDisponivel("Olá {{nome}}, você tem {{limite_disponivel}}")).toBe(true);
     expect(usesLimiteDisponivel("Olá {{ saldo }}")).toBe(true);
     expect(usesLimiteDisponivel("Olá {{nome}}, limite total {{limite}}")).toBe(false);
+  });
+});
+
+// LGPD 02-03: a lista nova não pode trazer de volta quem pediu para parar por OUTRO registro com o mesmo número
+describe("matchManualAudience — supressão por telefone", () => {
+  const SALT_T = "salt-t1";
+  const row = (telefone: string, cpfHash: string | null = null, linha = 1) => ({ linha, nome: "X", telefone, cpfHash, cpfMasked: null, limiteDisponivel: 100 });
+  function fake(opts: { clientes?: any[]; supressoes?: any[]; optOutClientes?: string[] } = {}) {
+    return {
+      client: {
+        findMany: jest.fn(async ({ where }: any) => {
+          if (where.optOutAt) return (opts.optOutClientes ?? []).filter((t) => where.telefone.in.includes(t)).map((telefone) => ({ telefone }));
+          if (where.cpfHash) return (opts.clientes ?? []).filter((c) => where.cpfHash.in.includes(c.cpfHash));
+          return (opts.clientes ?? []).filter((c) => where.telefone.in.includes(c.telefone));
+        }),
+      },
+      campaignRecipient: { findMany: jest.fn(async () => []) },
+      tenant: { findUnique: jest.fn(async () => ({ cpfSalt: SALT_T })) },
+      supressaoTitular: { findMany: jest.fn(async () => opts.supressoes ?? []) },
+    } as any;
+  }
+  const cliente = (over: any = {}) => ({ id: "c1", cpfHash: "doc1", telefone: "+5584999998888", autorizacaoComunicacao: true, optOutAt: null, bloqueadoLgpdAt: null, statusConta: "ATIVO", limiteTotal: 1000, ...over });
+
+  it("telefone suprimido (contato fora da base) é excluído", async () => {
+    const prisma = fake({ supressoes: [{ tenantId: "t1", phoneHash: phoneHash(SALT_T, "+5584977776666"), docHash: null, motivo: "OPT_OUT" }] });
+    const [r] = await matchManualAudience(prisma, "t1", [row("+558477776666")]);
+    expect(r.excluidoMotivo).toMatch(/opt-out/);
+  });
+
+  it("casado por CPF a um cliente liberado, mas o número tem opt-out em outro cadastro: excluído", async () => {
+    const prisma = fake({ clientes: [cliente({ telefone: "+5584911110000" })], optOutClientes: ["+5584999998888"] });
+    const [r] = await matchManualAudience(prisma, "t1", [row("+5584999998888", "doc1")]);
+    expect(r.clientId).toBe("c1");
+    expect(r.excluidoMotivo).toMatch(/opt-out/);
+  });
+
+  it("cliente com tratamento bloqueado a pedido do titular é excluído", async () => {
+    const prisma = fake({ clientes: [cliente({ bloqueadoLgpdAt: new Date() })] });
+    const [r] = await matchManualAudience(prisma, "t1", [row("+5584999998888", "doc1")]);
+    expect(r.excluidoMotivo).toMatch(/bloqueado/);
+  });
+
+  it("contato liberado passa", async () => {
+    const prisma = fake({ clientes: [cliente()] });
+    const [r] = await matchManualAudience(prisma, "t1", [row("+5584999998888", "doc1")]);
+    expect(r.excluidoMotivo).toBeNull();
   });
 });

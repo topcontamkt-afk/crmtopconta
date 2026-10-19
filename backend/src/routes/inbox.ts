@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Request, Response, Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
@@ -10,7 +10,7 @@ import { isSendableTemplate, previewTemplateFor, sendReply, sendTemplateReply } 
 import { SendError, OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
 import { accessTokenFor, credentialsOf } from "../services/whatsappAccount";
 import { janelaAte } from "../services/whatsappPayload";
-import { AUTO_REPLY_JANELA_MS, AUTO_REPLY_MAX, AUTO_REPLY_PADRAO, autoReplyTextOf } from "../services/whatsappAutoReply";
+import { AUTO_REPLY_JANELA_MS, AUTO_REPLY_MAX, autoReplyPadraoDo, autoReplyTextOf } from "../services/whatsappAutoReply";
 
 /**
  * Inbox do WhatsApp (Fase 1): lista de conversas e histórico de mensagens recebidas. Leitura e
@@ -37,6 +37,8 @@ router.get("/status", async (req, res) => {
 /**
  * GET /api/inbox/resumo — leve, para o aviso de mensagem nova que roda em qualquer tela: quantas
  * conversas têm mensagem não lida e qual foi a última a chegar (o front compara com o que já viu).
+ * LGPD 07-05: só id e horário; nome e trecho da mensagem não saem daqui (o aviso aparece em qualquer
+ * tela e na notificação do sistema operacional). O conteúdo só se vê dentro da Inbox.
  */
 router.get("/resumo", async (req, res) => {
   const { tenantId } = req.user!;
@@ -45,26 +47,31 @@ router.get("/resumo", async (req, res) => {
     prisma.conversation.findFirst({
       where: { tenantId, status: "ABERTA", unreadCount: { gt: 0 }, lastInboundAt: { not: null } },
       orderBy: { lastInboundAt: "desc" },
-      include: { client: { select: { nome: true } } },
+      select: { id: true, lastInboundAt: true },
     }),
   ]);
   res.json({
     naoLidas,
-    ultima: ultima
-      ? { id: ultima.id, nome: ultima.client?.nome ?? ultima.contactName ?? "Contato sem cadastro", preview: ultima.lastPreview, em: ultima.lastInboundAt!.toISOString() }
-      : null,
+    ultima: ultima ? { id: ultima.id, em: ultima.lastInboundAt!.toISOString() } : null,
   });
 });
+
+/** Dados do controlador deste tenant usados no texto padrão da resposta automática (LGPD 02-08). */
+function controladorDo(tenantId: string) {
+  return prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true, controladorNome: true, encarregadoNome: true, encarregadoContato: true } });
+}
 
 /** GET /api/inbox/auto-reply — configuração da resposta automática da conta ativa. */
 router.get("/auto-reply", async (req, res) => {
   const { tenantId } = req.user!;
   const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: "META" }, orderBy: { createdAt: "asc" } });
   if (!account) return res.status(404).json({ error: "WhatsApp não conectado" });
+  const controlador = await controladorDo(tenantId);
   res.json({
     ativa: account.autoReplyEnabled,
-    texto: autoReplyTextOf(account),
-    padrao: AUTO_REPLY_PADRAO,
+    // LGPD 02-08: mostra o que de fato sai (padrão do controlador deste tenant, ou o texto próprio com a instrução de SAIR)
+    texto: autoReplyTextOf(account, controlador),
+    padrao: autoReplyPadraoDo(controlador),
     personalizado: !!account.autoReplyText?.trim(),
     maximo: AUTO_REPLY_MAX,
     janelaHoras: AUTO_REPLY_JANELA_MS / 3600_000,
@@ -84,7 +91,7 @@ router.put("/auto-reply", requireRole("ADMIN"), async (req, res) => {
   if (parsed.data.ativa && !texto) return res.status(400).json({ error: "Escreva a mensagem da resposta automática." });
   await prisma.whatsAppAccount.update({
     where: { id: account.id },
-    data: { autoReplyEnabled: parsed.data.ativa, autoReplyText: !texto || texto === AUTO_REPLY_PADRAO ? null : texto },
+    data: { autoReplyEnabled: parsed.data.ativa, autoReplyText: !texto || texto === autoReplyPadraoDo(await controladorDo(tenantId)) ? null : texto },
   });
   await logAudit({ tenantId, userId: req.user!.id, action: "WHATSAPP_AUTO_REPLY_UPDATE", target: "WhatsAppAccount", targetId: account.id, details: { ativa: parsed.data.ativa } });
   res.json({ ok: true });
@@ -96,17 +103,30 @@ const listQuery = z.object({
   limite: z.coerce.number().int().min(1).max(100).default(50),
 });
 
-/** GET /api/inbox/conversations */
+/** LGPD 07-03: nome ou telefone procurado não vai na URL (logs de requisição). */
+const BUSCA_NA_URL = "A busca por nome ou telefone não vai mais na URL (LGPD). Use POST /api/inbox/conversations/search com o termo no corpo.";
+
+/** GET /api/inbox/conversations — só filtros não pessoais na URL. */
 router.get("/conversations", async (req, res) => {
-  const q = listQuery.safeParse(req.query);
+  if (req.query.busca !== undefined) return res.status(400).json({ error: BUSCA_NA_URL });
+  await listarConversas(req, res, req.query);
+});
+
+/** POST /api/inbox/conversations/search — LGPD 07-03: a mesma lista, com a busca e os filtros no corpo. */
+router.post("/conversations/search", async (req, res) => {
+  await listarConversas(req, res, req.body ?? {});
+});
+
+async function listarConversas(req: Request, res: Response, src: unknown) {
+  const q = listQuery.safeParse(src);
   if (!q.success) return res.status(400).json({ error: "Parâmetros inválidos" });
   const { tenantId } = req.user!;
   const { filtro, busca, limite } = q.data;
 
   const where: any = { tenantId, status: "ABERTA" };
   if (filtro === "nao_lidas") where.unreadCount = { gt: 0 };
-  // Z-API não tem janela de 24h: essas conversas contam sempre como abertas
-  if (filtro === "janela_aberta") where.OR = [{ lastInboundAt: { gte: new Date(Date.now() - 24 * 3600_000) } }, { account: { is: { provider: "ZAPI" } } }];
+  // LGPD 02-06: a Z-API segue a mesma janela de 24h da Meta (whatsappReply.ts recusa fora dela)
+  if (filtro === "janela_aberta") where.lastInboundAt = { gte: new Date(Date.now() - 24 * 3600_000) };
   if (filtro === "sem_cliente") where.clientId = null;
   if (busca?.trim()) {
     const t = busca.trim();
@@ -131,8 +151,7 @@ router.get("/conversations", async (req, res) => {
   res.json({
     naoLidas,
     conversas: rows.map((c) => {
-      const zapi = c.account.provider === "ZAPI";
-      const ate = zapi ? null : janelaAte(c.lastInboundAt);
+      const ate = janelaAte(c.lastInboundAt);
       return {
         canal: c.account.provider,
         id: c.id,
@@ -143,12 +162,12 @@ router.get("/conversations", async (req, res) => {
         preview: c.lastPreview,
         ultimaMensagemEm: c.lastMessageAt.toISOString(),
         naoLidas: c.unreadCount,
-        janelaAberta: zapi || (!!ate && ate.getTime() > agora),
+        janelaAberta: !!ate && ate.getTime() > agora,
         janelaAte: ate?.toISOString() ?? null,
       };
     }),
   });
-});
+}
 
 const msgsQuery = z.object({ antes: z.string().datetime().optional(), limite: z.coerce.number().int().min(1).max(200).default(100) });
 
@@ -173,8 +192,7 @@ router.get("/conversations/:id/messages", async (req, res) => {
   });
   mensagens.reverse();
 
-  const zapi = conversa.account.provider === "ZAPI";
-  const ate = zapi ? null : janelaAte(conversa.lastInboundAt);
+  const ate = janelaAte(conversa.lastInboundAt);
   const c = conversa.client;
   res.json({
     conversa: {
@@ -182,7 +200,7 @@ router.get("/conversations/:id/messages", async (req, res) => {
       nome: c?.nome ?? conversa.contactName ?? "Contato sem cadastro",
       telefone: maskPhone(conversa.waId),
       canal: conversa.account.provider,
-      janelaAberta: zapi || (!!ate && ate.getTime() > Date.now()),
+      janelaAberta: !!ate && ate.getTime() > Date.now(),
       janelaAte: ate?.toISOString() ?? null,
       naoLidas: conversa.unreadCount,
     },

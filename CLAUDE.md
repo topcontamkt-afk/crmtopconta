@@ -106,9 +106,48 @@ the import.
   without touching callers).
 - Opt-out is sticky: once a client opts out, re-import never silently
   re-authorizes them.
-- `services/retention.ts` runs a daily right-to-be-forgotten job anonymizing
-  clients inactive past `Tenant.retentionDays`.
+- `services/retention.ts` runs a daily job anonymizing clients inactive past
+  `Tenant.retentionDays` (plus closed accounts, Inbox, media and import history;
+  see "Adequação LGPD" below).
 - Every sensitive action goes through `middleware/audit.ts` into `AuditLog`.
+
+**Adequação LGPD (branch `claude/lgpd-adequacao`, 2026-10).** Fonte legal e relatórios em `docs/lgpd/` (corpus oficial,
+auditorias, plano de correções, rascunhos de artefatos); skills `/lgpd-audit` (varredura multi-agente) e `/lgpd-check`
+(só o diff). Regras que o código agora garante:
+- **Config por controlador (tenant)**: `GET/PUT /api/tenant/lgpd` (Configurações → LGPD): base legal de marketing
+  (`Tenant.baseLegalMarketing`, nulo = envio de marketing bloqueado em campanha, lista manual e automação; ver
+  `services/baseLegal.ts`), LIA, controlador/encarregado, aviso de privacidade, rodapé de opt-out e prazos de retenção
+  (30–1825 dias, fundamento obrigatório, prévia antes de reduzir).
+- **Supressão por titular** (`services/privacy.ts`, `SupressaoTitular`, só hashes HMAC com `cpfSalt`): opt-out (PARAR por
+  WhatsApp/Z-API, STOP por SMS, manual) vale pelo **telefone canônico** em todos os cadastros e listas; o envio consulta em
+  lote (`suprimidosEmLote`). ELIMINACAO bloqueia a reimportação só pelo documento (volta se a planilha mostrar conta
+  aberta depois do pedido, ou por liberação de ADMIN) e não barra número reaproveitado com outro CPF.
+- **Público de envio**: `ENVIAVEL_WHERE` (segments.ts) exclui sem limite, `bloqueadoLgpdAt`, `encerradoEm` e
+  `anonymizedAt`; `CONTATO_LIBERADO_WHERE` exige autorização, sem opt-out e sem bloqueio. Renda não é critério de público
+  (só estatística): segmento salvo ou regra de automação antiga com `perfilRenda`/`noTetoLimite` é recusado no assistente,
+  no `POST /campaigns`, ao enfileirar e no motor (`AVISO_RENDA_IGNORADA`), porque sem o filtro o público cresceria. Toda
+  mensagem de marketing em texto livre leva rodapé com controlador e "responda SAIR" (`montarRodape`); template próprio
+  MARKETING só é criado com rodapé ou botão de saída, e importado da Meta sem saída só gera aviso no assistente. Template
+  MARKETING pela Inbox também exige base legal declarada.
+- **Direitos do titular**: relatório completo (`GET /api/clients/:id/relatorio-titular`), correção que trava o campo contra
+  reimportação (`Client.camposCorrigidos`), bloqueio (`/bloqueio`), eliminação (`POST /api/clients/:id/anonymize`, anonimiza
+  cliente e dados ligados: Inbox, compras, snapshots, histórico de importação, destinatários) e registro de pedidos com prazo
+  de 15 dias (`/api/titular/pedidos`, tela `/clients/pedidos-titular`). Quem não é cliente da base (lista manual, Inbox) tem
+  relatório e eliminação pelo telefone no próprio pedido (`/relatorio-contato`, `/eliminar-contato`, `anonymizeContato`);
+  pedido de eliminação só fica "atendido" depois de eliminar, e atender revogação/oposição aplica o opt-out pelo número.
+- **Retenção** (job diário `/api/cron/retention`): inativos, contas encerradas (`retentionDaysAfterClosure`), Inbox
+  (`inboxRetentionDays`), mídias (`mediaRetentionDays`), `ImportChange` com mais de 30 dias. Redigir PII de `AuditLog` grava
+  o evento encadeado `AUDIT_REDACAO_LGPD`, então a verificação continua ok.
+- **Exposição**: listas e ficha com `select` explícito, VIEWER sem telefone completo; exports com telefone mascarado (completo
+  só ADMIN com motivo, auditado); buscas por nome/telefone vão no corpo (POST), nunca na URL; aviso de mensagem nova sem
+  conteúdo; leitura em volume auditada.
+- **Trilha**: cadeia de hash do `AuditLog` **por tenant** (âncora `AUDIT_CADEIA_POR_TENANT` na transição); login falho,
+  bloqueio, 2FA falho e 403 por papel ficam no AuditLog (e-mail mascarado).
+- **Canais**: credencial de canal do ambiente só vale para `PLATFORM_DEFAULT_TENANT_ID` (ou todos com
+  `ALLOW_GLOBAL_CHANNEL_CREDENTIALS=true`, dev); webhook SMS exige assinatura (Twilio) ou segredo por canal; planilha
+  Google só se cadastrada no próprio tenant e nunca em dois; Z-API segue a janela de 24h.
+- SQL: `backend/prisma/sql/2026-10-lgpd-adequacao.sql` (antes do deploy) e `2026-10-lgpd-minimizacao-dados.sql`
+  (destrutivo, depois). Pendências e decisões em `docs/lgpd/correcoes/pendencias-integracao.md`.
 
 ### Campaign send path
 
@@ -228,11 +267,11 @@ podem usar as variáveis de `services/templateVariables.ts` (`nome`, `cidade`, `
 
 `services/rendaPerfil.ts` estima o salário pelo **limite total** (limite ÷ 0,40; nunca o saldo disponível) e
 classifica em PF1 (até R$ 4.000, inclui quem estaria abaixo do piso), PF2 (até 8.000), PF3 (até 12.000) e PF4
-(acima). Cálculo puro, sem coluna nova: `limiteRange` vira o filtro `perfilRenda` em `SegmentFilters` (e no
-assistente de campanha). O limite tem teto de R$ 2.000 (`noTetoLimite`), por isso PF3/PF4 aparecem quase vazios.
+(acima). Cálculo puro, sem coluna nova: `limiteRange` era o filtro `perfilRenda` de `SegmentFilters`; **desde a adequação LGPD
+(01-03) renda não filtra público** e segmento/regra com esse filtro é recusado (ver "Adequação LGPD"). O limite tem teto de R$ 2.000 (`noTetoLimite`), por isso PF3/PF4 aparecem quase vazios.
 **Limite zero/vazio = comércio credenciado**: `ENVIAVEL_WHERE` o exclui de todo público de campanha e o envio
-bloqueia o evento por garantia. `POST /api/segments/presets/perfis-renda` cria/atualiza os segmentos prontos
-(`PERFIL_RENDA_PRESETS`) e `GET /api/dashboard/perfis-renda` alimenta o card do dashboard.
+bloqueia o evento por garantia. `POST /api/segments/presets/perfis-renda` está desativado (os presets PF1–PF4 saíram) e
+`GET /api/dashboard/perfis-renda` alimenta o card do dashboard (só estatística).
 
 ### Etapa de uso real (recorrência e dias sem uso)
 
@@ -250,7 +289,7 @@ extrato. SQL em `backend/prisma/sql/2026-10-uso-real-cliente.sql` (rodar antes d
 `services/campaignPerfil.ts` quebra o resultado da campanha por PF1–PF4 (limite atual do cliente; controle comparado
 dentro do mesmo perfil) — `porPerfil` em `GET /api/campaigns/:id/report`. `services/dataFreshness.ts` avalia se o
 extrato de compras está em dia (limite 3 dias; `GET /api/dashboard/frescor`, aviso no dashboard e no assistente).
-O gatilho de automação `ETAPA_PERFIL` (condição `etapaUso`, `perfilRenda`, `comSaldo`) dispara por etapa/perfil e
+O gatilho de automação `ETAPA_PERFIL` (condição `etapaUso`, `comSaldo`; regra com `perfilRenda` não dispara) dispara por etapa e
 **não roda com extrato velho** ou ausente.
 
 ### Nota de saúde por uso real
@@ -278,7 +317,7 @@ telefones sempre mascarados. Tela `/inbox` (leitura, atualização por polling d
 
 ### Inbox: resposta automática, aviso de mensagem nova e tela cheia
 
-**Resposta automática** (`services/whatsappAutoReply.ts`): o número é canal só de avisos; quem escreve recebe `AUTO_REPLY_PADRAO` (manda ao suporte (79) 99837-2540) ou o texto
+**Resposta automática** (`services/whatsappAutoReply.ts`): o número é canal só de avisos; quem escreve recebe o padrão do controlador (`autoReplyPadraoDo`: nome do controlador, contato do encarregado e "responda SAIR"; sem eles, o neutro `AUTO_REPLY_PADRAO`) ou o texto
 da conta (`WhatsAppAccount.autoReplyText`, nulo = padrão; `autoReplyEnabled`, ligada por padrão). O webhook chama `maybeAutoReply` depois de `storeInboundMessage`: responde a TODA mensagem NOVA do cliente (reenvio da Meta não conta), nunca a opt-out (PARAR/SAIR), mas no máximo
 `AUTO_REPLY_MAX` (3) vezes por conversa em 24 h corridas (conta os `WaMessage` SAIDA `automatic=true` da janela; sem coluna de controle; envio recusado pela Meta não grava, então não conta). Vai como texto livre dentro da janela de 24h que a mensagem do cliente acabou de abrir; grava `WaMessage.automatic=true` (a tela mostra "🤖 Resposta
 automática") e não zera o não lido. Nunca lança (o webhook não pode falhar por isso). `GET/PUT /api/inbox/auto-reply` (PUT só ADMIN, auditado) alimenta o painel "Resposta automática"
@@ -339,7 +378,7 @@ das duas; cada resposta sai pela conexão de ONDE a conversa veio. A Z-API é um
 `parseZapiWebhook` (só `ReceivedCallback` de contato individual, ignora grupo/canal/`fromMe`/edição; `MessageStatusCallback` vira sent/delivered/read). Webhook PÚBLICO
 `POST /api/integrations/webhooks/zapi/:secret` (`routes/zapiWebhook.ts`; a Z-API não assina, então segredo na URL + conferência do `instanceId`): grava na MESMA Inbox via `storeInboundMessage` (liga ao
 cliente pelo telefone, opt-out PARAR/SAIR vale), baixa a mídia na hora para `WaMediaBlob` (`zapiMedia.ts`: só https e host com nome, até 4 MB; `mediaId="zapi"` marca origem) e **não** manda resposta
-automática (essa é só do número da Meta). Responder pela Inbox em conversa da Z-API (`sendZapiReply` em `whatsappReply.ts`): só texto, SEM janela de 24h, sem template, sem anexo (ainda). Campanha com Z-API
+automática (essa é só do número da Meta). Responder pela Inbox em conversa da Z-API (`sendZapiReply` em `whatsappReply.ts`): só texto, só dentro da janela de 24h (LGPD), sem template, sem anexo (ainda). Campanha com Z-API
 ativa (`campaignQueue.resolveProviders`): adaptador `channels/zapi.ts` manda só o TEXTO do template (variáveis preenchidas; sem imagem/botão/link rastreado), com pausa aleatória e `delayMessage`, em lotes de
 no máximo `ZAPI_BATCH_MAX` (4) por chamada (a tela repete); sem Z-API configurada o disparo é BLOQUEADO (não cai na Meta). O assistente (`campaignWizard.ts`) avisa o risco e que imagem/botão não vão. Tela:
 Configurações → WhatsApp (`components/WhatsAppProviderCard.tsx`, só ADMIN): escolha da conexão ativa (só aceita configurada), instância/token/token de segurança, Testar conexão, QR code (renova a cada
@@ -411,7 +450,7 @@ de cada importação de clientes e no job diário de snapshot) — assim os filt
 (`diasAberturaNaFaixa`); cidade sem ciclo não entra em nenhum. `routes/ciclos.ts`: `GET /api/ciclos` (cadastro + cidades da base sem ciclo), `PUT /api/ciclos` (ADMIN, tabela inteira),
 `GET /api/ciclos/proximos` (card do Dashboard: abriu há ≤2 dias ou abre em ≤7), `GET /api/ciclos/audiencia?cidadeKey=` (ids aptos + mensagem para "Criar campanha"). Telas: `/ciclos`
 (preenche a tabela da TopConta: Natal 6, Carmópolis 7, Itaporanga e N. S. da Glória 10, Lagarto/Itabaianinha/Boquim/Luziânia 15), card no Dashboard e seção em Segmentos. **Fase 2:** gatilho de automação `CICLO_ABERTO` (`automationEngine.ts`): casa quem tem `diaCicloAbertura` igual ao de uma cidade que abriu há `diasAposAbertura` dias
-(default 0 = no dia), opcionalmente só `cidades` escolhidas (chaves de `CicloCidade`), `perfilRenda`, `etapaUso` (exige extrato em dia) e `comSaldo` (o saldo vem da última planilha, pode não
+(default 0 = no dia), opcionalmente só `cidades` escolhidas (chaves de `CicloCidade`), `etapaUso` (exige extrato em dia) e `comSaldo` (o saldo vem da última planilha, pode não
 refletir a renovação). `matchClients` devolve **um grupo por cidade** e `runRule` executa a ação por grupo: uma campanha por cidade (`Automação: <regra> · <cidade> (<data>)`, resultado separado e
 sem repetir no mesmo dia). `POST /api/automations/:id/run` (`simular: true` só conta por cidade) alimenta "Simular"/"Rodar agora" na tela. Limite do plano Hobby: o motor roda 1x/dia (~07h BRT) e a
 ação de campanha envia só `throttlePerMin` (default 60) mensagens por execução; o resto depende do "Disparar lote"/cron de disparo — para públicos grandes (Natal) o caminho mais completo é o botão

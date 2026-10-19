@@ -121,7 +121,12 @@ export async function runCampaignDispatchJob() {
   return { checked: pendingCampaigns.length, results };
 }
 
-/** Política de retenção/anonimização (LGPD) — normalmente 1x/dia. */
+/**
+ * Política de retenção/anonimização (LGPD) — normalmente 1x/dia (cron `/api/cron/retention`). Num passe só:
+ * clientes inativos (04-01), contas encerradas há mais de `retentionDaysAfterClosure` (04-06), resíduo de
+ * anonimizações antigas, destinatários de listas manuais, Inbox e mídias (04-02) e o estado de desfazer
+ * importação com mais de 30 dias (04-04). Nenhum cron novo: tudo entra no job diário que já existe.
+ */
 export async function runRetentionJob() {
   return runRetentionSweep(prisma);
 }

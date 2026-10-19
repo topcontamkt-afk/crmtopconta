@@ -1,0 +1,326 @@
+[
+ {
+  "id": "02-09",
+  "titulo": "Revogação ou oposição recebida por telefone, e-mail, áudio ou texto longo não pode ser aplicada pela tela: o pedido REVOGACAO/OPOSICAO é fechado como ATENDIDO sem gerar opt-out, e contato de lista fora da base não tem nenhuma rota de descadastro manual",
+  "severidade": "alta",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-8",
+   "docs/lgpd/fontes/lei-13709.md#art-18",
+   "docs/lgpd/fontes/lei-13709.md#art-10",
+   "docs/lgpd/fontes/anpd-guia-legitimo-interesse.md#p-52"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/routes/titular.ts",
+    "linha": 124,
+    "trecho": "data: { status: parsed.data.status, resposta: parsed.data.resposta, respondidoEm },  (fechar o pedido só grava status/resposta; nenhuma chamada a registrarOptOutTelefone ou suprimir, qualquer que seja o tipo)"
+   },
+   {
+    "arquivo": "backend/src/routes/titular.ts",
+    "linha": 54,
+    "trecho": "telefone: z.string().max(30).optional(), // só para quem não está na base: guardado mascarado"
+   },
+   {
+    "arquivo": "frontend/src/pages/PedidosTitular.tsx",
+    "linha": 36,
+    "trecho": "REVOGACAO: \"Revogação / descadastro\","
+   },
+   {
+    "arquivo": "frontend/src/pages/ClientProfile.tsx",
+    "linha": 217,
+    "trecho": "<p>Autorização de comunicação: {client.autorizacaoComunicacao ? \"Sim\" : \"Não\"}</p>  (só exibe; a ficha tem 'Registrar pedido do titular', 'Suspender tratamento' e 'Eliminar', mas nenhum botão de descadastro)"
+   },
+   {
+    "arquivo": "frontend/src/pages/Inbox.tsx",
+    "linha": 546,
+    "trecho": "{thread.cliente?.optOutEm && <span className=\"inbox-chip closed\">Pediu descadastro</span>}  (Inbox só mostra o estado; não há ação para marcar opt-out da conversa)"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappInbox.ts",
+    "linha": 161,
+    "trecho": "if (candidates.length && [\"text\", \"button\", \"interactive\"].includes(m.type) && isOptOutMessage(m.body)) {  (áudio nunca é reconhecido; texto só até 15 palavras, whatsappPayload.ts:184)"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 369,
+    "trecho": "await registrarOptOutTelefone(prisma, tenantId, { telefone: existing.telefone, canal: \"MANUAL\", origem: \"operador\" });  (único caminho manual, só por API e só com clientId; grep 'registrarOptOutTelefone|suprimir(' em backend/src: chamadores são whatsappInbox.ts:162, integrations.ts:514, clients.ts:369/444 e retention.ts:223; nada em titular.ts nem rota para telefone sem cliente; grep 'clients/bulk|autorizacaoComunicacao: false' em frontend/src: vazio)"
+   }
+  ],
+  "cenario": "(1) Um titular da base liga para o suporte ou manda e-mail dizendo que não quer mais receber mensagens. O OPERATOR usa o botão 'Registrar pedido do titular' da ficha (ClientProfile.tsx:162), escolhe 'Revogação / descadastro' e o ADMIN depois fecha o pedido como ATENDIDO, com a resposta 'descadastrado'. Nada muda no cadastro: autorizacaoComunicacao continua true, não há SupressaoTitular, e a próxima campanha de segmento ou automação (CICLO_ABERTO, INATIVO_30_DIAS etc.) envia de novo. O registro do pedido passa a dizer que o direito foi atendido quando não foi. O único jeito pela tela é 'Suspender tratamento' (bloqueio do art. 18, IV), que é outro direito, some com o cliente das listagens e vale só para aquele cadastro, não para o telefone. (2) Um contato de lista manual que não é cliente responde à campanha com um áudio 'não me mandem mais isso', ou com um texto de mais de 15 palavras. O detector não pega (áudio não é lido, texto longo é ignorado). O operador ouve na Inbox, mas não tem botão, e também não existe rota de API que grave opt-out para telefone sem cliente: PATCH /clients/:id e POST /clients/bulk exigem um Client. Registrar um PedidoTitular REVOGACAO com o telefone também não suprime nada. O número continua passando em matchManualAudience e recebe a próxima lista. A revogação deveria ser gratuita e facilitada (art. 8º, §5º; art. 18, IX), a oposição ao legítimo interesse precisa ser atendida (art. 18, §2º), e o Guia LI (p. 52) exige um canal de fácil acesso para se descadastrar. Hoje só funciona para quem escreve a palavra-chave no WhatsApp ou manda STOP por SMS. Este é o resto do item (b) de 02-04 que continua aberto, agora agravado pela tela de pedidos, que registra o pedido sem aplicá-lo.",
+  "papel": "ambos",
+  "correcao": "(a) backend/src/routes/titular.ts: no POST /:id/fechar com status ATENDIDO e tipo REVOGACAO ou OPOSICAO, aplicar o opt-out antes de fechar: chamar registrarOptOutTelefone (services/privacy.ts) com o telefone do cliente (clientId) ou com o telefone informado na criação. Para isso, guardar no PedidoTitular, além do telefone mascarado, o phoneHash (HMAC com cpfSalt, como já é feito em SupressaoTitular), ou pedir o telefone de novo ao fechar. Gravar origem 'pedido_titular' e pedidoId na supressão. Recusar ATENDIDO se não houver telefone nem cliente. (b) Rota POST /api/titular/opt-out (ADMIN/OPERATOR) que receba telefone e/ou clientId e chame registrarOptOutTelefone. Isso cobre contato de lista fora da base. Auditar como OPT_OUT_MANUAL com o telefone mascarado. (c) frontend: botão 'Registrar descadastro' em ClientProfile.tsx e na conversa da Inbox.tsx (lá pelo waId da conversa, mesmo sem cliente), e ação em massa OPT_OUT em Clients.tsx, todos chamando a rota de (b) ou o PATCH/bulk existente. (d) Testes em titular.test.ts: fechar REVOGACAO grava a supressão e o cliente sai de buildAudience; e rota de opt-out para telefone sem cliente bloqueia o envio em processQueueBatch.",
+  "tipo": "codigo",
+  "multi_tenant": "n/a (a supressão já é por tenant com o cpfSalt do tenant; nada novo vira configuração)",
+  "severidade_original": "alta",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Conferi as evidências. backend/src/routes/titular.ts:122-125: POST /:id/fechar só grava status, resposta e respondidoEm, sem olhar o tipo do pedido e sem chamar registrarOptOutTelefone ou suprimir. Na criação (linhas 71-80) o telefone de quem está fora da base é guardado apenas mascarado, então nem dá para aplicar a supressão depois. Busquei registrarOptOutTelefone e suprimir( em backend/src: só aparecem em whatsappInbox.ts:162, integrations.ts:514 (SMS), clients.ts:369 (PATCH), clients.ts:444 (bulk OPT_OUT) e retention.ts:223. Nenhuma rota grava opt-out para telefone sem Client. No frontend o opt-out manual não está ligado em lugar nenhum: o PATCH de ClientProfile.tsx:65-73 só envia nome, cidade, telefone e email; a linha 217 só exibe a autorização; não há chamada a /clients/bulk; Inbox.tsx:546 só mostra o chip. O detector automático só lê text, button e interactive (whatsappInbox.ts:161) e para em 15 palavras (whatsappPayload.ts:184). As mitigações são parciais e não mudam a severidade: 'Suspender tratamento' (ClientProfile.tsx:82-92) é o bloqueio do art. 18, IV e só serve para cliente da base; PARAR/SAIR por WhatsApp e STOP por SMS funcionam. Âncoras conferidas: lei-13709.md art-8 (linha 211, §5º revogação gratuita e facilitada), art-18 (linha 395, inciso IX e §2º oposição), art-10 (linha 255) e guia LI p-52 (linha 1332, canal de fácil acesso para se descadastrar e se opor). Mantenho alta: a revogação recebida por telefone ou e-mail é registrada como ATENDIDA sem efeito, o titular volta a receber mensagem depois de ter pedido opt-out, e quem está fora da base não tem como ser atendido.",
+  "tambem": []
+ },
+ {
+  "id": "03-09",
+  "titulo": "Titular que não é Client (contato de lista manual ou quem só escreveu no WhatsApp) não tem relatório nem eliminação individual: o pedido pode ser registrado e fechado como atendido sem que nada seja apagado, e os dados só saem pela retenção, em até 1095 dias",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-18",
+   "docs/lgpd/fontes/lei-13709.md#art-19",
+   "docs/lgpd/fontes/lei-13709.md#art-16",
+   "docs/lgpd/fontes/lei-13709.md#art-15"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 469,
+    "trecho": "router.post(\"/:id/anonymize\", requireRole(\"ADMIN\"), async (req, res) => {  // l.473-474: findFirst({ where: { id: req.params.id, tenantId } }) -> 404 \"Cliente não encontrado\""
+   },
+   {
+    "arquivo": "backend/src/services/titular.ts",
+    "linha": 77,
+    "trecho": "const client = await prisma.client.findFirst({ where: { id: clientId, tenantId } });\n  if (!client) return null;"
+   },
+   {
+    "arquivo": "backend/src/services/retention.ts",
+    "linha": 210,
+    "trecho": "const client = await prisma.client.findFirst({ where: { id: clientId, tenantId } });\n  if (!client) return null;"
+   },
+   {
+    "arquivo": "backend/src/routes/titular.ts",
+    "linha": 54,
+    "trecho": "telefone: z.string().max(30).optional(), // só para quem não está na base: guardado mascarado"
+   },
+   {
+    "arquivo": "frontend/src/pages/PedidosTitular.tsx",
+    "linha": 135,
+    "trecho": "Telefone (se não for cliente da base; fica guardado mascarado)"
+   },
+   {
+    "arquivo": "backend/src/routes/inbox.ts",
+    "linha": 158,
+    "trecho": "nome: c.client?.nome ?? c.contactName ?? \"Contato sem cadastro\","
+   },
+   {
+    "arquivo": "backend/src/services/retention.ts",
+    "linha": 502,
+    "trecho": "OR: [{ client: { anonymizedAt: { not: null } } }, { clientId: null, createdAt: { lte: cutoff } }],"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappInbox.ts",
+    "linha": 82,
+    "trecho": "clientId: client?.id ?? null,"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 99,
+    "trecho": "retentionDays     Int      @default(1095) // 3 anos default (LGPD)"
+   },
+   {
+    "arquivo": "backend/src/services/privacy.ts",
+    "linha": 137,
+    "trecho": "/** documentos das supressões por ELIMINACAO de cada telefone (null = eliminação sem documento, ex.: lista manual) */  // mas suprimir(..., motivo: \"ELIMINACAO\") só é chamado em retention.ts:223 (grep 'suprimir(' backend/src -> privacy.ts:245 OPT_OUT e retention.ts:223)"
+   }
+  ],
+  "cenario": "Uma pessoa que não está na base de clientes recebe uma campanha de lista manual (a planilha subida em /campaigns/manual guarda nome, telefone, hash e máscara do CPF e o limite em CampaignRecipient) e responde pelo WhatsApp (a mensagem cria uma Conversation sem clientId, com nome do perfil, texto e mídia). O mesmo vale para quem só escreveu ao número da Meta ou da Z-API sem nunca ter sido cliente. Ela pede: \"quero saber que dados vocês têm de mim e quero que apaguem\". O operador consegue registrar o pedido em /clients/pedidos-titular, com o telefone guardado mascarado, mas o sistema não oferece nenhuma ação para atendê-lo. O relatório do titular (GET /api/clients/:id/relatorio-titular) e a eliminação (POST /api/clients/:id/anonymize) exigem o id de um Client e respondem 404; anonymizeClient devolve null sem cliente, e os passos que limpam conversas pelo waId e destinatários pelo telefone (retention.ts:233-279) só rodam a partir de um cliente. Não existe rota que anonimize uma conversa ou um destinatário de lista (grep de router.delete em inbox.ts, campaigns.ts e titular.ts e de conversation.delete/campaignRecipient.delete em backend/src: nada fora do purge e da retenção). O ADMIN consegue fechar o pedido ELIMINACAO como ATENDIDO, porque POST /api/titular/pedidos/:id/fechar não confere nada, enquanto texto, mídia e número continuam na Inbox até inboxRetentionDays (nulo = retentionDays, 1095 dias por padrão; mídia em 90 dias) e o destinatário de lista até retentionDays depois do createdAt. O pedido vence em 15 dias sem que o operador consiga atendê-lo pelo sistema; as saídas que restam são reduzir o prazo de retenção do tenant inteiro ou rodar SQL manual. O acesso existe só em pedaços (lista de destinatários de cada campanha com telefone mascarado e a Inbox), sem a declaração completa do art. 19, II. A comunicação do titular encerra o tratamento (art. 15, III) e obriga a eliminar (art. 16), e eliminação e acesso são direitos (art. 18, II, IV e VI); esses dados não têm base no art. 16 para serem guardados, porque são contatos de campanha sem relação de cliente. Para clientes da base o direito é atendido, por isso a severidade é media.",
+  "papel": "ambos",
+  "correcao": "Extrair de anonymizeClient (services/retention.ts) as etapas 2a, 2b e 2c, que já tratam conversas pelo número, destinatários pelo telefone/documento e mensagens de campanha por recipientId, para uma função eliminarContato(prisma, tenantId, { telefone, docHash? }) (ou anonymizeContato): anonimiza as conversas pelas variantes do número (waId), apaga WaMediaBlob, zera body/mediaFilename/mediaId/errorText/wamid, anonimiza CampaignRecipient pelo telefone, zera providerMsgId/error dos MessageEvent ligados e grava antes a supressão ELIMINACAO só por phoneHash (o caso 'eliminação sem documento' já é tratado por contatoSuprimido em privacy.ts:209-218). Se existir um Client com o número, delega a anonymizeClient. Expor POST /api/titular/pedidos/:id/eliminar-contato (ADMIN, telefone no corpo e nunca na URL, logAudit sem PII, fecha o pedido como ATENDIDO) e, opcionalmente, POST /api/inbox/conversations/:id/anonymize (ADMIN, com motivo e frase de confirmação). Criar relatorioContato(prisma, tenantId, telefone) em services/titular.ts, que agrega CampaignRecipient (variantes do telefone), MessageEvent por recipientId e Conversation/WaMessage pelo waId, com o mesmo bloco de controlador/compartilhamento de relatorioTitular. Recusar o fechamento como ATENDIDO de pedido ELIMINACAO enquanto houver conversa ou destinatário com aquele número. Na tela PedidosTitular.tsx, mostrar os botões 'Relatório' e 'Eliminar contato' quando o pedido não tiver clientId.",
+  "tipo": "codigo",
+  "multi_tenant": "n/a (consultas sempre por tenantId e hash do telefone com o Tenant.cpfSalt, como o resto da supressão; a rotina usa os prazos do próprio tenant)",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "[03-09] Evidências conferidas. Em backend/src/routes/clients.ts:469-474, /:id/anonymize exige um Client do tenant e devolve 404 se não houver. Em services/titular.ts:77-78, relatorioTitular devolve null sem Client. Em routes/titular.ts:54, o telefone é aceito e guardado só mascarado. As únicas rotas do pedido são GET, POST e /:id/fechar, sem nenhuma ação de atender. O grep por conversation/campaignRecipient update ou delete fora de testes só acha retention.ts (anonymizeClient, l.254/275, que pede um Client; job, l.394/507) e atualizações operacionais de inbox e reply. A retenção alcança o destinatário sem clientId só após retentionDays (retention.ts:453 e 502; schema.prisma:99, padrão 1095) e a Inbox após inboxRetentionDays ?? retentionDays (retention.ts:373). suprimir(ELIMINACAO) só é chamado em retention.ts:223. Em frontend/src/pages/PedidosTitular.tsx:200, o pedido sem clientId mostra só o telefone mascarado, sem ação. Âncoras art-16, art-18 e art-19 existem (l.373, 395 e 439). Mitigação parcial: o opt-out por telefone vale para esses contatos (privacy.ts:245) e o acesso existe em pedaços. Mantive media porque a população afetada é restrita, há acesso parcial e a controladora ainda pode atender por fora do sistema. [04-09] retention.ts:208-209: anonymizeClient devolve null quando não há Client; os passos 2a e 2b (retention.ts:233-279) só rodam a partir de um cliente. titular.ts:54 e PedidosTitular.tsx:133-136 aceitam pedido só com telefone. O fechamento em titular.ts:120-145 grava ATENDIDO sem conferir nada. grep de router.delete, conversation.update/delete, campaignRecipient.update e waMediaBlob.delete em src/routes e src/services só acha a retenção (retention.ts:384-397 e 502-510) e atualizações que não anonimizam (inbox.ts:327; privacy.ts:253). inboxRetentionDays nulo vale retentionDays (schema.prisma:99 e 123); mídia em 90 dias (schema.prisma:124). Âncora art-15 existe (l.359). Severidade media mantida: o direito é atendido para quem é cliente da base, que é a maioria dos titulares. [Consolidação] 03-09 e 04-09 têm a mesma causa (anonymizeClient e relatorioTitular exigem um Client; nenhuma rotina parte do telefone) e a mesma correção (extrair a eliminação por contato de anonymizeClient). A evidência inbox.ts:158 foi conferida na consolidação: a linha está correta.",
+  "tambem": ["04-09"]
+ },
+ {
+  "id": "05-08",
+  "titulo": "Gravar tentativa de acesso indevido (05-03) abriu um caminho sem autenticação que bifurca a cadeia de hash do AuditLog: logins errados em paralelo fazem o verify-integrity acusar quebra e parar de conferir o resto",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-46",
+   "docs/lgpd/fontes/lei-13709.md#art-49",
+   "docs/lgpd/fontes/lei-13709.md#art-6",
+   "docs/lgpd/fontes/anpd-res-15-2024-incidentes.md#anexo-art-10"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/middleware/audit.ts",
+    "linha": 15,
+    "trecho": "const tip = await prepareTenantChain(params.tenantId);"
+   },
+   {
+    "arquivo": "backend/src/middleware/audit.ts",
+    "linha": 32,
+    "trecho": "await prisma.auditLog.create({ data: { ...entry, details: entry.details as any, prevHash, hash } });"
+   },
+   {
+    "arquivo": "backend/src/services/auditIntegrity.ts",
+    "linha": 34,
+    "trecho": "Sem lock explícito na leitura do último hash: sob escrita concorrente real (rara neste volume de auditoria) duas chamadas a logAudit() do mesmo tenant poderiam ler o mesmo prevHash e gerar um \"fork\""
+   },
+   {
+    "arquivo": "backend/src/services/auditIntegrity.ts",
+    "linha": 271,
+    "trecho": "return quebra(row, \"ELO\");"
+   },
+   {
+    "arquivo": "backend/src/routes/auth.ts",
+    "linha": 66,
+    "trecho": "logTentativaAcesso({ tenantId: user.tenantId, userId: user.id, action: ACOES_ACESSO_INDEVIDO.LOGIN_FALHA, details: { email: emailMascarado, motivo: \"CONTA_BLOQUEADA\", ..."
+   },
+   {
+    "arquivo": "backend/src/routes/auth.ts",
+    "linha": 84,
+    "trecho": "details: { email: emailMascarado, motivo: \"SENHA_INVALIDA\", tentativa: falha.count, ...origem },"
+   },
+   {
+    "arquivo": "backend/src/routes/auth.ts",
+    "linha": 33,
+    "trecho": "router.post(\"/login\", async (req, res) => {   (sem limitador; grep 'Limiter' em app.ts/auth.ts só acha twoFactorVerifyLimiter)"
+   },
+   {
+    "arquivo": "docs/lgpd/artefatos/procedimento-incidentes.md",
+    "linha": 29,
+    "trecho": "anormais nos logs da Vercel, notificações de login bloqueado, divergência na cadeia de hash da trilha de auditoria"
+   }
+  ],
+  "cenario": "A falta de lock na leitura do último hash foi aceita na auditoria de segurança (findings.md, item 11) porque a escrita concorrente seria \"rara neste volume\". A correção de 05-03 desfez essa premissa: hoje qualquer pessoa na internet que saiba o e-mail de um usuário do CRM (e-mails corporativos são fáceis de adivinhar) grava no AuditLog daquele controlador sem autenticar. POST /api/auth/login não tem rate limit, e a tentativa grava LOGIN_FALHA até com a conta já bloqueada (auth.ts:66). Basta disparar umas 10 tentativas com senha errada ao mesmo tempo. Cada uma faz prepareTenantChain → findFirst do último hash → create, e cada operação Prisma é uma transação separada. Duas tentativas leem o mesmo prevHash e gravam linhas irmãs. Em verifyAuditChain, a segunda linha não aponta para a primeira, o laço devolve quebra ELO (auditIntegrity.ts:271) e para ali. Daí em diante GET /api/audit-logs/verify-integrity responde valid:false para sempre naquele ponto, e nenhuma linha posterior é conferida. Depois de um incidente, o controlador não consegue mostrar que a trilha usada para levantar o escopo (quem exportou, quem leu, Res. 15, Anexo, art. 10, §1º) não foi alterada. Uma alteração real feita depois da bifurcação passa sem detecção, porque o verificador já parou antes. O próprio procedimento de incidentes usa a divergência da cadeia como sinal de alerta (procedimento-incidentes.md:29), e esse sinal passa a disparar falso positivo provocado por terceiro. O mesmo acontece, com menos frequência, entre gravações legítimas simultâneas do mesmo tenant (o void logAcessoNegado em requireRole, leituras em volume, jobs).",
+  "papel": "operador",
+  "correcao": "Serializar o encadeamento por tenant em backend/src/middleware/audit.ts e services/auditIntegrity.ts. Opção recomendada: fazer leitura do topo e insert numa única transação com pg_advisory_xact_lock(hashtext(tenantId)), via tenantRaw/runRawInTenantTx (config/db.ts), que já abre transação com app.tenant_id. Alternativa sem SQL cru: índice único parcial em AuditLog(tenantId, prevHash) e nova tentativa no logAudit em caso de violação de unicidade (P2002), relendo o topo. Em routes/auth.ts, colocar um limitador por IP no /login (como o twoFactorVerifyLimiter) e não gravar uma linha por tentativa enquanto a conta estiver bloqueada: agregar, por exemplo uma linha por janela com contador. Em verifyAuditChain, distinguir bifurcação (duas linhas com o mesmo prevHash, ambas com hash válido) de adulteração e continuar a verificação depois dela, para que uma bifurcação não esconda alterações posteriores. Atualizar a limitação descrita em auditIntegrity.ts:34.",
+  "tipo": "codigo",
+  "multi_tenant": "n/a (mecanismo comum da trilha; o limiar de agregação de tentativas pode ser por Tenant, se desejado)",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Conferido: logAudit lê o topo (audit.ts:15, prepareTenantChain → lastTenantEntry findFirst em auditIntegrity.ts:124-131) e grava em operação separada (audit.ts:32). O hook de tenant abre uma transação por query (tenantGuard.ts:296). Não há lock nem índice único em AuditLog(tenantId, prevHash): schema.prisma:511-531 só tem @@index([tenantId, createdAt]). A limitação está admitida em auditIntegrity.ts:34-40. verifyAuditChain para no primeiro ELO quebrado (auditIntegrity.ts:270-271) e não confere as linhas seguintes. POST /login (auth.ts:33) não tem limitador: rateLimit.ts só exporta twoFactorVerifyLimiter, webhookLimiter e importLimiter, e app.ts:83 monta /api/auth sem limitador. O comentário em auth.ts:49 ('limitada por IP no rate limit') não corresponde ao código. A tentativa com conta bloqueada (auth.ts:63-67) grava sem passar pelo bcrypt, então é rápida e se dispara em paralelo com facilidade. Um terceiro sem autenticação que saiba o e-mail de um usuário consegue provocar a bifurcação. O procedimento de incidentes usa a divergência da cadeia como alerta (procedimento-incidentes.md:29). Âncoras art-46, art-49, art-6 e anexo-art-10 existem. A severidade média se mantém: a trilha continua existindo, mas a prova de integridade das linhas posteriores fica comprometida.",
+  "tambem": []
+ },
+ {
+  "id": "05-09",
+  "titulo": "GET /api/campaigns/:id/destinatarios entrega a qualquer papel, inclusive VIEWER, a lista nominal inteira da campanha (até 5000 contatos: nome, limite disponível da planilha, uso e valor movimentado) sem paginação, sem restrição por papel e sem registro no AuditLog",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-46",
+   "docs/lgpd/fontes/lei-13709.md#art-48",
+   "docs/lgpd/fontes/anpd-res-15-2024-incidentes.md#anexo-art-9",
+   "docs/lgpd/fontes/lei-13709.md#art-6",
+   "docs/lgpd/fontes/lei-13709.md#art-37"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/routes/campaigns.ts",
+    "linha": 190,
+    "trecho": "router.get(\"/:id/destinatarios\", async (req, res) => {   (sem requireRole e sem logAudit no handler, l.190-239)"
+   },
+   {
+    "arquivo": "backend/src/routes/campaigns.ts",
+    "linha": 197,
+    "trecho": "prisma.campaignRecipient.findMany({\n      where: { tenantId, campaignId: campaign.id }, ... orderBy: { nome: \"asc\" },"
+   },
+   {
+    "arquivo": "backend/src/routes/campaigns.ts",
+    "linha": 213,
+    "trecho": "nome: rec.nome,\n      telefone: maskPhone(rec.telefone),\n      naBase: !!rec.clientId, ... usou ... diasAteUso ... valorMovimentado"
+   },
+   {
+    "arquivo": "backend/src/routes/campaigns.ts",
+    "linha": 215,
+    "trecho": "limiteDisponivel: rec.limiteDisponivel === null ? null : Number(rec.limiteDisponivel),"
+   },
+   {
+    "arquivo": "backend/src/routes/campaigns.ts",
+    "linha": 226,
+    "trecho": "valorMovimentado: ev ? Number(ev.usos.reduce((a, u) => a + u.valorPrincipal, 0).toFixed(2)) : null,"
+   },
+   {
+    "arquivo": "backend/src/routes/campaigns.ts",
+    "linha": 59,
+    "trecho": "const MAX_MANUAL_ROWS = 5000;"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 128,
+    "trecho": "if (skip + items.length > LEITURA_VOLUME_LIMIAR) {\n    await logAudit({ ... action: \"READ_CLIENTS_BULK\" ..."
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 132,
+    "trecho": "action: \"READ_CLIENTS_BULK\",   (a lista de clientes registra leitura acima de 50 linhas; a de destinatários não)"
+   },
+   {
+    "arquivo": "backend/src/routes/dashboard.ts",
+    "linha": 286,
+    "trecho": "await logAudit({ tenantId, userId, action: \"READ_ANIVERSARIANTES\", target: \"Client\", details: { quantidade: aniversariantesRaw.length } });"
+   },
+   {
+    "arquivo": "CLAUDE.md",
+    "linha": 141,
+    "trecho": "conteúdo; leitura em volume auditada."
+   }
+  ],
+  "cenario": "A correção de 01-04 estabeleceu que leitura nominal em volume deixa trilha: READ_CLIENTS_BULK na lista de clientes e READ_ANIVERSARIANTES no dashboard. O CLAUDE.md registra isso como garantia (\"leitura em volume auditada\"). A rota de destinatários ficou de fora. Um usuário com papel VIEWER ou ANALYST (ou o contratado que opera os disparos, OPERATOR) com acesso à área Campanhas, ou uma conta comprometida, abre o relatório de cada campanha por planilha ou chama a API direto. GET /api/campaigns/:id/destinatarios só exige requireAuth e devolve de uma vez, sem paginação, todos os contatos da lista (até 5000): nome, telefone mascarado, se é cliente da base, status do envio, se clicou, o limite disponível vindo da planilha e, para clientes, se usou o cartão, em quantos dias e o valor movimentado. A lista inclui não clientes. A tela mostra 300 linhas, mas a resposta JSON traz tudo. O mesmo dado em CSV exige ADMIN/OPERATOR/ANALYST e é auditado (EXPORT_CAMPAIGN_REPORT); por este JSON o VIEWER contorna as duas coisas, e a lista de clientes do VIEWER nem traz limite/saldo. Nada vai para o AuditLog. Quando o controlador investiga um incidente, a trilha mostra os exports e a lista de clientes, mas não quais listas de campanha foram lidas, por quem e quando. Sem isso, ele não consegue dizer quais titulares tiveram os dados financeiros acessados (conteúdo da comunicação do Anexo, art. 9º, da Res. 15/2024; art. 48, §1º, II) nem demonstrar as medidas (art. 6º, X). Não é pendência conhecida: 'Decidir depois' cobre só a leitura de conversa e o download de mídia na Inbox. O telefone já sai mascarado e o acesso exige usuário autenticado do próprio tenant, por isso não é crítica.",
+  "papel": "operador",
+  "correcao": "Em backend/src/routes/campaigns.ts (GET /:id/destinatarios): gravar logAudit({ action: 'READ_CAMPAIGN_RECIPIENTS', target: 'Campaign', targetId: campaign.id, details: { quantidade } }), sem PII; a campanha já identifica o conjunto, como no EXPORT_CAMPAIGN_REPORT. Pode ser sempre ou acima de LEITURA_VOLUME_LIMIAR (reusar a constante de routes/clients.ts). Aplicar a regra de papel da lista de clientes: requireRole('ADMIN','OPERATOR','ANALYST') ou, para VIEWER, omitir nome, limiteDisponivel e valorMovimentado (reusar podeVerContato/comContatoPorPapel de routes/clients.ts como critério). Paginar a resposta (a tela já mostra só 300). Acrescentar um teste em campaigns.test.ts ao lado do caso '/destinatarios mostra o telefone mascarado'.",
+  "tipo": "codigo",
+  "multi_tenant": "Quais papéis veem valores financeiros de destinatários pode virar configuração por Tenant (decisão de need-to-know da controladora); o limiar de leitura em volume pode virar configuração junto com LEITURA_VOLUME_LIMIAR; a trilha é igual para todos.",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "[05-09] Conferido em campaigns.ts:190-239: a rota só tem router.use(requireAuth) (l.35), sem requireRole, sem logAudit e sem paginação. Ela devolve nome, telefone mascarado, limiteDisponivel (l.215), uso e valorMovimentado (l.226). A área 'campaigns' (areas.ts:74) só restringe por área, não por papel. O mesmo dado em CSV exige ADMIN/OPERATOR/ANALYST e gera auditoria (campaigns.ts:734/742, EXPORT_CAMPAIGN_REPORT l.717). A lista de clientes do VIEWER nem traz limite/saldo (LISTA_SELECT, clients.ts:28-38), pagina até 100 linhas e audita READ_CLIENTS_BULK (clients.ts:128-136). Âncoras art-46, art-48, art-6 e anexo-art-9 existem; o art. 48 §1º II pede 'informações sobre os titulares envolvidos'. [08-11] findMany sem take/paginação (:196-200); chamadas de logAudit em campaigns.ts só em :175, :285, :412, :453, :481 e :714; MAX_MANUAL_ROWS=5000 em :59; clients.ts:128 com LEITURA_VOLUME_LIMIAR=50 (:25); CLAUDE.md:141 promete 'leitura em volume auditada'; o relatório corta a lista nominal em 50 (campaigns.ts:545-549). A pendência 'Decidir depois' (pendencias-integracao.md:33) cobre só a Inbox. O art. 37 trata de registro das operações, não de log de acesso, e é a citação mais fraca; os arts. 46 e 6º, X sustentam o achado. [Consolidação] 05-09 e 08-11 apontam a mesma rota (campaigns.ts:190) e a mesma correção (logAudit + papel + paginação). Severidade media nos dois.",
+  "tambem": ["08-11"]
+ },
+ {
+  "id": "01-05",
+  "titulo": "`sexo` e a faixa etária (de `dataNascimento`) são importados e tratados para um gráfico demográfico agregado cuja finalidade não está declarada; o aviso de privacidade em rascunho só prevê nascimento para aniversário e não menciona sexo",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-6",
+   "docs/lgpd/fontes/lei-13709.md#art-9"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/cardAccountImport.ts",
+    "linha": 237,
+    "trecho": "sexo: raw.sexo?.trim() || undefined,"
+   },
+   {
+    "arquivo": "frontend/src/utils/importFields.ts",
+    "linha": 60,
+    "trecho": "{ key: \"sexo\", label: \"Sexo\", required: false, synonyms: [\"sexo\"] },"
+   },
+   {
+    "arquivo": "backend/src/routes/dashboard.ts",
+    "linha": 342,
+    "trecho": "prisma.client.groupBy({ by: [\"sexo\"], where: { tenantId, ...TRATAVEL_WHERE }, _count: true }),"
+   },
+   {
+    "arquivo": "backend/src/routes/dashboard.ts",
+    "linha": 329,
+    "trecho": "WHEN DATE_PART('year', AGE(NOW(), \"dataNascimento\")) < 26 THEN '18-25'"
+   },
+   {
+    "arquivo": "frontend/src/pages/Dashboard.tsx",
+    "linha": 486,
+    "trecho": "{perfil.porSexo.length === 0 ? ("
+   },
+   {
+    "arquivo": "docs/lgpd/artefatos/aviso-de-privacidade.md",
+    "linha": 24,
+    "trecho": "| Data de nascimento | Enviar mensagem de aniversário | {{legítimo interesse}} |"
+   },
+   {
+    "arquivo": "docs/lgpd/artefatos/registro-de-operacoes.md",
+    "linha": 42,
+    "trecho": "| 3 | Perfil demográfico | Data de nascimento, sexo, remuneração bruta e líquida | Aniversário: mensagem de felicitação. Renda: **só estatística agregada** ..."
+   }
+  ],
+  "cenario": "O operador sobe a aba \"SaldoCartao\"; autoMapColumns casa a coluna \"Sexo\" (importFields.ts:60) e prepareRow grava `Client.sexo` de cada titular (cardAccountImport.ts:237). O único leitor de `sexo` em backend/src e frontend/src (fora importação, retenção e testes) é GET /api/dashboard/perfil, que agrupa a base por sexo (dashboard.ts:342) e por faixa etária calculada de `dataNascimento` (dashboard.ts:326-336), exibidos no card de perfil do Dashboard (Dashboard.tsx:475-495). Nenhum segmento, template, automação ou campanha usa sexo. A finalidade desse tratamento não está informada: o rascunho do aviso ao titular (aviso-de-privacidade.md:22-26) lista nascimento só para \"mensagem de aniversário\" e não cita sexo, e o registro de operações (op. 3) lista sexo entre os dados sem dizer para que serve. Pelo art. 6º, I e III, e pelo art. 9º, I, o dado precisa de finalidade específica e informada, e a coleta deve se limitar ao necessário. Hoje um dado de RH vindo da folha é coletado para uma estatística que nenhum documento justifica. Severidade baixa: o uso é só agregado e interno, a lacuna é de necessidade e transparência, e o aviso ainda é rascunho.",
+  "papel": "controladora",
+  "correcao": "Decisão da controladora. (A) Recomendada: parar de importar `sexo`, removendo a entrada de CARD_ACCOUNT_FIELDS (frontend/src/utils/importFields.ts:60), a chave de CardAccountRow e a linha de prepareRow (backend/src/services/cardAccountImport.ts:50 e 237) e o bloco porSexo de GET /api/dashboard/perfil e do Dashboard.tsx. Depois, incluir `\"sexo\" = NULL` em backend/prisma/sql/2026-10-lgpd-minimizacao-dados.sql, sujeito à mesma confirmação da pendência 18. Manter a faixa etária só se for declarada. (B) Manter `sexo` e faixa etária como \"perfil demográfico agregado da base\": declarar essa finalidade no aviso (aviso-de-privacidade.md, linha de Data de nascimento e nova linha para sexo) e na op. 3 do registro de operações, com a base legal avaliada na LIA.",
+  "tipo": "decisao_negocio",
+  "multi_tenant": "Entra na mesma lista de campos opcionais de importação por Tenant sugerida em 01-01: cada controlador habilita ou não `sexo` e o perfil demográfico. O card do Dashboard só aparece quando o campo está habilitado.",
+  "severidade_original": "baixa",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Todas as evidências conferem: cardAccountImport.ts:50 e :237 gravam sexo, importFields.ts:60 mapeia a coluna, dashboard.ts:326-342 agrupa por faixa etária e por sexo (saída em :376), Dashboard.tsx:485-495 mostra o card. Um grep -w 'sexo' em backend/src e frontend/src não acha nenhum outro leitor além da importação, da retenção (retention.ts:38,145,404, que anonimiza e não usa o dado) e desse card: nenhum segmento, automação ou campanha usa o campo. O aviso-de-privacidade.md:24 só prevê nascimento para aniversário (uso real em opportunities.ts:136,210) e não fala em sexo nem em faixa etária. A op. 3 do registro-de-operacoes.md:42 cita sexo sem dizer para que serve. Nada em docs/lgpd/correcoes nem em 2026-10-lgpd-minimizacao-dados.sql trata do sexo. As âncoras art-6 (lei-13709.md:141) e art-9 (:229) existem e exigem finalidade específica e informada (art. 6º, I e VI; art. 9º, I) e coleta limitada ao necessário (art. 6º, III). A severidade baixa se mantém: o uso é só agregado e interno e o aviso ainda é rascunho. A correção depende de decisão da controladora.",
+  "tambem": []
+ }
+]

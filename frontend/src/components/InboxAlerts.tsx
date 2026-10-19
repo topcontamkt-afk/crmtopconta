@@ -2,10 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 
+/** LGPD 07-05: o resumo traz só id e horário; nome e conteúdo ficam dentro da Inbox. */
 interface Resumo {
   naoLidas: number;
-  ultima: { id: string; nome: string; preview: string | null; em: string } | null;
+  ultima: { id: string; em: string } | null;
 }
+
+const AVISO = "Nova mensagem na Inbox";
 
 const POLL_MS = 15000;
 const TOAST_MS = 9000;
@@ -36,12 +39,14 @@ function bipe() {
  * e, com a aba em segundo plano, notificação do navegador (se a pessoa permitiu). Consulta o resumo
  * leve da Inbox a cada 15 s (a Vercel não mantém conexão aberta). A primeira consulta só marca o que já
  * existia, para não avisar de mensagens antigas ao abrir o sistema.
+ * LGPD 07-05: o texto é sempre genérico (sem nome nem trecho): a notificação do sistema operacional aparece
+ * na tela de bloqueio e fica na central de notificações depois do logout.
  */
 export default function InboxAlerts() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
   const naInbox = pathname.startsWith("/inbox");
-  const [toast, setToast] = useState<{ id: string; nome: string; preview: string | null } | null>(null);
+  const [toast, setToast] = useState<{ id: string } | null>(null);
   const visto = useRef<string | null>(null);
   const baseTitle = useRef(document.title);
   const naInboxRef = useRef(naInbox);
@@ -67,12 +72,12 @@ export default function InboxAlerts() {
       visto.current = ultima.em;
       bipe();
       if (!naInboxRef.current) {
-        setToast({ id: ultima.id, nome: ultima.nome, preview: ultima.preview });
+        setToast({ id: ultima.id });
         window.setTimeout(() => setToast((t) => (t?.id === ultima.id ? null : t)), TOAST_MS);
       }
       if (document.visibilityState === "hidden" && "Notification" in window && Notification.permission === "granted") {
         try {
-          const n = new Notification(`WhatsApp · ${ultima.nome}`, { body: ultima.preview ?? "Nova mensagem", tag: "crm-inbox" });
+          const n = new Notification("CRM TopConta", { body: AVISO, tag: "crm-inbox" });
           n.onclick = () => {
             window.focus();
             navigate("/inbox", { state: { conversaId: ultima.id } });
@@ -102,8 +107,8 @@ export default function InboxAlerts() {
         setToast(null);
       }}
     >
-      <strong>💬 Nova mensagem · {toast.nome}</strong>
-      <span>{toast.preview ?? ""}</span>
+      <strong>💬 {AVISO}</strong>
+      <span>Clique para abrir</span>
     </button>
   );
 }

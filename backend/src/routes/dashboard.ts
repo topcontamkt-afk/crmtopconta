@@ -10,7 +10,9 @@ import { limiteRange, isPerfilRenda, LIMITE_MAXIMO, LIMITE_TETO, PERFIL_LABELS, 
 import { Router } from "express";
 import { z } from "zod";
 import { prisma, tenantRaw } from "../config/db";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, requireRole } from "../middleware/auth";
+import { logAudit } from "../middleware/audit";
+import { maskPhone } from "../services/masking";
 import { FAIXA_LABELS } from "../services/usage";
 import { addDays, clientWhere, computeKpis, DashboardFilters, rawFilterSql, todayBrt } from "../services/dashboardMetrics";
 import { loadRealHealth } from "../services/healthData";
@@ -19,6 +21,11 @@ import { ensureTodaySnapshot } from "../services/snapshots";
 import { computeOpportunities, OPPORTUNITY_KEYS, OpportunityKey, opportunityAudience, suggestedMessage } from "../services/opportunities";
 
 const router = Router();
+
+// LGPD 03-04 / 04-01: estatísticas e listas do dashboard não tratam cliente anonimizado nem com tratamento bloqueado
+// a pedido (mesmo critério de clientWhere/rawFilterSql em services/dashboardMetrics.ts).
+const SO_TRATAVEL = 'AND "anonymizedAt" IS NULL AND "bloqueadoLgpdAt" IS NULL';
+const TRATAVEL_WHERE = { anonymizedAt: null, bloqueadoLgpdAt: null } as const;
 router.use(requireAuth);
 
 interface RankingRow {
@@ -44,7 +51,7 @@ async function rankingPorCampo(tenantId: string, column: "cidade" | "empresaConv
             COUNT(*) FILTER (WHERE "statusConta" = 'ATIVO')::bigint AS ativos,
             COALESCE(SUM("valorUtilizado"), 0)::float AS valor_utilizado
      FROM "Client"
-     WHERE "tenantId" = $1 AND "${column}" IS NOT NULL
+     WHERE "tenantId" = $1 ${SO_TRATAVEL} AND "${column}" IS NOT NULL
      GROUP BY "${column}"
      ORDER BY total DESC
      LIMIT 10`,
@@ -76,7 +83,7 @@ router.get("/summary", async (req, res) => {
     rankingCidades,
     rankingSecretarias,
   ] = await Promise.all([
-    prisma.client.count({ where: { tenantId } }),
+    prisma.client.count({ where: { tenantId, ...TRATAVEL_WHERE } }),
     prisma.client.count({ where: { tenantId, createdAt: { gte: since } } }),
     prisma.client.count({ where: { tenantId, statusConta: "ATIVO" } }),
     prisma.client.count({ where: { tenantId, statusConta: "INATIVO" } }),
@@ -135,11 +142,11 @@ router.get("/uso-mensal", async (req, res) => {
   const { tenantId } = req.user!;
 
   const [totalClientes, porMesRaw] = await Promise.all([
-    prisma.client.count({ where: { tenantId } }),
+    prisma.client.count({ where: { tenantId, ...TRATAVEL_WHERE } }),
     tenantRaw.query<Array<{ mes: Date; usados: bigint }>>(
       `SELECT date_trunc('month', "dataUltimaUtilizacao") AS mes, COUNT(*)::bigint AS usados
        FROM "Client"
-       WHERE "tenantId" = $1
+       WHERE "tenantId" = $1 ${SO_TRATAVEL}
          AND "dataUltimaUtilizacao" IS NOT NULL
          AND "dataUltimaUtilizacao" >= date_trunc('month', now()) - interval '11 months'
        GROUP BY mes ORDER BY mes ASC`,
@@ -180,11 +187,11 @@ router.get("/encerramentos", async (req, res) => {
   const { tenantId } = req.user!;
 
   const [totalClientes, porMesRaw, motivosRaw] = await Promise.all([
-    prisma.client.count({ where: { tenantId } }),
+    prisma.client.count({ where: { tenantId, ...TRATAVEL_WHERE } }),
     tenantRaw.query<Array<{ mes: Date; encerrados: bigint }>>(
       `SELECT date_trunc('month', "encerradoEm") AS mes, COUNT(*)::bigint AS encerrados
        FROM "Client"
-       WHERE "tenantId" = $1
+       WHERE "tenantId" = $1 ${SO_TRATAVEL}
          AND "encerradoEm" IS NOT NULL
          AND "encerradoEm" >= date_trunc('month', now()) - interval '11 months'
        GROUP BY mes ORDER BY mes ASC`,
@@ -235,8 +242,9 @@ router.get("/encerramentos", async (req, res) => {
  * ativo sem nenhum uso) sempre têm prioridade; entre os ativos com uso, 3 faixas (baixo/moderado/
  * alto), no mesmo corte de "uso intermediário" já usado em usage.ts (20% e 70%).
  */
-router.get("/engajamento", async (req, res) => {
-  const { tenantId } = req.user!;
+// LGPD 01-04: nome e dia de nascimento de clientes: mesma regra de papel da lista nominal (VIEWER fora)
+router.get("/engajamento", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
+  const { tenantId, id: userId } = req.user!;
 
   const [niveisRaw, totalAniversariantes, aniversariantesRaw] = await Promise.all([
     tenantRaw.query<Array<{ nivel: string; count: bigint }>>(
@@ -251,13 +259,13 @@ router.get("/engajamento", async (req, res) => {
          END AS nivel,
          COUNT(*)::bigint AS count
        FROM "Client"
-       WHERE "tenantId" = $1
+       WHERE "tenantId" = $1 ${SO_TRATAVEL}
        GROUP BY nivel`,
       tenantId
     ),
     tenantRaw.query<Array<{ count: bigint }>>(
       `SELECT COUNT(*)::bigint AS count FROM "Client"
-       WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL
+       WHERE "tenantId" = $1 ${SO_TRATAVEL} AND "dataNascimento" IS NOT NULL
          AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM CURRENT_DATE)`,
       tenantId
     ),
@@ -266,13 +274,18 @@ router.get("/engajamento", async (req, res) => {
     >(
       `SELECT "id", "nome", "telefone", "cidade", EXTRACT(DAY FROM "dataNascimento")::int AS dia
        FROM "Client"
-       WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL
+       WHERE "tenantId" = $1 ${SO_TRATAVEL} AND "dataNascimento" IS NOT NULL
          AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM CURRENT_DATE)
        ORDER BY dia ASC
        LIMIT 100`,
       tenantId
     ),
   ]);
+
+  // LGPD 01-04: lista nominal (até 100) deixa trilha: escopo e quantidade, nunca os dados
+  if (aniversariantesRaw.length) {
+    await logAudit({ tenantId, userId, action: "READ_ANIVERSARIANTES", target: "Client", details: { quantidade: aniversariantesRaw.length } });
+  }
 
   const NIVEL_LABELS: Record<string, string> = {
     sem_engajamento: "Sem engajamento",
@@ -295,7 +308,8 @@ router.get("/engajamento", async (req, res) => {
     aniversariantes: {
       mesLabel: new Date().toLocaleDateString("pt-BR", { month: "long", year: "numeric" }),
       total: Number(totalAniversariantes[0]?.count || 0),
-      itens: aniversariantesRaw.map((a) => ({ id: a.id, nome: a.nome, telefone: a.telefone, cidade: a.cidade, dia: a.dia })),
+      // LGPD 01-04: telefone sempre mascarado; o envio usa o id (o número completo nunca precisa ir à tela)
+      itens: aniversariantesRaw.map((a) => ({ id: a.id, nome: a.nome, telefone: maskPhone(a.telefone), cidade: a.cidade, dia: a.dia })),
     },
   });
 });
@@ -322,11 +336,11 @@ router.get("/perfil", async (req, res) => {
          END AS faixa,
          COUNT(*)::bigint AS count
        FROM "Client"
-       WHERE "tenantId" = $1
+       WHERE "tenantId" = $1 ${SO_TRATAVEL}
        GROUP BY faixa`,
       tenantId
     ),
-    prisma.client.groupBy({ by: ["sexo"], where: { tenantId }, _count: true }),
+    prisma.client.groupBy({ by: ["sexo"], where: { tenantId, ...TRATAVEL_WHERE }, _count: true }),
     tenantRaw.query<Array<{ faixa: string; count: bigint }>>(
       `SELECT
          CASE
@@ -339,7 +353,7 @@ router.get("/perfil", async (req, res) => {
          END AS faixa,
          COUNT(*)::bigint AS count
        FROM "Client"
-       WHERE "tenantId" = $1
+       WHERE "tenantId" = $1 ${SO_TRATAVEL}
        GROUP BY faixa`,
       tenantId
     ),
@@ -372,7 +386,7 @@ router.get("/evolucao", async (req, res) => {
 
   const rows: Array<{ periodo: Date; total: bigint }> = await tenantRaw.query(
     `SELECT date_trunc('${granularity}', "createdAt") AS periodo, COUNT(*)::bigint AS total
-     FROM "Client" WHERE "tenantId" = $1
+     FROM "Client" WHERE "tenantId" = $1 ${SO_TRATAVEL}
      GROUP BY periodo ORDER BY periodo ASC LIMIT 52`,
     tenantId
   );

@@ -1,9 +1,9 @@
 import { AppPrismaClient } from "../config/db";
 import { computeUsage } from "./usage";
 import { digitsOnly, hashCPF, isValidCPF, maskCPF, normalizePhone } from "./masking";
-import { findExistingClient, IncomingClientRow } from "./dedupe";
+import { decidirSupressao, findExistingClient, IncomingClientRow, liberarEliminacao, preservarCorrecoes, supressaoDaImportacao } from "./dedupe";
 import { notify } from "./notifications";
-import { snapshotBefore } from "./cardAccountImport";
+import { AVISO_BLOQUEADO, AVISO_ELIMINADO, snapshotBefore } from "./cardAccountImport";
 
 /**
  * Campos mínimos obrigatórios (PRD): id_cliente, nome, telefone, cpf, cidade,
@@ -89,6 +89,15 @@ export interface ImportRunResult {
   updatedCount: number;
   errorCount: number;
   errors: RowError[];
+  /** LGPD 03-01: linhas de titular que pediu eliminação (documento suprimido, sem relação nova), ignoradas */
+  eliminadosAPedido?: number;
+  /** LGPD 03-04: linhas de titular com tratamento bloqueado, ignoradas */
+  bloqueadosLgpd?: number;
+  /** LGPD 03-01: documentos que voltaram por relação nova (abertura/cadastro posterior ao pedido) */
+  supressoesLiberadas?: number;
+  /** LGPD 03-03: campos em que a planilha diverge de uma correção manual (mantida a correção) */
+  camposPreservadosCorrecao?: number;
+  clientesComCorrecaoPreservada?: number;
 }
 
 export interface ImportOptions {
@@ -149,6 +158,15 @@ export async function runImport(
   let added = 0;
   let updated = 0;
 
+  // LGPD 03-01 / 02-02: supressão em lote (documento: eliminação/bloqueio; telefone: opt-out)
+  const contatos = rows.map((r) => ({
+    telefone: r.telefone ? normalizePhone(r.telefone) : null,
+    cpfHash: r.cpf && isValidCPF(r.cpf) ? hashCPF(r.cpf, tenant.cpfSalt) : null,
+  }));
+  const supressao = await supressaoDaImportacao(prisma, tenantId, contatos);
+  const correcaoVence = (tenant as { correcaoManualVence?: boolean }).correcaoManualVence !== false;
+  const lgpd = { eliminadosAPedido: 0, bloqueadosLgpd: 0, supressoesLiberadas: 0, camposPreservadosCorrecao: 0, clientesComCorrecaoPreservada: 0 };
+
   for (let i = 0; i < rows.length; i++) {
     const raw = rows[i];
     const rowNumber = i + 2; // considerando linha 1 = cabeçalho da planilha
@@ -190,7 +208,24 @@ export async function runImport(
     };
 
     try {
+      const decisao = decidirSupressao(supressao, { telefone: phone, cpfHash, dataRelacao: incoming.dataAberturaConta ?? incoming.dataCadastro ?? null });
+      if (decisao.acao === "IGNORAR") {
+        if (decisao.motivo === "BLOQUEADO") lgpd.bloqueadosLgpd++;
+        else lgpd.eliminadosAPedido++;
+        errors.push({ row: rowNumber, motivo: decisao.motivo === "BLOQUEADO" ? AVISO_BLOQUEADO : AVISO_ELIMINADO });
+        continue;
+      }
       const existing = await findExistingClient(prisma, tenantId, incoming);
+      // LGPD 03-04: titular com tratamento suspenso não é atualizado pela planilha
+      if (existing?.bloqueadoLgpdAt) {
+        lgpd.bloqueadosLgpd++;
+        errors.push({ row: rowNumber, motivo: AVISO_BLOQUEADO });
+        continue;
+      }
+      if (decisao.liberarEliminacao) {
+        lgpd.supressoesLiberadas += await liberarEliminacao(prisma, tenantId, cpfHash, { motivo: "NOVA_RELACAO", origem: "importacao_generica", importJobId: job.id });
+      }
+      const semAutorizacao = decisao.semAutorizacao || !!existing?.optOutAt;
 
       const data = {
         externalId: incoming.externalId,
@@ -210,8 +245,9 @@ export async function runImport(
         faixaUso: faixa,
         statusConta: incoming.statusConta,
         origemCliente: incoming.origemCliente,
-        // opt-out é sticky: uma vez recusado, importação nunca reativa a autorização sozinha
-        autorizacaoComunicacao: existing?.optOutAt ? false : incoming.autorizacaoComunicacao,
+        // opt-out é sticky: uma vez recusado (neste cadastro ou pelo telefone/documento), a importação nunca
+        // reativa a autorização sozinha (LGPD 02-02)
+        autorizacaoComunicacao: semAutorizacao ? false : incoming.autorizacaoComunicacao,
         lastImportJobId: job.id,
         tenantId,
       };
@@ -234,6 +270,18 @@ export async function runImport(
           delete update.faixaUso;
         }
         if (existing.optOutAt && "autorizacaoComunicacao" in update) update.autorizacaoComunicacao = false;
+        if (decisao.semAutorizacao) {
+          update.autorizacaoComunicacao = false;
+          if (!existing.optOutAt) update.optOutAt = new Date();
+        }
+        // LGPD 03-03: correção manual vence a planilha
+        if (correcaoVence) {
+          const divergentes = preservarCorrecoes(update, existing as unknown as Record<string, unknown>);
+          if (divergentes.length) {
+            lgpd.camposPreservadosCorrecao += divergentes.length;
+            lgpd.clientesComCorrecaoPreservada++;
+          }
+        }
         changes.push({ clientId: existing.id, kind: "ATUALIZADO", before: snapshotBefore(existing as any, update as any) });
         await prisma.client.update({ where: { id: existing.id }, data: update });
         // Detecta renovação de limite (aumento de limiteTotal) para alimentar a automação
@@ -251,7 +299,7 @@ export async function runImport(
         }
         updated++;
       } else {
-        const created = await prisma.client.create({ data, select: { id: true } });
+        const created = await prisma.client.create({ data: { ...data, ...(decisao.semAutorizacao ? { optOutAt: new Date() } : {}) }, select: { id: true } });
         changes.push({ clientId: created.id, kind: "CRIADO", before: null });
         added++;
       }
@@ -271,7 +319,9 @@ export async function runImport(
     console.error("[importService] não guardei o estado anterior (sem 'Desfazer' neste lote):", (e as Error).message);
   }
 
-  const status = errors.length === 0 ? "CONCLUIDO" : errors.length === rows.length ? "FALHOU" : "CONCLUIDO_COM_ERROS";
+  // avisos (ex.: linha ignorada por pedido LGPD) não são erro de validação
+  const hardErrors = errors.filter((e) => !e.motivo.startsWith("Aviso:"));
+  const status = hardErrors.length === 0 ? "CONCLUIDO" : hardErrors.length === rows.length ? "FALHOU" : "CONCLUIDO_COM_ERROS";
 
   await prisma.importJob.update({
     where: { id: job.id },
@@ -302,7 +352,7 @@ export async function runImport(
       tenantId,
       type: "IMPORT_PARTIAL_ERRORS",
       severity: "AVISO",
-      message: `Sincronização (${source}) concluída com ${errors.length} linha(s) com erro de ${rows.length} processadas.`,
+      message: `Sincronização (${source}) concluída com ${hardErrors.length} linha(s) com erro de ${rows.length} processadas.`,
       relatedType: "ImportJob",
       relatedId: job.id,
     });
@@ -310,6 +360,6 @@ export async function runImport(
 
   return {
     importJobId: job.id,
-    result: { totalRows: rows.length, addedCount: added, updatedCount: updated, errorCount: errors.length, errors },
+    result: { totalRows: rows.length, addedCount: added, updatedCount: updated, errorCount: errors.length, errors, ...lgpd },
   };
 }

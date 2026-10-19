@@ -116,6 +116,11 @@ describe("sendTemplateReply (fora da janela de 24h)", () => {
       conversation: { findFirst: jest.fn(async () => ({ id: "c1", waId: "5584999998888", contactName: "Maria", client, account: { phoneNumberId: "1055", active: true } })), update: jest.fn() },
       messageTemplate: { findFirst: jest.fn(async () => template) },
       waMessage: { create: jest.fn(async ({ data }: any) => { created.push(data); return { id: "m1", ...data }; }) },
+      // supressão por telefone (LGPD 02-03): nada suprimido
+      tenant: { findUnique: jest.fn(async () => ({ cpfSalt: "salt", baseLegalMarketing: "LEGITIMO_INTERESSE" })) },
+      supressaoTitular: { findMany: jest.fn(async () => []) },
+      client: { findMany: jest.fn(async () => []) },
+      campaignRecipient: { findMany: jest.fn(async () => []) },
     };
     return { prisma, created };
   }

@@ -35,6 +35,7 @@ import voiceRoutes, { voiceWebhook } from "./routes/voice";
 import { areaAccess } from "./middleware/areaAccess";
 import zapiWebhookRoutes from "./routes/zapiWebhook";
 import tenantWhatsappRoutes from "./routes/tenantWhatsapp";
+import titularRoutes from "./routes/titular";
 
 /**
  * Criação do Express app, sem app.listen() nem inicialização do scheduler — para poder ser
@@ -81,6 +82,7 @@ app.use("/r", trackedLinkRoutes);
 app.use("/api", areaAccess);
 app.use("/api/auth", authRoutes);
 app.use("/api/clients", clientRoutes);
+app.use("/api/titular/pedidos", titularRoutes); // LGPD 03-05
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/imports", importRoutes);
 app.use("/api/segments", segmentRoutes);

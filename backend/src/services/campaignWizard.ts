@@ -4,9 +4,13 @@ import { hasRealWhatsApp } from "./campaignQueue";
 import { avaliarFrescor, mensagemFrescor } from "./dataFreshness";
 import { ManualRowInput, prepareManual } from "./manualCampaign";
 import { costConfigFrom, estimateCost } from "./messageCost";
-import { buildSegmentWhere, ENVIAVEL_WHERE, SegmentFilters, SegmentGroup } from "./segments";
+import { AVISO_RENDA_IGNORADA, buildSegmentWhere, ENVIAVEL_WHERE, filtrosRendaIgnorados, SegmentFilters, SegmentGroup } from "./segments";
 import { unmappedPositions } from "./templateImport";
 import { linkBase, trackedButtons } from "./trackedLinks";
+import { BASE_LEGAL_LABEL, baseLegalVigente, liaPendente, SEM_BASE_LEGAL } from "./baseLegal";
+import { CONTATO_LIBERADO_WHERE } from "./privacy";
+import { montarRodape } from "./templateVariables";
+import { templateTemOptOut } from "./whatsappTemplates";
 
 /**
  * Passo "Validação" do assistente de campanhas: confere template, conexão com a Meta, público, dedupe,
@@ -36,6 +40,8 @@ export interface WizardValidation {
   podeLancar: boolean;
   /** linhas da planilha recusadas (até 200) */
   motivos: { linha: number; motivo: string }[];
+  /** LGPD 02-02: contatos da planilha que não são clientes (exigem a origem do consentimento ao lançar) */
+  foraDaBase: number;
 }
 
 export const DEDUPE_HORAS_PADRAO = 72;
@@ -65,11 +71,30 @@ export async function validateWizard(
 
   const [template, tenant, real] = await Promise.all([
     prisma.messageTemplate.findFirst({ where: { id: input.templateId, tenantId }, include: { media: { select: { id: true } } } }),
-    prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { custoMarketingUsd: true, custoUtilidadeUsd: true, cambioUsdBrl: true, cpfSalt: true, whatsappProvider: true } }),
+    prisma.tenant.findUniqueOrThrow({
+      where: { id: tenantId },
+      select: {
+        custoMarketingUsd: true, custoUtilidadeUsd: true, cambioUsdBrl: true, cpfSalt: true, whatsappProvider: true,
+        name: true, controladorNome: true, rodapeOptOut: true, baseLegalMarketing: true, liaVersao: true, liaAprovadaEm: true,
+      },
+    }),
     hasRealWhatsApp(prisma, tenantId),
   ]);
 
   const zapi = tenant.whatsappProvider === "ZAPI";
+
+  // 0) LGPD 02-01: base legal declarada pelo controlador (sem ela nada é enviado)
+  const base = baseLegalVigente(tenant);
+  if (!base) {
+    add({ id: "base_legal", nivel: "erro", titulo: "Base legal não declarada", detalhe: SEM_BASE_LEGAL });
+  } else if (base === "CONSENTIMENTO") {
+    // art. 8º, §2º: a prova do consentimento é do controlador e o CRM não guarda o aceite por titular
+    add({ id: "base_legal", nivel: "aviso", titulo: `Base legal: ${BASE_LEGAL_LABEL[base]}`, detalhe: "O CRM não registra o aceite de cada pessoa: a autorização vem da planilha. Confirme que o controlador tem a prova do consentimento de todo o público." });
+  } else if (liaPendente(tenant)) {
+    add({ id: "base_legal", nivel: "aviso", titulo: `Base legal: ${BASE_LEGAL_LABEL[base]}, LIA pendente`, detalhe: "O teste de balanceamento (LIA) ainda não foi registrado com versão e data de aprovação. Registre em Configurações → LGPD." });
+  } else {
+    add({ id: "base_legal", nivel: "ok", titulo: `Base legal: ${BASE_LEGAL_LABEL[base]}` });
+  }
 
   // 1) template
   if (!template || template.channel !== "WHATSAPP") {
@@ -84,6 +109,8 @@ export async function validateWizard(
     if (template.headerFormat === "IMAGE" || trackedButtons(template).length > 0 || (Array.isArray(template.buttons) && template.buttons.length > 0) || (Array.isArray(template.quickReplies) && template.quickReplies.length > 0)) {
       add({ id: "zapi_formato", nivel: "aviso", titulo: "Imagem e botões não vão pela Z-API", detalhe: "Só o texto é enviado. O link rastreado do botão também não vai." });
     }
+    // LGPD 02-07: rodapé e botão SAIR do template não vão pela Z-API; o rodapé do controlador vai como texto
+    add({ id: "rodape", nivel: "ok", titulo: "Rodapé de descadastro vai no texto", detalhe: `Cada mensagem termina com: "${montarRodape(tenant)}"` });
   } else if (template.status !== "APROVADO") {
     add({ id: "template", nivel: "erro", titulo: "Template não aprovado", detalhe: `Status: ${template.metaStatus ?? template.status}. Só template aprovado pela Meta pode ser enviado.` });
   } else if (real && template.metaStatus !== "APPROVED") {
@@ -96,6 +123,18 @@ export async function validateWizard(
     add({ id: "template", nivel: "erro", titulo: "Falta a imagem do cabeçalho", detalhe: "Envie a imagem do template em Templates." });
   } else {
     add({ id: "template", nivel: "ok", titulo: "Template aprovado pela Meta", detalhe: template.name });
+  }
+
+  // LGPD 02-05: template da Meta vai como aprovado (não dá para acrescentar texto): avisa se não ensina a parar
+  if (template && template.channel === "WHATSAPP" && !zapi && template.category !== "UTILITY" && !templateTemOptOut(template)) {
+    add({
+      id: "rodape",
+      nivel: "aviso",
+      titulo: "O template não ensina a parar de receber",
+      detalhe: template.origin === "META"
+        ? "Este template veio da Meta sem rodapé nem botão de saída (ex.: \"Responda SAIR...\" ou botão SAIR). O texto só muda na Meta: prefira um template com a instrução de descadastro."
+        : "Edite o template e inclua um rodapé \"Responda SAIR para não receber mais mensagens\" ou um botão de resposta rápida SAIR.",
+    });
   }
 
   if (template && !zapi && trackedButtons(template).length > 0) {
@@ -118,6 +157,7 @@ export async function validateWizard(
   let contatos = 0;
   let total = 0;
   let motivos: { linha: number; motivo: string }[] = [];
+  let foraDaBase = 0;
   const usaBase = a.tipo !== "planilha";
 
   if (a.tipo === "planilha") {
@@ -132,6 +172,11 @@ export async function validateWizard(
         titulo: `${contatos} de ${total} contatos vão receber`,
         detalhe: `${r.daBase} são clientes da base (medidos pelo uso real) e ${contatos - r.daBase} estão fora da base (ficam guardados para análise).`,
       });
+      foraDaBase = contatos - r.daBase;
+      // LGPD 02-02: não cliente não tem relação prévia com o controlador: só com consentimento declarado
+      if (foraDaBase > 0) {
+        add({ id: "consentimento", nivel: "aviso", titulo: `${foraDaBase} contato(s) não são clientes: informe a origem do consentimento`, detalhe: "Para quem não é cliente, a mensagem só pode sair com consentimento. Ao lançar, descreva onde e como ele foi coletado; fica gravado na campanha com o seu usuário e a data." });
+      }
       if (r.rejected.length) add({ id: "recusadas", nivel: "aviso", titulo: `${r.rejected.length} linhas recusadas`, detalhe: "Telefone/CPF inválido, repetido, opt-out ou sem limite disponível quando o template usa. Veja a lista abaixo." });
     } else {
       add({ id: "publico", nivel: "erro", titulo: "Não consegui conferir a lista", detalhe: r && "error" in r ? r.error : "Escolha um template primeiro." });
@@ -140,13 +185,15 @@ export async function validateWizard(
     const filters = await baseFilters(prisma, tenantId, a);
     if (filters === null) {
       add({ id: "publico", nivel: "erro", titulo: "Segmento não encontrado" });
+    } else if (filtrosRendaIgnorados(filters).length) {
+      add({ id: "publico", nivel: "erro", titulo: "Segmento com filtro de renda", detalhe: AVISO_RENDA_IGNORADA });
     } else {
       const where = buildSegmentWhere(tenantId, filters);
-      const eligible = { ...where, autorizacaoComunicacao: true, optOutAt: null, statusConta: { not: "BLOQUEADO" as const }, ...ENVIAVEL_WHERE };
+      const eligible = { ...where, ...CONTATO_LIBERADO_WHERE, statusConta: { not: "BLOQUEADO" as const }, ...ENVIAVEL_WHERE };
       [total, contatos] = await Promise.all([prisma.client.count({ where }), prisma.client.count({ where: eligible })]);
       add({ id: "publico", nivel: contatos > 0 ? "ok" : "erro", titulo: `${contatos} clientes elegíveis` });
       if (total > contatos) {
-        add({ id: "excluidos", nivel: "ok", titulo: `${total - contatos} ficam de fora`, detalhe: "Opt-out, conta bloqueada ou sem limite (comércio credenciado) são excluídos automaticamente." });
+        add({ id: "excluidos", nivel: "ok", titulo: `${total - contatos} ficam de fora`, detalhe: "Opt-out, conta bloqueada, tratamento suspenso a pedido do titular ou sem limite (comércio credenciado) são excluídos automaticamente." });
       }
 
       // dedupe: quem já recebeu este mesmo texto na janela
@@ -198,5 +245,6 @@ export async function validateWizard(
     custo: { categoria: cost.categoria, brl: cost.brl, total: cost.total, usd: cost.usd, cambio: cfg.cambioUsdBrl },
     podeLancar: contatos > 0 && !checks.some((c) => c.nivel === "erro"),
     motivos,
+    foraDaBase,
   };
 }

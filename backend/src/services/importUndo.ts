@@ -9,6 +9,8 @@ import { AppPrismaClient } from "../config/db";
  */
 
 export const UNDO_BATCH = 300;
+/** LGPD 04-04: o estado anterior só serve para desfazer, e só por este prazo (o job de retenção apaga o resto). */
+export const IMPORT_CHANGE_TTL_DIAS = 30;
 export const UNDOABLE_FORMATS = ["cartoes", "generico"];
 
 const DATE_FIELDS = ["dataCadastro", "dataAberturaConta", "dataUltimaUtilizacao", "dataValidadeCartao", "dataNascimento", "encerradoEm", "optOutAt", "anonymizedAt"];
@@ -31,6 +33,8 @@ export class UndoError extends Error {
 
 export interface UndoResult {
   restaurados: number;
+  /** LGPD 04-04: clientes anonimizados, bloqueados ou com documento eliminado: o estado anterior NÃO volta */
+  protegidos: number;
   removidos: number;
   mantidos: number;
   ausentes: number;
@@ -69,7 +73,27 @@ export async function undoLoteBatch(prisma: AppPrismaClient, tenantId: string, u
   const { ids, inicio } = await assertUndoable(prisma, tenantId, loteId);
 
   const changes = await prisma.importChange.findMany({ where: { tenantId, importJobId: { in: ids } }, take: limit, orderBy: { id: "asc" } });
+
+  // LGPD 04-04: desfazer nunca reidentifica. Quem foi anonimizado (ou bloqueado a pedido) depois da importação,
+  // ou cujo documento de antes está suprimido por eliminação, não recebe o estado anterior de volta.
+  const atualizados = changes.filter((c) => c.kind === "ATUALIZADO" && c.before);
+  const protegidosIds = new Set<string>();
+  if (atualizados.length) {
+    const clientes = await prisma.client.findMany({
+      where: { tenantId, id: { in: atualizados.map((c) => c.clientId) } },
+      select: { id: true, anonymizedAt: true, bloqueadoLgpdAt: true, cpfHash: true },
+    });
+    for (const c of clientes) if (c.anonymizedAt || c.bloqueadoLgpdAt || c.cpfHash.startsWith("anon-")) protegidosIds.add(c.id);
+    const docsAntes = [...new Set(atualizados.map((c) => (c.before as Record<string, unknown>).cpfHash).filter((d): d is string => typeof d === "string"))];
+    if (docsAntes.length) {
+      const eliminados = await prisma.supressaoTitular.findMany({ where: { tenantId, motivo: "ELIMINACAO", docHash: { in: docsAntes } }, select: { docHash: true } });
+      const set = new Set(eliminados.map((e) => e.docHash));
+      for (const c of atualizados) if (set.has((c.before as Record<string, unknown>).cpfHash as string)) protegidosIds.add(c.clientId);
+    }
+  }
+
   let restaurados = 0;
+  let protegidos = 0;
   let removidos = 0;
   let mantidos = 0;
   let ausentes = 0;
@@ -77,7 +101,9 @@ export async function undoLoteBatch(prisma: AppPrismaClient, tenantId: string, u
 
   for (const c of changes) {
     try {
-      if (c.kind === "ATUALIZADO" && c.before) {
+      if (c.kind === "ATUALIZADO" && c.before && protegidosIds.has(c.clientId)) {
+        protegidos++;
+      } else if (c.kind === "ATUALIZADO" && c.before) {
         await prisma.client.update({ where: { id: c.clientId }, data: reviveBefore(c.before as Record<string, unknown>) as any });
         restoredClientIds.push(c.clientId);
         restaurados++;
@@ -104,7 +130,7 @@ export async function undoLoteBatch(prisma: AppPrismaClient, tenantId: string, u
     await prisma.accountSnapshot.deleteMany({ where: { tenantId, importJobId: { in: ids } } });
     await prisma.importJob.updateMany({ where: { id: { in: ids }, tenantId }, data: { desfeitaEm: new Date(), desfeitaPor: userId } });
   }
-  return { restaurados, removidos, mantidos, ausentes, restantes, concluido };
+  return { restaurados, protegidos, removidos, mantidos, ausentes, restantes, concluido };
 }
 
 export interface LoteRow {

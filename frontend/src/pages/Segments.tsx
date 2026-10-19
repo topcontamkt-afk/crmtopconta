@@ -9,6 +9,8 @@ interface Segment {
   dynamic: boolean;
   lastRefreshedAt: string | null;
   createdAt: string;
+  /** LGPD 01-03: filtros de renda gravados num segmento antigo, que deixaram de valer */
+  filtrosIgnorados?: string[];
 }
 
 const STATUS_OPTIONS = [
@@ -25,12 +27,7 @@ const ETAPA_OPTIONS = [
   { value: "INATIVO", label: "Inativo (+90 dias sem uso)" },
 ];
 
-const PERFIL_OPTIONS = [
-  { value: "PF1", label: "PF1 · até R$ 4.000" },
-  { value: "PF2", label: "PF2 · 4.001 a 8.000" },
-  { value: "PF3", label: "PF3 · 8.001 a 12.000" },
-  { value: "PF4", label: "PF4 · 12.001 a 100.000" },
-];
+// LGPD 01-03: perfil de renda (PF1–PF4) não é mais filtro de público; fica só como estatística no Dashboard.
 
 /** Grupo de opções em "chips" (várias marcadas = qualquer uma delas, ou seja, OU). */
 function Chips({ options, value, onChange }: { options: { value: string; label: string }[]; value: string[]; onChange: (v: string[]) => void }) {
@@ -67,7 +64,6 @@ export default function Segments() {
   const [name, setName] = useState("");
   const [dynamic, setDynamic] = useState(true);
   const [cidade, setCidade] = useState("");
-  const [perfilRenda, setPerfilRenda] = useState<string[]>([]);
   const [statusConta, setStatusConta] = useState<string[]>([]);
   const [tags, setTags] = useState("");
   const [faixaUso, setFaixaUso] = useState<string[]>([]);
@@ -100,7 +96,6 @@ export default function Segments() {
       cidade: cidade.trim() ? [cidade.trim()] : undefined,
       faixaUso: faixaUso.length ? faixaUso : undefined,
       statusConta: statusConta.length ? statusConta : undefined,
-      perfilRenda: perfilRenda.length ? perfilRenda : undefined,
       etapaUso: etapaUso.length ? etapaUso : undefined,
       usosMin: usosMin ? Number(usosMin) : undefined,
       diasSemUsoRealMin: diasSemUsoRealMin ? Number(diasSemUsoRealMin) : undefined,
@@ -112,10 +107,10 @@ export default function Segments() {
       cicloAbriuHaDias: cicloAbriuMax ? { min: 0, max: Number(cicloAbriuMax) } : undefined,
       cicloAbreEmDias: cicloAbreMax ? { min: 1, max: Number(cicloAbreMax) } : undefined,
     }),
-    [cidade, faixaUso, statusConta, perfilRenda, etapaUso, usosMin, diasSemUsoRealMin, semUsoDiasMin, usadoNosUltimosDias, tags, categoriasCompra, compraNosUltimosDias, cicloAbriuMax, cicloAbreMax]
+    [cidade, faixaUso, statusConta, etapaUso, usosMin, diasSemUsoRealMin, semUsoDiasMin, usadoNosUltimosDias, tags, categoriasCompra, compraNosUltimosDias, cicloAbriuMax, cicloAbreMax]
   );
   const ativos = (...v: unknown[]) => v.filter((x) => x !== undefined).length;
-  const nCliente = ativos(filters.cidade, filters.perfilRenda, filters.statusConta, filters.tags);
+  const nCliente = ativos(filters.cidade, filters.statusConta, filters.tags);
   const nUso = ativos(filters.faixaUso, filters.semUsoDiasMin, filters.usadoNosUltimosDias);
   const nExtrato = ativos(filters.etapaUso, filters.usosMin, filters.diasSemUsoRealMin);
   const nCompras = ativos(filters.categoriasCompra, filters.compraNosUltimosDias);
@@ -132,7 +127,7 @@ export default function Segments() {
   };
 
   function limpar() {
-    setCidade(""); setPerfilRenda([]); setStatusConta([]); setTags(""); setFaixaUso([]);
+    setCidade(""); setStatusConta([]); setTags(""); setFaixaUso([]);
     setSemUsoDiasMin(""); setUsadoNosUltimosDias(""); setEtapaUso([]); setUsosMin("");
     setDiasSemUsoRealMin(""); setCategoriasCompra([]); setCompraNosUltimosDias("");
     mudou();
@@ -206,13 +201,14 @@ export default function Segments() {
       <div className="card seg-intro" style={{ marginBottom: 16 }}>
         <h3>O que é um segmento?</h3>
         <p>
-          Um segmento é uma <strong>lista de clientes definida por regras</strong> (por exemplo: "PF1 que já usaram o cartão mas estão
+          Um segmento é uma <strong>lista de clientes definida por regras</strong> (por exemplo: "clientes de Natal que já usaram o cartão mas estão
           há mais de 30 dias sem usar"). Você monta a regra uma vez e reaproveita em outros lugares.
         </p>
         <ul>
           <li><strong>Campanhas:</strong> escolha o segmento como público do disparo de WhatsApp/SMS. Clientes com opt-out e sem limite ficam de fora automaticamente.</li>
           <li><strong>Dinâmico ou estático:</strong> o dinâmico se reconta sozinho a cada hora conforme a base muda; o estático guarda só a contagem do dia em que foi criado.</li>
-          <li><strong>Como as regras se combinam:</strong> filtros de grupos diferentes valem juntos (E). Dentro de um mesmo filtro, marcar várias opções vale qualquer uma delas (OU) — ex.: PF1 e PF2 = clientes de PF1 ou de PF2.</li>
+          <li><strong>Como as regras se combinam:</strong> filtros de grupos diferentes valem juntos (E). Dentro de um mesmo filtro, marcar várias opções vale qualquer uma delas (OU) — ex.: "Ativo" e "Inativo" = clientes ativos ou inativos.</li>
+          <li><strong>Renda não entra:</strong> o perfil de renda (PF1–PF4) fica só como estatística no Dashboard e não seleciona público (LGPD). Segmentos antigos com esse filtro passam a contar sem ele.</li>
         </ul>
       </div>
 
@@ -234,11 +230,6 @@ export default function Segments() {
           <button type="button" className="btn secondary" disabled={busy} onClick={() => criarProntos("/segments/presets/inativos", "Categoria Inativos")}>Criar agora</button>
         </div>
         <div className="seg-preset">
-          <h4>Perfil de renda (PF1–PF4)</h4>
-          <p>Cria 11 segmentos por faixa de renda estimada pelo limite, com variações como sem uso, com saldo e limite esgotado.</p>
-          <button type="button" className="btn secondary" disabled={busy} onClick={() => criarProntos("/segments/presets/perfis-renda", "Segmentos de perfil de renda")}>Criar agora</button>
-        </div>
-        <div className="seg-preset">
           <h4>Etapa de uso</h4>
           <p>Cria 5 segmentos pelo extrato de compras: nunca usou, recorrentes, ocasionais, em risco e inativos.</p>
           <button type="button" className="btn secondary" disabled={busy} onClick={() => criarProntos("/segments/presets/etapas-uso", "Segmentos por etapa de uso")}>Criar agora</button>
@@ -252,7 +243,7 @@ export default function Segments() {
           <div className="seg-row">
             <div>
               <label className="seg-label">Nome do segmento</label>
-              <input style={{ width: "100%" }} placeholder="Ex: PF1 com saldo e sem uso" value={name} onChange={(e) => setName(e.target.value)} />
+              <input style={{ width: "100%" }} placeholder="Ex: Natal com saldo e sem uso" value={name} onChange={(e) => setName(e.target.value)} />
             </div>
             <div>
               <label className="seg-label">Atualização</label>
@@ -265,11 +256,7 @@ export default function Segments() {
         </div>
 
         <Section title="Quem é o cliente" count={nCliente} defaultOpen>
-          <p className="seg-hint">Características do cadastro: onde mora, renda estimada pelo limite e situação da conta.</p>
-          <div className="seg-field">
-            <label>Perfil de renda (salário estimado = limite ÷ 0,40)</label>
-            <Chips options={PERFIL_OPTIONS} value={perfilRenda} onChange={wrap(setPerfilRenda)} />
-          </div>
+          <p className="seg-hint">Características do cadastro: onde mora e situação da conta.</p>
           <div className="seg-field">
             <label>Status da conta</label>
             <Chips options={STATUS_OPTIONS} value={statusConta} onChange={wrap(setStatusConta)} />
@@ -373,7 +360,14 @@ export default function Segments() {
           <tbody>
             {segments.map((s) => (
               <tr key={s.id}>
-                <td>{s.name}</td>
+                <td>
+                  {s.name}
+                  {!!s.filtrosIgnorados?.length && (
+                    <div className="pd-hint" style={{ color: "var(--warning, #b45309)" }}>
+                      O filtro de perfil de renda deste segmento não vale mais (LGPD): ele conta sem esse filtro. Revise o público antes de usar.
+                    </div>
+                  )}
+                </td>
                 <td>{s.lastCount?.toLocaleString("pt-BR") ?? "—"}</td>
                 <td>{s.dynamic ? "Dinâmico" : "Estático"}</td>
                 <td>{s.lastRefreshedAt ? new Date(s.lastRefreshedAt).toLocaleString("pt-BR") : "—"}</td>

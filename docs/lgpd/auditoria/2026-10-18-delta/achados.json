@@ -1,0 +1,416 @@
+[
+ {
+  "id": "02-06",
+  "titulo": "Resposta pela Inbox em conversa Z-API não confere opt-out nem janela de 24h: o operador manda texto livre, a qualquer tempo, a quem pediu para parar (agrava 02-03)",
+  "severidade": "alta",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-8",
+   "docs/lgpd/fontes/lei-13709.md#art-18",
+   "docs/lgpd/fontes/anpd-guia-legitimo-interesse.md#p-52",
+   "docs/lgpd/fontes/lei-13709.md#art-10"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/whatsappReply.ts",
+    "linha": 47,
+    "trecho": "include: { account: { select: { phoneNumberId: true, active: true, credentials: true, provider: true } } },  (sendReply nem carrega o cliente da conversa)"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappReply.ts",
+    "linha": 53,
+    "trecho": "if (conversation.account.provider === \"ZAPI\") return sendZapiReply(prisma, tenantId, userId, conversation, input, deps, now);  (antes de assertJanelaAberta)"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappReply.ts",
+    "linha": 98,
+    "trecho": "async function sendZapiReply( ... )  (l.98-124: valida só tipo, tamanho e credenciais; nenhuma checagem de optOutAt/autorizacaoComunicacao nem de janela)"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappReply.ts",
+    "linha": 115,
+    "trecho": "wamid = await zapiSendText(creds, conversation.waId, texto, {}, deps.fetchImpl);"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappReply.ts",
+    "linha": 201,
+    "trecho": "if (conversation.client && (!conversation.client.autorizacaoComunicacao || conversation.client.optOutAt)) {  (a trava existe só no caminho de template da Meta)"
+   },
+   {
+    "arquivo": "backend/src/routes/inbox.ts",
+    "linha": 185,
+    "trecho": "janelaAberta: zapi || (!!ate && ate.getTime() > Date.now()),"
+   },
+   {
+    "arquivo": "frontend/src/pages/Inbox.tsx",
+    "linha": 230,
+    "trecho": "if (!janelaAberta) return <TemplatePicker conversaId={conversaId} onEnviada={onEnviada} />;"
+   },
+   {
+    "arquivo": "frontend/src/pages/Inbox.tsx",
+    "linha": 544,
+    "trecho": "{thread.cliente?.optOutEm && <span className=\"inbox-chip closed\">Pediu descadastro</span>}  (o Composer da l.570-576 continua habilitado: podeEnviar depende só do papel)"
+   }
+  ],
+  "cenario": "Um cliente recebe mensagem pelo número conectado via Z-API e responde 'SAIR'. storeInboundMessage (chamado por routes/zapiWebhook.ts:37) grava optOutAt e o AuditLog OPT_OUT_WHATSAPP. Semanas depois, um OPERATOR abre a conversa na Inbox. O chip 'Pediu descadastro' aparece, mas a caixa de texto continua liberada, e a conversa Z-API é tratada como 'janela aberta' para sempre (inbox.ts:185). O operador digita uma oferta e envia por POST /api/inbox/conversations/:id/messages. sendReply desvia para sendZapiReply, que não carrega o cliente, não consulta optOutAt nem CampaignRecipient.optOutAt (contato de lista manual, em que conversation.client é nulo) e não aplica janela, e a mensagem sai. Antes do delta, a regra da Meta segurava a oposição na Inbox: texto livre só nas 24 h seguintes a uma mensagem do próprio titular, e fora dela só template, que sendTemplateReply recusa para quem fez opt-out (l.201). Com a Z-API ativa (commit 6fabc33), o delta abriu um caminho sem trava, nem de tempo nem de opt-out, para contatar quem já se opôs ou revogou. É um caso novo e mais largo do defeito de 02-03 (a checagem de opt-out na Inbox depende do caminho de envio). A revogação e a oposição (art. 8º, §5º; art. 18, IX e §2º) deixam de ser respeitadas nesse canal, e a salvaguarda de descadastro do Guia LI (p. 52), condição do legítimo interesse (art. 10, §2º), perde efeito. Nada registra que o contato foi feito apesar do opt-out. O envio depende de ação humana, mas o sistema não impede nem avisa além do chip visual.",
+  "papel": "ambos",
+  "correcao": "Em backend/src/services/whatsappReply.ts: (1) incluir `client: { select: { autorizacaoComunicacao: true, optOutAt: true } }` no findFirst de sendReply e, em sendZapiReply, recusar com SendError('OPT_OUT') quando o cliente tiver optOutAt ou autorizacaoComunicacao=false, ou quando houver CampaignRecipient com optOutAt para phoneCandidates(conversation.waId) (ou a supressão por telefone de 02-03, quando existir), a menos que a última mensagem do titular (conversation.lastInboundAt) seja posterior ao opt-out e esteja dentro de 24 h, ou seja, ele mesmo retomou o contato. (2) Aplicar a conversas Z-API a mesma janela de 24 h desde lastInboundAt (assertJanelaAberta) para texto livre. Fora dela, nenhum envio proativo pela Inbox, já que na Z-API não há template. (3) Em backend/src/routes/inbox.ts, calcular janelaAberta para Z-API pela mesma regra, e em frontend/src/pages/Inbox.tsx desabilitar o Composer quando optOutEm estiver preenchido e a janela estiver fechada. (4) Testes em whatsappReply.test.ts (ou zapi.test.ts) cobrindo: cliente com opt-out, contato de lista com opt-out e conversa sem mensagem do titular há mais de 24 h.",
+  "tipo": "codigo",
+  "multi_tenant": "O bloqueio por opt-out não é configurável (regra legal igual para todo controlador). Se a janela de resposta de canais não oficiais for configurável, vira campo por Tenant (ex.: janelaRespostaHoras), com padrão de 24 h.",
+  "severidade_original": "alta",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Evidência conferida. whatsappReply.ts:45-48: o findFirst de sendReply não inclui client. Em :53 o caminho ZAPI desvia para sendZapiReply antes de assertJanelaAberta (:56). sendZapiReply (:98-124) só valida tipo/tamanho/credenciais e chama zapiSendText (:115), sem checar optOutAt, autorizacaoComunicacao nem CampaignRecipient. A trava de opt-out só existe em sendTemplateReply (:201), que recusa ZAPI na l.198. A rota POST /conversations/:id/messages (routes/inbox.ts:245-266) só aplica requireRole e chama sendReply. inbox.ts:185 devolve janelaAberta=true para toda conversa Z-API. Inbox.tsx:229-230: o Composer bloqueia só por papel ou por janela fechada, e o chip de descadastro (l.544) é apenas visual. O opt-out de entrada pela Z-API grava optOutAt e CampaignRecipient.optOutAt (zapiWebhook.ts:37 -> whatsappInbox.ts:156-171), mas nada disso é lido no envio. Âncoras art-8 (§5º), art-18 (IX e §2º), art-10 e p-52 existem. Consolidação: 03-07 descreve a mesma causa e a mesma correção e foi confirmado com severidade media (envio manual, um a um, com aviso visível). Prevalece alta, pelo critério do finding-schema 'envio a quem fez opt-out': o sistema não impede o envio. A janela de 24 h é regra da Meta, não da LGPD; o núcleo legal é o envio a quem fez opt-out.",
+  "tambem": [
+   "03-07"
+  ]
+ },
+ {
+  "id": "02-07",
+  "titulo": "Campanha pela Z-API envia só o corpo do template: o rodapé de descadastro e o botão SAIR somem sem aviso (agrava 02-05)",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-10",
+   "docs/lgpd/fontes/lei-13709.md#art-9",
+   "docs/lgpd/fontes/lei-13709.md#art-8",
+   "docs/lgpd/fontes/anpd-guia-legitimo-interesse.md#p-52"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/campaignQueue.ts",
+    "linha": 149,
+    "trecho": "if (providers[0].name === \"zapi\") return { template: null };"
+   },
+   {
+    "arquivo": "backend/src/routes/campaigns.ts",
+    "linha": 335,
+    "trecho": "messageTemplate = template.body;  (também l.109 na lista manual: messageTemplate: r.template.body; footer e quickReplies ficam de fora)"
+   },
+   {
+    "arquivo": "backend/src/services/campaignQueue.ts",
+    "linha": 365,
+    "trecho": "const body = renderTemplate(templateBody, ctx);  (é este texto que o ZapiAdapter envia)"
+   },
+   {
+    "arquivo": "backend/src/services/campaignWizard.ts",
+    "linha": 85,
+    "trecho": "add({ id: \"zapi_formato\", nivel: \"aviso\", titulo: \"Imagem e botões não vão pela Z-API\", detalhe: \"Só o texto é enviado. O link rastreado do botão também não vai.\" });"
+   },
+   {
+    "arquivo": "frontend/src/pages/TemplateEditor.tsx",
+    "linha": 371,
+    "trecho": "placeholder=\"Ex.: Responda SAIR para não receber mais mensagens\"  (l.417: botão SAIR 'quem toca é descadastrado automaticamente')"
+   }
+  ],
+  "cenario": "A controladora segue a orientação do editor e cria o template de marketing com rodapé 'Responda SAIR para não receber mais mensagens' e botão de resposta rápida SAIR, as duas salvaguardas que 02-05 recomendava tornar obrigatórias. Depois o ADMIN troca a conexão ativa para Z-API (Configurações -> WhatsApp). A campanha de segmento, a lista manual ou a automação que lança campanha sai pelo ZapiAdapter com o texto de `campaign.messageTemplate`, que é só `template.body`. O rodapé não vai e o botão SAIR também não. O assistente mostra só um aviso, 'Imagem e botões não vão pela Z-API', que não diz que a instrução de descadastro foi removida, e permite seguir. Milhares de titulares recebem a oferta sem saber como parar. A palavra-chave continua funcionando na entrada (whatsappInbox.ts:156), mas não é anunciada. Antes do delta, o que a controladora configurava no template chegava ao titular. Agora o próprio código retira a transparência e o mecanismo de descadastro, que são a salvaguarda do legítimo interesse (art. 10, §2º; Guia LI p. 52) e a forma facilitada de revogar (art. 8º, §5º).",
+  "papel": "operador",
+  "correcao": "Em backend/src/services/campaignQueue.ts, no caminho Z-API, resolveWhatsAppTemplate deve devolver o template (sem enviá-lo como template da Meta) para que processQueueBatch anexe ao texto renderizado o `template.footer` e converta um quick reply SAIR em linha de texto ('Responda SAIR para não receber mais mensagens'). Fazer o mesmo em sendTestMessages. Em backend/src/services/campaignWizard.ts, para `zapi`: nível 'erro' quando nem o corpo, nem o rodapé, nem um quick reply contiverem instrução de opt-out, e aviso explícito de que rodapé e SAIR serão enviados como texto. Teste em zapi.test.ts verificando que o corpo enviado pela Z-API contém o rodapé e a instrução de SAIR.",
+  "tipo": "codigo",
+  "multi_tenant": "O texto da instrução de opt-out e a identificação do controlador anexados ao corpo vêm da configuração LGPD do Tenant (ver 03-06), não de texto fixo.",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "campaignQueue.ts:149 devolve template:null no caminho zapi. campaigns.ts:335 e :109 gravam só template.body em messageTemplate. campaignQueue.ts:365 renderiza só esse corpo, e channels/zapi.ts:17 send(to, body) não acrescenta nada. O footer existe no schema (schema.prisma:550), mas não é usado em campaignQueue (grep footer vazio). campaignWizard.ts:84-85 só avisa quando há imagem ou botões; um template com apenas rodapé de descadastro não gera aviso nenhum, e o aviso nunca diz que a instrução de opt-out sumiu. TemplateEditor.tsx:371 e :417 orientam a pôr o rodapé com SAIR e o botão SAIR. As âncoras art-8, art-9, art-10 e p-52 existem. A lei não exige literalmente a instrução em cada mensagem, mas o código descarta em silêncio a salvaguarda que a controladora configurou. A palavra-chave de entrada continua funcionando, então a obrigação fica atendida em parte: media."
+ },
+ {
+  "id": "02-08",
+  "titulo": "Resposta automática, ligada por padrão em toda conta WhatsApp de qualquer tenant, responde 'não realizamos atendimentos por aqui' com o telefone de suporte da TopConta fixo no código, sem identificar o controlador nem ensinar a parar, inclusive a quem pede descadastro ou exerce um direito com palavras que o detector não reconhece (agrava 02-04 e 03-06)",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-8",
+   "docs/lgpd/fontes/lei-13709.md#art-18",
+   "docs/lgpd/fontes/lei-13709.md#art-9",
+   "docs/lgpd/fontes/anpd-guia-legitimo-interesse.md#p-52",
+   "docs/lgpd/fontes/lei-13709.md#art-41",
+   "docs/lgpd/fontes/anpd-res-02-2022-pequeno-porte.md#anexo-i-art-11",
+   "docs/lgpd/fontes/lei-13709.md#art-6",
+   "docs/lgpd/fontes/lei-13709.md#art-39",
+   "docs/lgpd/fontes/lei-13709.md#art-46"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/whatsappAutoReply.ts",
+    "linha": 12,
+    "trecho": "export const AUTO_REPLY_PADRAO = \"Este é um canal apenas para informações. Informamos que não realizamos atendimentos por aqui.\\n\\n\" + \"Para suporte técnico ou em caso de dúvidas, entre em contato com nossa equipe de suporte: (79) 9****-**40.\";  (telefone mascarado aqui; nenhuma menção a SAIR/PARAR)"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappAutoReply.ts",
+    "linha": 24,
+    "trecho": "return t ? t.slice(0, TEXT_MAX_CHARS) : AUTO_REPLY_PADRAO;"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappAutoReply.ts",
+    "linha": 29,
+    "trecho": "return account.autoReplyEnabled !== false && r.stored && !r.optedOut;"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappPayload.ts",
+    "linha": 168,
+    "trecho": "return words.length <= 4 && OPT_OUT_FIRST_WORDS.has(words[0]);"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 724,
+    "trecho": "autoReplyEnabled Boolean   @default(true)"
+   },
+   {
+    "arquivo": "backend/prisma/sql/2026-10-whatsapp-resposta-automatica.sql",
+    "linha": 4,
+    "trecho": "ALTER TABLE \"WhatsAppAccount\" ADD COLUMN IF NOT EXISTS \"autoReplyEnabled\" BOOLEAN NOT NULL DEFAULT true;"
+   },
+   {
+    "arquivo": "backend/src/routes/integrations.ts",
+    "linha": 216,
+    "trecho": ": await prisma.whatsAppAccount.create({ data: { tenantId, ...data, verifyToken: generateVerifyToken() } });  (não define autoReplyEnabled/autoReplyText)"
+   },
+   {
+    "arquivo": "backend/src/routes/integrations.ts",
+    "linha": 405,
+    "trecho": "await maybeAutoReply(prisma, account.tenantId, account, r);"
+   },
+   {
+    "arquivo": "backend/src/services/voice.ts",
+    "linha": 103,
+    "trecho": "`Você é a assistente virtual da TopConta, uma empresa de cartão de benefícios. ...`"
+   }
+  ],
+  "cenario": "Oposição não reconhecida: um titular recebe uma campanha pelo número da Meta e responde 'Por favor não me mandem mais mensagens'. São mais de 4 palavras e a frase não está em OPT_OUT_PHRASES, então isOptOutMessage devolve false e optedOut fica false. Em segundos o webhook chama maybeAutoReply e o titular recebe 'Este é um canal apenas para informações... não realizamos atendimentos por aqui', com um telefone para ligar, até 3 vezes em 24 h a cada nova tentativa. O pedido de oposição não é registrado, o titular é avisado de que ninguém vai ler e é mandado para outro canal, pago e síncrono, e a resposta não diz que basta responder SAIR. Antes do delta, a mensagem só ficava na Inbox (02-04). Agora o sistema desestimula ativamente a revogação, que deveria ser gratuita e facilitada (art. 8º, §5º; art. 18, IX e §2º; Guia LI p. 52). Pedido de direito: o mesmo ocorre com 'quero saber que dados vocês têm de mim e quero que apaguem'. O texto não identifica o controlador nem menciona privacidade ou encarregado (art. 9º, III e IV; art. 41, §2º, I; Res. 2/2022, Anexo I, art. 11), e para quem escreveu o pedido parece recusado, sem registro de que existiu (03-05). Multi-controlador: a resposta nasce ligada (default true no schema e no SQL; integrations.ts:216 não define o campo) e, sem texto configurado, usa o padrão fixo com o telefone de suporte da TopConta. Um Tenant B que conecte a Meta passa a responder sozinho aos titulares dele com o contato de outro controlador, sem que ninguém de B tenha escrito ou aprovado a mensagem (art. 39). O titular de B pode acabar passando nome, CPF e o problema da conta à TopConta, e B nunca recebe o pedido (art. 6º, VI; art. 46 como vínculo mais fraco). O docs/lgpd/README.md exige que esse tipo de texto seja por tenant, 'nunca fixo para a TopConta'. O prompt do agente de voz repete o padrão ao fixar 'assistente virtual da TopConta' (voice.ts:103 e :107), por enquanto só em ligação de teste. A resposta em si a quem escreveu não é o problema. O problema é o conteúdo, a falta de tratamento do pedido de parar ou de exercer direito, e a identidade de um controlador específico embutida e ligada por padrão no produto. Hoje existe um único tenant, então a parte multi-controlador é latente.",
+  "papel": "ambos",
+  "correcao": "(1) Em backend/src/services/whatsappAutoReply.ts, tirar o telefone fixo de AUTO_REPLY_PADRAO. Sem texto próprio da conta, montar o padrão a partir dos campos LGPD do Tenant propostos em 03-06 (nome do controlador, canal do titular/encarregado), terminando com a instrução de descadastro ('Para não receber mais mensagens, responda SAIR'); sem esses campos, não responder. (2) Trocar o default de WhatsAppAccount.autoReplyEnabled para false em contas novas (schema.prisma e um SQL novo com ALTER COLUMN ... SET DEFAULT false), mantendo a conta existente da TopConta como está por UPDATE explícito. (3) Em routes/inbox.ts (PUT /api/inbox/auto-reply), recusar texto personalizado sem a instrução de opt-out e avisar quando não traz a identificação do controlador; gravar no logAudit um hash ou versão do texto aplicado. (4) Antes de responder, reconhecer pedido de parar não captado pelo detector exato (heurística ampliada de 02-04: 'nao (me )?mand', 'parem', 'nao quero', 'me tira', 'descadastr') e pedido de privacidade (função irmã de isOptOutMessage em whatsappPayload.ts: 'lgpd', 'meus dados', 'apagar', 'excluir', 'privacidade'). Nesses casos, não mandar o 'não atendemos': responder com como sair ou com o canal do titular, marcar a conversa (possível opt-out / pedido de titular) e, junto com 03-05, abrir um PedidoTitular pendente. (5) Em services/voice.ts (buildInstructions), receber o nome do controlador como parâmetro antes de a voz sair do modo de teste. Testes em whatsappAutoReply.test.ts para (1), (2) e (4).",
+  "tipo": "codigo",
+  "multi_tenant": "Texto da resposta automática, contato de suporte/privacidade, nome do controlador e palavras de opt-out por Tenant (campos de 03-06). autoReplyEnabled continua por conta, com padrão false para contas novas e desligado enquanto o tenant não tiver texto ou canal configurado. O nome do controlador usado no prompt de voz também vem do Tenant.",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "whatsappAutoReply.ts:12-14: o texto padrão diz que o canal não atende e manda para um telefone de suporte fixo no código (número comercial, não reproduzido), sem instrução de SAIR/PARAR; :22-24 usam o padrão quando o texto é nulo; :28-29 só excluem optedOut. whatsappPayload.ts:137-145 e :163-168: o detector exige até 4 palavras iniciadas por palavra-chave, ou uma das 6 frases exatas; uma frase de 7 palavras fora da lista recebe a resposta automática, até 3x em 24 h (:16-17, :51-54). schema.prisma:724 e o SQL (l.4) têm DEFAULT true; integrations.ts:216 não define o campo; integrations.ts:405 chama maybeAutoReply no webhook da Meta. docs/lgpd/README.md:34-36 confirma a premissa multi-controlador. voice.ts:101-107 fixa 'assistente virtual da TopConta'. Mitigação parcial: o ADMIN pode trocar o texto ou desligar (PUT /api/inbox/auto-reply, inbox.ts:77), e a resposta nunca vai a quem fez opt-out reconhecido. Âncoras art-6, art-8, art-9, art-18, art-39, art-41, art-46, p-52 e anexo-i-art-11 existem. Consolidação: 03-08 (CONFIRMED, baixa), 07-06 (CONFIRMED, baixa) e 08-10 (PLAUSIBLE, baixa) apontam o mesmo AUTO_REPLY_PADRAO e o mesmo default true, com a mesma correção (texto do Tenant, default false). Prevalece media, de 02-08: o efeito sobre a revogação é obrigação atendida só em parte. A parte multi-controlador depende de existir um segundo tenant, fato fora do repositório (o grep por tenant.create só acha prisma/seed.ts:15).",
+  "tambem": [
+   "03-08",
+   "07-06",
+   "08-10"
+  ]
+ },
+ {
+  "id": "04-08",
+  "titulo": "Conexão Z-API guarda cópia de toda conversa (texto e mídia) no celular pareado e na Z-API, fora do alcance de qualquer retenção ou eliminação do CRM",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-16",
+   "docs/lgpd/fontes/lei-13709.md#art-15",
+   "docs/lgpd/fontes/lei-13709.md#art-6",
+   "docs/lgpd/fontes/lei-13709.md#art-39"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/zapi.ts",
+    "linha": 5,
+    "trecho": " * Z-API: WhatsApp NÃO oficial (sessão do WhatsApp Web lida por QR code)."
+   },
+   {
+    "arquivo": "backend/src/routes/zapiWebhook.ts",
+    "linha": 38,
+    "trecho": "// Guarda o arquivo agora (o link da Z-API vale ~30 dias). Melhor esforço: nunca derruba o recebimento."
+   },
+   {
+    "arquivo": "backend/src/services/zapi.ts",
+    "linha": 103,
+    "trecho": "await call(c, \"update-every-webhooks\", { method: \"PUT\", body: { value: webhookUrl, notifySentByMe: false } }, f);"
+   },
+   {
+    "arquivo": "backend/src/routes/tenantWhatsapp.ts",
+    "linha": 189,
+    "trecho": "/** DELETE /zapi — desconecta: apaga as credenciais e desativa (o histórico de conversas fica). Se era a ativa, volta para a Meta. */"
+   },
+   {
+    "arquivo": "backend/src/services/retention.ts",
+    "linha": 103,
+    "trecho": "await prisma.client.update({ ... })  // grep -n \"zapi\\|conversation\\|waMessage\\|waMediaBlob\" backend/src/services/retention.ts -> vazio"
+   }
+  ],
+  "cenario": "Novo no delta (6fabc33, já em produção segundo list_deployments da Vercel). A TopConta liga uma instância Z-API pareando, por QR code, um celular com WhatsApp. A partir daí, cada campanha enviada pela Z-API (texto livre com nome e saldo do cliente) e cada resposta do titular, incluindo fotos e documentos, ficam guardadas em três lugares: no CRM (Conversation/WaMessage/WaMediaBlob, já sem prazo, ver 04-02), no app WhatsApp do celular pareado e na Z-API, onde o link da mídia fica disponível por cerca de 30 dias, segundo o próprio código. As mensagens digitadas direto no celular nem chegam ao CRM (notifySentByMe: false), então o sistema não tem inventário do que está no aparelho. Três anos depois, a retenção anonimiza o Client. Mesmo que 04-02 seja corrigido e a inbox seja apagada, o celular continua mostrando o número em claro, o nome do perfil, todo o histórico e as mídias do titular, nas mãos de quem estiver com o aparelho (por exemplo, o operador contratado). O mesmo vale para um pedido de eliminação (art. 18, VI) e para 'Desconectar' a Z-API, que só apaga as credenciais. Nada no código nem na documentação define prazo ou procedimento para essas cópias. Hoje a produção tem 1 linha em WhatsAppAccount (list_tables), então talvez a Z-API ainda não esteja pareada: o risco começa quando ela for ativada.",
+  "papel": "ambos",
+  "correcao": "(1) Fora do código, que é o principal: a controladora define e instrui por escrito (art. 39) a política do aparelho pareado. Opções: celular dedicado e corporativo; temporizador padrão de mensagens temporárias do WhatsApp ligado no aparelho (ex.: 90 dias ou menos, para o histórico local não passar do prazo do CRM); desparear e apagar os dados do aparelho ao fim do contrato ou do uso; cláusula de retenção e eliminação com a Z-API no contrato de suboperador e inclusão dela no inventário de 06-03. Recomendação: aparelho dedicado com temporizador padrão e procedimento de despareamento. (2) No código, como apoio: em backend/src/routes/tenantWhatsapp.ts (PUT /ativo e PUT /zapi) e em frontend/src/components/WhatsAppProviderCard.tsx, exigir que o admin confirme que a política do aparelho foi aplicada e registrar isso no AuditLog. Garantir que a correção de 04-02 em services/retention.ts também alcance conversas de contas provider=ZAPI e de contas desativadas.",
+  "tipo": "fora_do_codigo",
+  "multi_tenant": "Permitir ou não a Z-API e a política do aparelho pareado (prazo do temporizador, responsável pelo aparelho) passam a ser configuração LGPD por Tenant, junto da configuração prevista em 03-06; confirmação registrada por tenant.",
+  "severidade_original": "media",
+  "veredito": "PLAUSIBLE",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "O código confere com o achado. zapi.ts:5 diz que a integração é sessão de WhatsApp Web via QR. zapi.ts:103 passa notifySentByMe:false e zapi.ts:143 descarta mensagens fromMe, então o que é digitado no aparelho não chega ao CRM. zapiWebhook.ts:38 registra que o link da Z-API vale cerca de 30 dias e baixa a mídia para WaMediaBlob. tenantWhatsapp.ts:189-196 só apaga credenciais e desativa a conta, e o frontend (WhatsAppProviderCard.tsx:102) confirma que o histórico continua. Em retention.ts, o grep por zapi, conversation, waMessage e waMediaBlob volta vazio. Fora de docs/lgpd/auditoria, nenhum documento define política para o aparelho pareado ou retenção na Z-API. As âncoras art-6, art-15, art-16 e art-39 existem; o art. 16 exige eliminar ao fim do tratamento, o que alcança as cópias do aparelho e do suboperador. PLAUSIBLE porque o núcleo é fora_do_codigo: não dá para saber pelo repositório se a Z-API está pareada em produção ou se a controladora já tem política de aparelho ou contrato com a Z-API. Severidade media: eliminação atendida só em parte, risco condicionado."
+ },
+ {
+  "id": "05-07",
+  "titulo": "Acesso por área (middleware/areaAccess.ts) é contornado escrevendo o caminho com maiúsculas (/api/CLIENTS/export.csv): areaForRequest compara diferenciando maiúsculas e o Express roteia sem diferenciar, e a mesma brecha deixa passar usuário desativado com JWT ainda válido",
+  "severidade": "media",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-46",
+   "docs/lgpd/fontes/lei-13709.md#art-49",
+   "docs/lgpd/fontes/lei-13709.md#art-6",
+   "docs/lgpd/fontes/lei-13709.md#art-39"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/areas.ts",
+    "linha": 93,
+    "trecho": "if (p !== r.prefix && !p.startsWith(r.prefix + \"/\")) continue;"
+   },
+   {
+    "arquivo": "backend/src/services/areas.ts",
+    "linha": 97,
+    "trecho": "return null;"
+   },
+   {
+    "arquivo": "backend/src/services/areas.ts",
+    "linha": 29,
+    "trecho": "{ id: \"atendimento\", nome: \"Atendimento\", areas: [\"inbox\"] },"
+   },
+   {
+    "arquivo": "backend/src/middleware/areaAccess.ts",
+    "linha": 35,
+    "trecho": "const required = areaForRequest(req.method, req.path);\n  if (!required) return next();"
+   },
+   {
+    "arquivo": "backend/src/app.ts",
+    "linha": 44,
+    "trecho": "const app = express();  (sem app.set(\"case sensitive routing\", true); grep -rn \"case sensitive\\|caseSensitive\" backend/src -> vazio)"
+   },
+   {
+    "arquivo": "backend/src/app.ts",
+    "linha": 81,
+    "trecho": "app.use(\"/api\", areaAccess);"
+   },
+   {
+    "arquivo": "backend/src/app.ts",
+    "linha": 83,
+    "trecho": "app.use(\"/api/clients\", clientRoutes);"
+   },
+   {
+    "arquivo": "backend/src/routes/clients.ts",
+    "linha": 45,
+    "trecho": "router.get(\"/export.csv\", requireRole(\"ADMIN\", \"OPERATOR\", \"ANALYST\"), async (req, res) => {"
+   },
+   {
+    "arquivo": "backend/src/middleware/auth.ts",
+    "linha": 22,
+    "trecho": "req.user = { id: payload.sub, tenantId: payload.tenantId, role: payload.role, email: payload.email };  (requireAuth não confere User.active; só o areaAccess confere)"
+   }
+  ],
+  "cenario": "O ADMIN da TopConta cria o usuário de um atendente, ou do contratado que opera os disparos, com papel OPERATOR e o perfil 'Atendimento' (areas = ['inbox'], areas.ts:29), justamente para que ele não veja a base. A tela esconde o menu, e a API deveria barrar o resto (comentário em areas.ts: 'a conferência de verdade é na API'). Com o próprio JWT, essa pessoa chama GET /api/CLIENTS/export.csv (pelo console do navegador via rewrite do frontend, ou direto no domínio do backend, sem proteção em produção). O areaAccess recebe req.path '/CLIENTS/export.csv'. areaForRequest compara com startsWith, que diferencia maiúsculas, nenhuma regra casa, devolve null, e o middleware libera sem olhar a área. Em seguida o Express 4.22.2 (roteamento sem diferenciar maiúsculas por padrão) entrega a requisição ao router de clients, o requireRole aceita OPERATOR e sai um CSV de até 50 mil clientes com nome e telefone completo. O mesmo vale para /api/AUDIT-LOGS, /api/IMPORTS/csv, /api/SEGMENTS e qualquer outra área. A mesma brecha anula a outra proteção que o delta trouxe: um usuário desativado ao fim do contrato só é barrado (401) quando a área é conferida. Em caminho com maiúsculas, o requireAuth aceita o JWT, que vale 12 h, sem olhar User.active. Os dois verificadores reproduziram sem banco: um app Express mínimo com o node_modules do repositório e a mesma montagem respondeu 200 em /api/Clients/export.csv e /API/CLIENTS/export.csv (403 em /api/clients/export.csv), e areaForRequest('GET','/CLIENTS/export.csv') devolveu null, com canAccess = true para o perfil só-inbox. A medida de segurança nova do delta (commit e75bbfe) parece funcionar e não funciona: a controladora acha que restringiu quem vê a base e não tem como garantir que o operador fique dentro das instruções dela (art. 39; art. 46). O 403 da área também não vai para o AuditLog e o contorno não deixa rastro (agrava 05-03). Fica em media porque o acesso é de usuário autenticado do mesmo controlador, dentro do que o papel já permitia. Não foi verificado se há usuários com área restrita em produção (dado do banco, fora do escopo).",
+  "papel": "operador",
+  "correcao": "Em backend/src/services/areas.ts (areaForRequest), normalizar o caminho antes de comparar: p = decodeURIComponent(...).toLowerCase() (todos os prefixos de RULES já são minúsculos). Negar por padrão: para usuário com areasRestritas=true, caminho de /api sem regra conhecida responde 403 em middleware/areaAccess.ts, em vez de seguir com next(). Em backend/src/app.ts, app.set('case sensitive routing', true) antes das montagens, como defesa em profundidade. Levar a checagem de User.active para o requireAuth (middleware/auth.ts), ou aplicá-la a todo caminho autenticado e não só aos que têm área. Gravar o 403 SEM_ACESSO_AREA com logAudit (ACCESS_DENIED_AREA, sem PII), alinhado com a correção de 05-03. Em areas.test.ts, casos com maiúsculas ('/CLIENTS/export.csv', '/Audit-logs') e barra dupla, e um teste de integração com supertest sobre o app real.",
+  "tipo": "codigo",
+  "multi_tenant": "n/a (a configuração de áreas já é por usuário dentro de cada tenant; a correção é no mecanismo comum, igual para todos os controladores)",
+  "severidade_original": "media",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "areas.ts:90-97: areaForRequest não converte o caminho para minúsculas; a comparação está em :93 e o 'return null' em :97, e o null vira liberação em areaAccess.ts:35-36 e em canAccess (areas.ts:112-113). app.ts:44 não liga 'case sensitive routing' (grep vazio) e o Express é 4.22.2. app.ts:81 monta areaAccess em /api e app.ts:83 monta /api/clients. clients.ts:45 libera export.csv a OPERATOR e clients.ts:9 usa requireAuth. auth.ts:10-30 não confere active, e o JWT vale 12 h (l.46). backend/vercel.json repassa '/(.*)' para api/index.ts com as maiúsculas originais, então nenhum proxy normaliza o caminho. Reproduzido em app Express mínimo (200 com maiúsculas, 403 em minúsculas). Âncoras art-6, art-39, art-46 e art-49 existem. Consolidação: 08-09 (CONFIRMED, media) tem a mesma causa (areas.ts:93) e a mesma correção, e acrescenta o efeito sobre usuário desativado; foi incorporado aqui. As linhas de areas.ts citadas originalmente em 05-07 (:148, :152, :84) estavam erradas e foram corrigidas para :93, :97 e :29.",
+  "tambem": [
+   "08-09"
+  ]
+ },
+ {
+  "id": "06-04",
+  "titulo": "(agrava 06-03) O delta passa dado pessoal pela Z-API e pela xAI (voz) sem inventário nem aviso de transferência, e a voz usa credenciais globais do operador que a controladora não escolhe nem desliga",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/anpd-res-19-2024-transf-intl.md#anexo-i-art-17",
+   "docs/lgpd/fontes/anpd-res-19-2024-transf-intl.md#anexo-i-art-32",
+   "docs/lgpd/fontes/lei-13709.md#art-33",
+   "docs/lgpd/fontes/lei-13709.md#art-39",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "backend/src/services/zapi.ts",
+    "linha": 114,
+    "trecho": "const j = await call(c, \"send-text\", { method: \"POST\", body: { phone: zapiPhone(to), message, ..."
+   },
+   {
+    "arquivo": "backend/src/services/zapi.ts",
+    "linha": 103,
+    "trecho": "await call(c, \"update-every-webhooks\", { method: \"PUT\", body: { value: webhookUrl, notifySentByMe: false } }, f);"
+   },
+   {
+    "arquivo": "backend/src/routes/zapiWebhook.ts",
+    "linha": 38,
+    "trecho": "// Guarda o arquivo agora (o link da Z-API vale ~30 dias). Melhor esforço: nunca derruba o recebimento."
+   },
+   {
+    "arquivo": "frontend/src/components/WhatsAppProviderCard.tsx",
+    "linha": 153,
+    "trecho": "{opcao(\"ZAPI\", \"Z-API (não oficial)\", \"Texto livre por QR code, sem template nem janela. Viola os termos do WhatsApp: risco de bloqueio do número.\", ..."
+   },
+   {
+    "arquivo": "backend/api/voice-bridge.ts",
+    "linha": 23,
+    "trecho": "const base = \"wss://api.x.ai/v1/realtime\";"
+   },
+   {
+    "arquivo": "backend/src/services/voice.ts",
+    "linha": 130,
+    "trecho": "input: { format: { type: \"audio/pcmu\" }, transcription: { model: \"grok-transcribe\", language_hint: \"pt-BR\" } },"
+   },
+   {
+    "arquivo": "backend/src/routes/voice.ts",
+    "linha": 22,
+    "trecho": "twilio: !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && fromNumber()),"
+   },
+   {
+    "arquivo": "docs/lgpd/README.md",
+    "linha": 32,
+    "trecho": "| Meta (WhatsApp Cloud API), Twilio, Zenvia, Google (Sheets), Vercel, Supabase | **Suboperadores** | ..."
+   }
+  ],
+  "cenario": "Um ADMIN da TopConta ativa a Z-API em Configurações -> WhatsApp (PUT /api/tenant/whatsapp/ativo). A partir desse momento, campanhas e respostas da Inbox mandam telefone e texto já personalizado (nome e variáveis do template) para api.z-api.io (zapi.ts:114). A Z-API mantém a sessão do WhatsApp Web do número: recebe todas as mensagens que chegam a ele, inclusive de grupos e conversas pessoais que o CRM depois descarta (zapi.ts:103 aponta todos os webhooks da instância para o CRM), e guarda as mídias recebidas no CDN dela por cerca de 30 dias (zapiWebhook.ts:38). A tela só avisa do risco de bloqueio pelos termos do WhatsApp (WhatsAppProviderCard.tsx:153); não diz quem é esse terceiro, onde ele processa os dados, nem que ele fica com a sessão inteira do número. Na voz, o ADMIN de qualquer tenant dispara uma ligação de teste (POST /api/voice/test-call). Nome e saldo vão no token do TwiML para o Twilio, e o áudio de quem atende, mais a transcrição (grok-transcribe), vão para a xAI em wss://api.x.ai (voice-bridge.ts:23, voice.ts:130). Isso roda com as contas globais do operador (TWILIO_*, XAI_API_KEY, VOICE_TEST_NUMBER em routes/voice.ts:16-22): a controladora não escolhe o provedor nem consegue desligá-lo. Hoje a ligação vai sempre para o celular de teste, mas as pendências do commit 1bab24c (CLAUDE.md) já preveem cliente ligando para a IA pelo WhatsApp, com o áudio hospedado no Fly.io: quando isso entrar, a voz de clientes reais irá para a xAI (EUA) sem mecanismo do art. 33 escolhido pela controladora. Nenhum documento cobre os destinos novos: o README (l.32) lista só Meta, Twilio, Zenvia, Google, Vercel e Supabase, e o .env.example não lista XAI_API_KEY nem VOICE_*. Limites: o deploy de produção do backend (6fabc33) já tem Z-API e voz; em produção há 1 linha em WhatsAppAccount, compatível com só a Meta configurada, então a Z-API provavelmente ainda não está ativa, e o país onde ela processa os dados não aparece no código.",
+  "papel": "ambos",
+  "correcao": "(1) Incluir no inventário proposto em 06-03 (docs/lgpd/artefatos/suboperadores.md), para cada destino novo, o dado enviado, a finalidade, o país e o mecanismo do art. 33: Z-API (api.z-api.io e o CDN de mídia; telefone, texto enviado e recebido, mídia e a sessão do número), xAI (api.x.ai; áudio, transcrição, nome e saldo ditos na ligação), Twilio Voice (api.twilio.com/Calls; número chamado, TwiML com nome e saldo) e, quando for adotado, Fly.io (servidor de áudio). (2) Em frontend/src/components/WhatsAppProviderCard.tsx, completar o texto da opção Z-API: ela é um terceiro que fica com a sessão do número e recebe todas as mensagens dele, e precisa de contrato. No VoiceTestCard.tsx, informar que o áudio vai para a xAI (EUA). (3) Antes da fase 2 da voz (ligar para clientes ou receber ligações deles), tirar Twilio Voice e xAI das variáveis globais (routes/voice.ts, api/voice-bridge.ts) e passar para configuração cifrada por tenant com flag active, como a Z-API já faz (WhatsAppAccount.credentials com services/crypto.ts), seguindo a mesma correção de 06-01. Manter VOICE_LOG_TRANSCRIPT desligado. (4) Fora do código: contrato operador-suboperador com a Z-API, cobrindo o prazo de retenção das mídias no CDN e o país de processamento, e DPA com cláusulas-padrão da Res. 19/2024 (ou outro mecanismo do art. 33) com a xAI antes de qualquer ligação com cliente real.",
+  "tipo": "fora_do_codigo",
+  "multi_tenant": "A lista de suboperadores é gerada por Tenant a partir de Tenant.whatsappProvider, WhatsAppAccount.provider e da configuração de voz. As credenciais de voz (Twilio Voice, xAI) passam a ser por Tenant, com liga/desliga, sem conta global do operador.",
+  "severidade_original": "baixa",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "Todas as evidências existem e dizem o que o achado afirma. zapi.ts:~114 envia telefone e texto à Z-API; zapi.ts:103 aponta todos os webhooks da instância para o CRM; zapiWebhook.ts:38 comenta o link de mídia de ~30 dias; WhatsAppProviderCard.tsx:153 só avisa do bloqueio; voice-bridge.ts:23 usa wss://api.x.ai e voice.ts:130 usa grok-transcribe; routes/voice.ts:16-27 lê TWILIO_*, XAI_API_KEY e VOICE_TEST_NUMBER do ambiente global; README.md:32 lista só os provedores antigos; fora de fontes/, o grep por z-api, zapi, xai e grok em docs só acha a auditoria 2026-10-18; backend/.env.example não tem XAI nem VOICE. Mitigações parciais: a Z-API é por tenant (WhatsAppAccount com flag active, tenantWhatsapp.ts:33-42); a ligação de teste exige ADMIN e só liga para o número de teste; VOICE_LOG_TRANSCRIPT vem desligado (voice-bridge.ts:63); VoiceTestCard.tsx:52 já cita a xAI, sem o país. As cinco âncoras existem; o Anexo I art. 32 é pouco pertinente (só remete ao art. 17), mas não é exigência inventada. Severidade baixa: falha de transparência e documentação, Z-API provavelmente inativa e voz só no número de teste."
+ },
+ {
+  "id": "07-05",
+  "titulo": "Aviso de mensagem nova leva o nome do cliente e o trecho da mensagem dele para a notificação do sistema operacional e para todas as telas de todos os usuários (agrava 01-04)",
+  "severidade": "baixa",
+  "dispositivos": [
+   "docs/lgpd/fontes/lei-13709.md#art-46",
+   "docs/lgpd/fontes/lei-13709.md#art-6"
+  ],
+  "evidencias": [
+   {
+    "arquivo": "frontend/src/components/InboxAlerts.tsx",
+    "linha": 75,
+    "trecho": "const n = new Notification(`WhatsApp · ${ultima.nome}`, { body: ultima.preview ?? \"Nova mensagem\", tag: \"crm-inbox\" });"
+   },
+   {
+    "arquivo": "backend/src/routes/inbox.ts",
+    "linha": 54,
+    "trecho": "? { id: ultima.id, nome: ultima.client?.nome ?? ultima.contactName ?? \"Contato sem cadastro\", preview: ultima.lastPreview, em: ultima.lastInboundAt!.toISOString() }"
+   },
+   {
+    "arquivo": "backend/src/services/whatsappInbox.ts",
+    "linha": 125,
+    "trecho": "...(maisRecente ? { lastMessageAt: m.timestamp, lastInboundAt: m.timestamp, lastPreview: previewOf(m) } : {}),"
+   },
+   {
+    "arquivo": "frontend/src/App.tsx",
+    "linha": 223,
+    "trecho": "<InboxAlerts />"
+   },
+   {
+    "arquivo": "backend/prisma/schema.prisma",
+    "linha": 150,
+    "trecho": "areasRestritas Boolean  @default(false)"
+   }
+  ],
+  "cenario": "Desde d7089f6/1085420, o componente InboxAlerts fica montado em todas as telas e consulta GET /api/inbox/resumo a cada 15 s. A rota devolve o nome do cliente (ou o nome de perfil do WhatsApp, quando o contato não tem cadastro) e o lastPreview, que guarda até 140 caracteres do texto que o cliente mandou. Pela Z-API isso acontece sempre, porque ela não tem resposta automática; pela Meta, depois que a resposta automática atinge o limite de 3 por conversa. Quando o usuário ativa 'Ativar avisos no navegador' (Inbox.tsx:362) e a aba está em segundo plano, o navegador cria uma notificação do sistema operacional com título 'WhatsApp · <nome do cliente>' e corpo com o texto da mensagem, por exemplo um pedido de ajuda com o saldo. Essa notificação aparece na tela de bloqueio e continua na central de notificações depois do logout, fora de todo controle do CRM: sem login, sem trilha e sem a máscara de telefone que a Inbox aplica. Quem senta no computador do operador contratado, ou vê a tela dele, lê o nome e o conteúdo da conversa sem entrar no sistema. Como areasRestritas nasce false e /resumo só exige requireAuth mais a área 'inbox', qualquer usuário, inclusive VIEWER, recebe o nome e o trecho da mensagem em qualquer tela. Isso amplia a exposição já registrada em 01-04. A LGPD não proíbe a notificação em si: é endurecimento (art. 46; art. 6º, VII e VIII), por isso a severidade é baixa.",
+  "papel": "operador",
+  "correcao": "Em frontend/src/components/InboxAlerts.tsx, a notificação do navegador e o balão passam a ter texto genérico por padrão ('Nova mensagem no WhatsApp', sem nome e sem corpo); o conteúdo só aparece dentro da Inbox, depois do clique. Em backend/src/routes/inbox.ts (GET /resumo), devolver só naoLidas, id e em, sem nome nem preview, salvo quando o tenant habilitar explicitamente. Exigir requireRole('ADMIN','OPERATOR') em /resumo, porque ANALYST e VIEWER não respondem conversas. Na tela de Usuários -> Acessos, avisar que a área 'inbox' dá acesso ao conteúdo das conversas.",
+  "tipo": "codigo",
+  "multi_tenant": "Tenant.avisoInboxMostraConteudo (boolean, padrão false): quando true, o resumo e a notificação incluem o nome e o trecho da mensagem.",
+  "severidade_original": "baixa",
+  "veredito": "CONFIRMED",
+  "dispositivos_validos": true,
+  "motivo_verificacao": "InboxAlerts.tsx:75 cria a Notification com o título 'WhatsApp · nome' e com o preview no corpo; o balão (l.69-70, 104-105) mostra o mesmo conteúdo em qualquer tela; o componente está montado em App.tsx:223. inbox.ts:41-56 (/resumo) devolve nome e lastPreview e só exige requireAuth (l.20) mais a área 'inbox' (areas.ts:72), liberada por padrão (schema.prisma:150). whatsappInbox.ts:125 grava previewOf(m). Pela Meta, whatsappAutoReply.ts:65 sobrescreve o lastPreview até o limite. Não há modo genérico de notificação. A favor de ser só endurecimento: a notificação depende da permissão dada pelo usuário (Inbox.tsx:362), e o VIEWER já lê as conversas por GET /conversations (inbox.ts:100); a exposição nova é a do sistema operacional. Âncoras art-46 e art-6 existem. Severidade baixa correta."
+ }
+]

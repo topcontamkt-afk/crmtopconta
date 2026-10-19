@@ -25,6 +25,7 @@ import { useAuth, type AuthUser } from "./context/AuthContext";
 import Login from "./pages/Login";
 import Clients from "./pages/Clients";
 import ClientProfile from "./pages/ClientProfile";
+import PedidosTitular from "./pages/PedidosTitular";
 import Ciclos from "./pages/Ciclos";
 import Segments from "./pages/Segments";
 import CampaignList from "./pages/campaigns/CampaignList";
@@ -259,6 +260,7 @@ export default function App() {
                   }
                 />
                 <Route path="/clients" element={<Clients />} />
+                <Route path="/clients/pedidos-titular" element={<PedidosTitular />} />
                 <Route path="/clients/:id" element={<ClientProfile />} />
                 <Route path="/segments" element={<Segments />} />
                 <Route path="/ciclos" element={<Ciclos />} />

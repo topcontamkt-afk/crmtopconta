@@ -4,25 +4,33 @@ import { MockSMSAdapter, TwilioSMSAdapter, ZenviaSMSAdapter } from "./channels/s
 import { MockWhatsAppAdapter, WhatsAppCloudAdapter } from "./channels/whatsapp";
 import { ZAPI_BATCH_MAX, ZapiAdapter } from "./channels/zapi";
 import { zapiCredentialsOf } from "./zapi";
-import { buildSegmentWhere, ENVIAVEL_WHERE, SegmentFilters, SegmentGroup } from "./segments";
+import { AVISO_RENDA_IGNORADA, buildSegmentWhere, ENVIAVEL_WHERE, filtrosRendaIgnorados, SegmentFilters, SegmentGroup } from "./segments";
 import { templateParams, templatePreview } from "./whatsappTemplates";
 import { unmappedPositions } from "./templateImport";
 import { makeToken, trackedButtons } from "./trackedLinks";
 import { recordOutboundTemplateMessage } from "./whatsappInbox";
-import { credentialsOf } from "./whatsappAccount";
+import { credentialsOf, globalCredentialsAllowed } from "./whatsappAccount";
+import { CONTATO_LIBERADO_WHERE, contatoSuprimido, motivoBloqueioCliente, semSuprimidos, suprimidosEmLote, textoSupressao, canonicalPhone } from "./privacy";
 import { decryptSecret, isEncryptedPayload } from "./crypto";
 import { brl, recipientContext, renderTemplate, templateContext, usesLimiteDisponivel } from "./messageContext";
+import { comRodape, montarRodape } from "./templateVariables";
+import { baseLegalVigente, motivoSemBaseLegal } from "./baseLegal";
 export { recipientContext, renderTemplate, templateContext, usesLimiteDisponivel };
 
 /**
  * Processamento de fila de campanha.
  * Regras aplicadas antes de cada envio:
- *  - exclui clientes sem autorizacao_comunicacao (opt-out) ou com optOutAt preenchido;
+ *  - exclui clientes sem autorizacao_comunicacao (opt-out), com optOutAt ou bloqueadoLgpdAt preenchido;
+ *  - LGPD 02-03: exclui todo contato (cliente OU destinatário de lista) cujo telefone/documento está
+ *    suprimido (SupressaoTitular) ou que pediu para parar por qualquer registro com o mesmo número;
  *  - respeita a janela mínima de dedupe (dedupeWindowHrs) por cliente+template;
  *  - respeita o throttle configurado (throttlePerMin) e o rate limit global do tenant
  *    (Tenant.maxMsgsPerMinute — Fase 2);
  *  - tenta os provedores do canal em ordem de prioridade, com failover automático em falha
- *    (Fase 2 — multi-provider SMS).
+ *    (Fase 2 — multi-provider SMS);
+ *  - LGPD 02-01: nada é enfileirado nem enviado sem base legal declarada pelo tenant (Configurações → LGPD);
+ *  - LGPD 02-05/02-07: texto livre (SMS, Z-API, WhatsApp sem template da Meta) sempre leva o rodapé do
+ *    controlador com a instrução de descadastro (`montarRodape`). Template da Meta vai como aprovado.
  * Em produção isso roda em workers dedicados por canal, consumindo de uma fila real
  * (RabbitMQ/Redis Streams) — aqui a fila é modelada em Postgres (MessageEvent status=FILA)
  * para manter o MVP sem dependências de infra extras, com a mesma interface de domínio.
@@ -46,11 +54,22 @@ function instantiateAdapter(channel: "WHATSAPP" | "SMS", provider: string, creds
   return null;
 }
 
+/** Mensagem do bloqueio quando o tenant não tem provedor próprio para o canal (LGPD 06-01). */
+export function semProvedorMotivo(channel: "WHATSAPP" | "SMS"): string {
+  return channel === "WHATSAPP"
+    ? "Nenhum WhatsApp configurado para esta empresa: configure o canal do tenant em Integrações → WhatsApp (ou Configurações → WhatsApp, para a Z-API). Nada foi enviado."
+    : "Nenhum provedor de SMS configurado para esta empresa: configure o canal do tenant em Configurações → Canais. Nada foi enviado.";
+}
+
 /**
  * Resolve a lista ordenada de provedores ativos do tenant para o canal (menor priority primeiro).
- * Se o tenant não configurou nenhum ChannelConfig (ainda comum em ambiente de dev/sandbox),
- * cai para o adaptador único baseado em variáveis de ambiente (compatibilidade com a Fase 1),
- * e na ausência total de credenciais usa o adaptador mock.
+ *
+ * LGPD 06-01: o tráfego de um tenant só sai pelos provedores que ELE configurou (ChannelConfig ou
+ * WhatsAppAccount). A credencial global do ambiente (WHATSAPP_*, TWILIO_*) só vale quando liberada de
+ * propósito (`ALLOW_GLOBAL_CHANNEL_CREDENTIALS=true`, dev) ou para o tenant dono dela
+ * (`PLATFORM_DEFAULT_TENANT_ID`); ver `globalCredentialsAllowed`. Fora disso: mock fora de produção (dev,
+ * testes) e lista VAZIA em produção, o que bloqueia o disparo com `semProvedorMotivo` em vez de enviar os
+ * dados dos clientes por uma conta que a controladora não escolheu.
  */
 async function resolveProviders(
   prisma: AppPrismaClient,
@@ -95,18 +114,22 @@ async function resolveProviders(
     if (account && token && account.credentials) return [{ name: "whatsapp_cloud_api", adapter: new WhatsAppCloudAdapter(account.phoneNumberId, token) }];
   }
 
-  // Fallback env-based (Fase 1)
-  if (channel === "WHATSAPP") {
-    const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-    const token = process.env.WHATSAPP_ACCESS_TOKEN;
-    if (phoneId && token) return [{ name: "whatsapp_cloud_api", adapter: new WhatsAppCloudAdapter(phoneId, token) }];
-    return [{ name: "mock", adapter: new MockWhatsAppAdapter() }];
+  // Reserva pela credencial do ambiente (Fase 1): só com liberação explícita (LGPD 06-01)
+  if (globalCredentialsAllowed(tenantId)) {
+    if (channel === "WHATSAPP") {
+      const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+      const token = process.env.WHATSAPP_ACCESS_TOKEN;
+      if (phoneId && token) return [{ name: "whatsapp_cloud_api", adapter: new WhatsAppCloudAdapter(phoneId, token) }];
+    } else {
+      const sid = process.env.TWILIO_ACCOUNT_SID;
+      const authToken = process.env.TWILIO_AUTH_TOKEN;
+      const from = process.env.TWILIO_FROM_NUMBER;
+      if (sid && authToken && from) return [{ name: "twilio", adapter: new TwilioSMSAdapter(sid, authToken, from) }];
+    }
   }
-  const sid = process.env.TWILIO_ACCOUNT_SID;
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
-  const from = process.env.TWILIO_FROM_NUMBER;
-  if (sid && authToken && from) return [{ name: "twilio", adapter: new TwilioSMSAdapter(sid, authToken, from) }];
-  return [{ name: "mock", adapter: new MockSMSAdapter() }];
+  // Mock (só simula) fora de produção; em produção, sem provedor do tenant não há envio.
+  if (process.env.NODE_ENV === "production") return [];
+  return [{ name: "mock", adapter: channel === "WHATSAPP" ? new MockWhatsAppAdapter() : new MockSMSAdapter() }];
 }
 
 /** O tenant tem um WhatsApp REAL conectado (senão o envio cai no mock, que só simula)? */
@@ -144,7 +167,7 @@ export async function resolveWhatsAppTemplate(
   providers: ResolvedProvider[]
 ): Promise<{ template: any | null; bloqueado?: string }> {
   if (campaign.channel !== "WHATSAPP") return { template: null };
-  if (providers.length === 0) return { template: null, bloqueado: "O WhatsApp ativo (Z-API) não está configurado. Veja Configurações → WhatsApp." };
+  if (providers.length === 0) return { template: null, bloqueado: semProvedorMotivo("WHATSAPP") };
   // Z-API: texto livre (o texto do template, com as variáveis preenchidas); nada é enviado como template da Meta
   if (providers[0].name === "zapi") return { template: null };
   const real = providers.some((p) => p.name !== "mock");
@@ -184,7 +207,10 @@ export async function prepareHeaderImage(
   }
 }
 
-/** Monta o público da campanha a partir do segmento salvo ou de filtros ad-hoc, sempre excluindo opt-outs. */
+/**
+ * Monta o público da campanha a partir do segmento salvo ou de filtros ad-hoc, sempre excluindo opt-outs,
+ * bloqueios a pedido do titular e telefones/documentos suprimidos (LGPD 02-03).
+ */
 export async function buildAudience(prisma: AppPrismaClient, tenantId: string, campaignId: string) {
   const campaign = await prisma.campaign.findUniqueOrThrow({
     where: { id: campaignId },
@@ -195,25 +221,39 @@ export async function buildAudience(prisma: AppPrismaClient, tenantId: string, c
     (campaign.segment?.filters as any) || (campaign.adHocFilters as any) || {};
   const where = buildSegmentWhere(tenantId, filters);
 
-  return prisma.client.findMany({
+  const clientes = await prisma.client.findMany({
     where: {
       ...where,
-      autorizacaoComunicacao: true,
-      optOutAt: null,
+      ...CONTATO_LIBERADO_WHERE,
       statusConta: { not: "BLOQUEADO" },
       // sem limite = comércio credenciado, nunca é público de disparo de cartão
       ...ENVIAVEL_WHERE,
     },
   });
+  // LGPD 02-03: o pedido para parar vale pelo TELEFONE (outro cadastro com o mesmo número, contato de lista)
+  return semSuprimidos(prisma, tenantId, clientes);
 }
 
 /**
  * Enfileira MessageEvents (status FILA) para todos os clientes elegíveis, aplicando a janela de
  * dedupe e sorteando a variante A/B quando a campanha tem variantSplitPercent configurado.
  */
-export async function enqueueCampaign(prisma: AppPrismaClient, tenantId: string, campaignId: string) {
-  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
+export async function enqueueCampaign(
+  prisma: AppPrismaClient,
+  tenantId: string,
+  campaignId: string
+): Promise<{ audienceSize: number; queued: number; control: number; skippedDedupe: number; bloqueados?: number; bloqueado?: string }> {
+  // LGPD 02-01: sem base legal declarada nada entra na fila (campanha, lista manual e automação passam aqui)
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { baseLegalMarketing: true } });
+  const semBase = motivoSemBaseLegal(tenant);
+  if (semBase) return { audienceSize: 0, queued: 0, control: 0, skippedDedupe: 0, bloqueado: semBase };
+
+  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId }, include: { segment: true } });
   if (campaign.manual) return enqueueManualCampaign(prisma, tenantId, campaign);
+  // LGPD 01-03: segmento antigo com filtro de renda (que não vale mais) ampliaria o público em silêncio
+  if (filtrosRendaIgnorados(campaign.segment?.filters ?? campaign.adHocFilters).length) {
+    return { audienceSize: 0, queued: 0, control: 0, skippedDedupe: 0, bloqueado: AVISO_RENDA_IGNORADA };
+  }
   const audience = await buildAudience(prisma, tenantId, campaignId);
 
   const dedupeCutoff = new Date(Date.now() - campaign.dedupeWindowHrs * 60 * 60 * 1000);
@@ -271,23 +311,57 @@ export async function enqueueCampaign(prisma: AppPrismaClient, tenantId: string,
   return { audienceSize: audience.length, queued, control, skippedDedupe };
 }
 
+/** Por que o destinatário de lista não pode receber (opt-out dele, do cliente ligado, ou supressão), ou null. */
+function motivoBloqueioDestinatario(
+  r: { telefone: string; cpfHash: string | null; optOutAt: Date | null; client: { autorizacaoComunicacao: boolean; optOutAt: Date | null; bloqueadoLgpdAt: Date | null; cpfHash: string | null } | null },
+  lote: Awaited<ReturnType<typeof suprimidosEmLote>>
+): string | null {
+  if (r.optOutAt) return "Destinatário pediu para não receber (opt-out)";
+  const doCliente = motivoBloqueioCliente(r.client);
+  if (doCliente) return doCliente;
+  const canon = canonicalPhone(r.telefone);
+  if (contatoSuprimido(lote, { telefone: r.telefone, cpfHash: r.cpfHash }) || contatoSuprimido(lote, { cpfHash: r.client?.cpfHash })) {
+    return textoSupressao(canon ? lote.motivos.get(canon) : null);
+  }
+  return null;
+}
+
 /**
  * Campanha de lista (planilha): o público são os destinatários guardados; cada um entra na fila uma
- * única vez (reagendar não duplica). Quem virou opt-out depois de criada a lista é barrado no envio.
+ * única vez (reagendar não duplica). LGPD 02-03: quem virou opt-out (por qualquer registro com o mesmo
+ * telefone) ou foi suprimido depois de criada a lista entra como BLOQUEADO, com o motivo; o envio confere
+ * de novo, para quem pedir para parar entre o agendamento e o disparo.
  */
-async function enqueueManualCampaign(prisma: AppPrismaClient, tenantId: string, campaign: { id: string; channel: any }) {
+export async function enqueueManualCampaign(prisma: AppPrismaClient, tenantId: string, campaign: { id: string; channel: any }) {
   const recipients = await prisma.campaignRecipient.findMany({
     where: { tenantId, campaignId: campaign.id },
-    select: { id: true, clientId: true, messageEvents: { select: { id: true }, take: 1 } },
+    select: {
+      id: true,
+      clientId: true,
+      telefone: true,
+      cpfHash: true,
+      optOutAt: true,
+      client: { select: { autorizacaoComunicacao: true, optOutAt: true, bloqueadoLgpdAt: true, cpfHash: true } },
+      messageEvents: { select: { id: true }, take: 1 },
+    },
   });
   const novos = recipients.filter((r) => r.messageEvents.length === 0);
+  const lote = await suprimidosEmLote(prisma, tenantId, {
+    telefones: novos.map((r) => r.telefone),
+    docHashes: novos.flatMap((r) => [r.cpfHash, r.client?.cpfHash]),
+  });
+  let bloqueados = 0;
   for (let i = 0; i < novos.length; i += 500) {
     await prisma.messageEvent.createMany({
-      data: novos.slice(i, i + 500).map((r) => ({ campaignId: campaign.id, clientId: r.clientId, recipientId: r.id, channel: campaign.channel, status: "FILA" as const })),
+      data: novos.slice(i, i + 500).map((r) => {
+        const motivo = motivoBloqueioDestinatario(r, lote);
+        if (motivo) bloqueados++;
+        return { campaignId: campaign.id, clientId: r.clientId, recipientId: r.id, channel: campaign.channel, status: motivo ? ("BLOQUEADO" as const) : ("FILA" as const), ...(motivo ? { error: motivo } : {}) };
+      }),
     });
   }
   await prisma.campaign.update({ where: { id: campaign.id }, data: { audienceCount: recipients.length, status: "AGENDADA" } });
-  return { audienceSize: recipients.length, queued: novos.length, control: 0, skippedDedupe: 0 };
+  return { audienceSize: recipients.length, queued: novos.length - bloqueados, control: 0, skippedDedupe: 0, bloqueados };
 }
 
 /** Quantas mensagens já foram enviadas pelo tenant no último minuto (para o rate limit global). */
@@ -305,7 +379,19 @@ async function sentInLastMinute(prisma: AppPrismaClient, tenantId: string): Prom
 export async function processQueueBatch(prisma: AppPrismaClient, campaignId: string, limit = 50) {
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
   const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: campaign.tenantId } });
+  // LGPD 02-01: sem base legal declarada nada sai, e a fila fica intacta (sai quando o controlador declarar)
+  const semBase = motivoSemBaseLegal(tenant);
+  if (semBase) {
+    return { processed: 0, remaining: await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } }), results: [], throttled: false, bloqueado: semBase };
+  }
+  // base vigente no disparo, para campanha criada antes da declaração (as novas já gravam na criação)
+  if (!campaign.baseLegal) await prisma.campaign.update({ where: { id: campaignId }, data: { baseLegal: baseLegalVigente(tenant) } });
+  const rodape = montarRodape(tenant);
   const providers = await resolveProviders(prisma, campaign.tenantId, campaign.channel);
+  // LGPD 06-01: sem provedor do próprio tenant, nada sai e a fila fica intacta (não marca FALHA em massa)
+  if (providers.length === 0) {
+    return { processed: 0, remaining: await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } }), results: [], throttled: false, bloqueado: semProvedorMotivo(campaign.channel) };
+  }
 
   const alreadySentThisMinute = await sentInLastMinute(prisma, campaign.tenantId);
   const tenantBudget = Math.max(0, tenant.maxMsgsPerMinute - alreadySentThisMinute);
@@ -334,18 +420,41 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
     include: { client: true, recipient: true },
   });
 
+  // LGPD 02-03: supressão conferida no ENVIO, em lote (uma passada para todo o lote, não N consultas), para
+  // todo evento — com cliente ou só destinatário de lista — pelo telefone (todas as formas do nono dígito) e
+  // pelo documento. Cobre quem pediu para parar depois do enfileiramento e o mesmo número em outro cadastro.
+  const lote = await suprimidosEmLote(prisma, campaign.tenantId, {
+    telefones: pending.map((e) => e.recipient?.telefone ?? e.client?.telefone),
+    docHashes: pending.flatMap((e) => [e.client?.cpfHash, e.recipient?.cpfHash]),
+  });
+
   const results = [];
   for (const evt of pending) {
     const block = async (error: string) => {
       await prisma.messageEvent.update({ where: { id: evt.id }, data: { status: "BLOQUEADO", error } });
     };
     const client = evt.client;
-    if (client && (!client.autorizacaoComunicacao || client.optOutAt)) {
-      await block("Cliente sem autorização/opt-out");
-      continue;
-    }
     if (!client && !evt.recipient) {
       await block("Destinatário sem cliente");
+      continue;
+    }
+    // LGPD 02-03: o opt-out do destinatário de lista também vale no envio (antes só o do cliente era lido)
+    if (evt.recipient?.optOutAt) {
+      await block("Destinatário pediu para não receber (opt-out)");
+      continue;
+    }
+    const motivoCliente = motivoBloqueioCliente(client);
+    if (motivoCliente) {
+      await block(motivoCliente);
+      continue;
+    }
+    const telefoneEnvio = evt.recipient?.telefone ?? client!.telefone;
+    if (
+      contatoSuprimido(lote, { telefone: telefoneEnvio, cpfHash: client?.cpfHash }) ||
+      contatoSuprimido(lote, { telefone: null, cpfHash: evt.recipient?.cpfHash })
+    ) {
+      const canon = canonicalPhone(telefoneEnvio);
+      await block(textoSupressao(canon ? lote.motivos.get(canon) : null));
       continue;
     }
     // Garantia no envio: mensagem já na fila de quem (ainda) não tem limite não sai.
@@ -356,13 +465,14 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
     }
 
     const ctx = evt.recipient ? recipientContext(evt.recipient, client) : templateContext(client!);
-    const telefone = evt.recipient?.telefone ?? client!.telefone;
+    const telefone = telefoneEnvio;
     const templateBody = evt.variant === "B" && campaign.messageTemplateB ? campaign.messageTemplateB : campaign.messageTemplate;
     if (evt.recipient && evt.recipient.limiteDisponivel === null && usesLimiteDisponivel(metaTemplate ? metaTemplate.body : templateBody)) {
       await block("Sem limite disponível na planilha (a mensagem usa essa variável)");
       continue;
     }
-    const body = renderTemplate(templateBody, ctx);
+    // LGPD 02-05/02-07: texto livre (SMS, Z-API, mock) leva o rodapé do controlador; template da Meta não muda
+    const body = metaTemplate ? renderTemplate(templateBody, ctx) : comRodape(renderTemplate(templateBody, ctx), rodape);
 
     // Template da Meta: os parâmetros saem do cadastro do cliente / da lista (variante B não existe aqui: a Meta aprova um texto só).
     const tplParams = metaTemplate ? templateParams(metaTemplate, ctx) : null;
@@ -421,18 +531,26 @@ export async function sendTestMessages(
 ) {
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
   const providers = await resolveProviders(prisma, tenantId, campaign.channel);
+  if (providers.length === 0) throw new Error(semProvedorMotivo(campaign.channel)); // LGPD 06-01
 
   const sample = { nome: "Cliente Teste", cidade: "São Paulo", percentual: 42, saldo: brl(850), limite: brl(1500), limite_disponivel: brl(850) };
-  const body = renderTemplate(campaign.messageTemplate, sample);
-
   const { template: metaTemplate, bloqueado } = await resolveWhatsAppTemplate(prisma, campaign, providers);
   if (bloqueado) throw new Error(bloqueado);
+  // LGPD 02-05: o teste mostra o texto como o cliente vai receber (com o rodapé, no texto livre)
+  const controlador = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true, controladorNome: true, rodapeOptOut: true } });
+  const body = metaTemplate ? renderTemplate(campaign.messageTemplate, sample) : comRodape(renderTemplate(campaign.messageTemplate, sample), montarRodape(controlador ?? {}));
   const params = metaTemplate ? templateParams(metaTemplate, sample) : null;
   const header = await prepareHeaderImage(prisma, tenantId, metaTemplate, providers);
   if (header.bloqueado) throw new Error(header.bloqueado);
 
+  // LGPD 02-03: o envio de teste também não fala com telefone que pediu para parar
+  const lote = await suprimidosEmLote(prisma, tenantId, { telefones: phones });
   const results = [];
   for (const phone of phones) {
+    if (contatoSuprimido(lote, { telefone: phone })) {
+      results.push({ phone, status: "FAILED" as const, provider: "none", error: textoSupressao(lote.motivos.get(canonicalPhone(phone) ?? "")) });
+      continue;
+    }
     const sendResult = await sendWithFailover(providers, phone, body, metaTemplate ? { name: metaTemplate.metaName, language: metaTemplate.language, params: params!, headerImageId: header.imageId, buttonTokens: trackedButtons(metaTemplate).map((b) => ({ index: b.index, token: makeToken("n", metaTemplate.id, b.index) })) } : undefined);
     results.push({ phone, status: sendResult.status, provider: sendResult.provider, error: sendResult.error });
   }

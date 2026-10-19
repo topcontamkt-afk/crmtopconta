@@ -106,6 +106,24 @@ model Tenant {
   // Qual conexão de WhatsApp o sistema usa para ENVIAR (campanhas): META (oficial, com template) ou ZAPI
   // (não oficial, texto livre). Receber vale para as duas conectadas. Configurações → WhatsApp.
   whatsappProvider  String   @default("META")
+
+  // LGPD: configuração do CONTROLADOR (cada tenant é um controlador distinto). Ver docs/lgpd/.
+  // Base legal declarada para mensagens de marketing: LEGITIMO_INTERESSE | CONSENTIMENTO. Nulo = o controlador
+  // ainda não declarou, e o envio de marketing fica bloqueado (02-01).
+  baseLegalMarketing        String?
+  liaVersao                 String? // versão do teste de balanceamento (LIA) quando a base é legítimo interesse
+  liaAprovadaEm             DateTime?
+  controladorNome           String? // nome que identifica o controlador nas mensagens; nulo = `name` (02-05)
+  encarregadoNome           String? // encarregado (DPO) ou responsável pelo canal do titular (03-06)
+  encarregadoContato        String? // e-mail, telefone ou link do canal do titular
+  avisoPrivacidadeUrl       String?
+  rodapeOptOut              String? // rodapé de descadastro das mensagens; nulo = padrão do sistema
+  retentionBasis            String? // fundamento do prazo de retenção (04-07)
+  retentionDaysAfterClosure Int? // prazo após o encerramento da conta; nulo = retentionDays (04-06)
+  inboxRetentionDays        Int? // prazo de conversas da Inbox; nulo = retentionDays (04-02)
+  mediaRetentionDays        Int      @default(90) // prazo das cópias de mídia do WhatsApp (04-02)
+  correcaoManualVence       Boolean  @default(true) // correção feita no CRM não é sobrescrita pela planilha (03-03)
+
   createdAt         DateTime @default(now())
 
   users              User[]
@@ -131,6 +149,8 @@ model Tenant {
   templateMedias     TemplateMedia[]
   importChanges      ImportChange[]
   ciclosCidade       CicloCidade[]
+  supressoes         SupressaoTitular[]
+  pedidosTitular     PedidoTitular[]
 }
 
 model User {
@@ -241,6 +261,11 @@ model Client {
   updatedAt       DateTime  @updatedAt
   lastImportJobId String?
   anonymizedAt    DateTime? // preenchido pelo job de retenção/right-to-be-forgotten (LGPD)
+  // LGPD 03-04: tratamento suspenso a pedido do titular (fora de campanha, segmento, export e automação).
+  bloqueadoLgpdAt DateTime?
+  // LGPD 03-03: campos corrigidos à mão a pedido do titular ({ campo: ISODate }); a importação não os sobrescreve
+  // quando Tenant.correcaoManualVence.
+  camposCorrigidos Json?
 
   movements          Movement[]
   messageEvents      MessageEvent[]
@@ -386,6 +411,13 @@ model Campaign {
   manual    Boolean @default(false) // lista de planilha (CampaignRecipient) em vez de segmento
   isSandbox Boolean @default(false) // campanhas de teste/QA não contam para relatórios agregados
 
+  // LGPD 02-01: base legal vigente no tenant no momento em que a campanha foi criada.
+  baseLegal           String?
+  // LGPD 02-01/02-02: lista manual com contatos fora da base exige origem do consentimento declarada (quem, quando).
+  consentimentoOrigem String?
+  consentimentoPor    String?
+  consentimentoEm     DateTime?
+
   scheduledAt         DateTime?
   throttlePerMin      Int       @default(60)
   dedupeWindowHrs     Int       @default(72) // janela mínima entre envios da mesma msg ao mesmo cliente
@@ -488,10 +520,10 @@ model AuditLog {
   details   Json?
   createdAt DateTime @default(now())
   // Hash-chain (tamper-evidence, achado #11 do docs/security-audit/findings.md): prevHash é o
-  // `hash` da entrada anterior na cadeia GLOBAL (todas as tenants, ordenada por createdAt — não
-  // por tenant, para manter uma única cadeia verificável); hash é o SHA-256 desta própria linha
-  // + prevHash. Ambos nullable porque entradas gravadas antes desta mudança não entram
-  // retroativamente na cadeia (limitação aceita, ver services/auditIntegrity.ts).
+  // `hash` da entrada anterior DO MESMO TENANT (LGPD 08-08: cada controlador verifica a própria
+  // cadeia; as linhas antigas, encadeadas globalmente, terminam numa âncora AUDIT_CADEIA_POR_TENANT);
+  // hash é o SHA-256 desta própria linha + prevHash. Ambos nullable porque entradas gravadas antes
+  // da cadeia não entram retroativamente nela (limitação aceita, ver services/auditIntegrity.ts).
   prevHash  String?
   hash      String?
 
@@ -796,6 +828,48 @@ model WaMediaBlob {
   createdAt DateTime @default(now())
 
   @@index([tenantId])
+}
+
+/// LGPD (02-03, 03-01): supressão por titular que sobrevive à anonimização e à reimportação. Guarda só hashes
+/// (telefone canônico e documento, HMAC com Tenant.cpfSalt), nunca o dado em claro. Consultada no envio e na
+/// importação.
+model SupressaoTitular {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  phoneHash String?
+  docHash   String?
+  motivo    String // OPT_OUT | ELIMINACAO | BLOQUEIO
+  canal     String? // WHATSAPP | SMS | MANUAL | ...
+  origem    String // de onde veio: inbox, sms, pedido do titular, operador...
+  pedidoId  String?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, phoneHash])
+  @@index([tenantId, docHash])
+}
+
+/// LGPD (03-05): pedido de titular (art. 18) com prazo de resposta (art. 19: até 15 dias).
+model PedidoTitular {
+  id             String    @id @default(uuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id])
+  clientId       String?
+  telefoneMasked String?
+  tipo           String // CONFIRMACAO | ACESSO | CORRECAO | ELIMINACAO | BLOQUEIO | PORTABILIDADE | COMPARTILHAMENTO | OPOSICAO | REVOGACAO
+  canal          String // WHATSAPP | SMS | EMAIL | TELEFONE | OUTRO
+  status         String    @default("ABERTO") // ABERTO | ATENDIDO | NEGADO
+  descricao      String?
+  recebidoEm     DateTime  @default(now())
+  prazoEm        DateTime
+  respondidoEm   DateTime?
+  resposta       String?
+  userId         String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([tenantId, status])
+  @@index([tenantId, clientId])
 }
 
 /// Ciclo de cobrança por cidade: dia em que o limite renova (abertura) e dia de fechamento (o anterior).

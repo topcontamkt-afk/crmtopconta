@@ -170,24 +170,39 @@ describe("responder pela Inbox em conversa da Z-API", () => {
     return { prisma, created };
   };
 
-  it("responde mesmo sem janela de 24h aberta", async () => {
-    const { prisma, created } = fake(null);
+  const now = new Date("2026-10-11T12:00:00Z");
+  const dentro = new Date("2026-10-11T08:00:00Z");
+
+  it("responde a quem escreveu nas últimas 24h", async () => {
+    const { prisma, created } = fake(dentro);
     const f = jest.fn(async () => resp({ messageId: "Z-OUT-1" }));
-    await sendReply(prisma, "t1", "u1", "c1", { tipo: "text", texto: " Olá " }, { fetchImpl: f as any });
+    await sendReply(prisma, "t1", "u1", "c1", { tipo: "text", texto: " Olá " }, { fetchImpl: f as any, now });
     expect(created[0]).toMatchObject({ direction: "SAIDA", wamid: "Z-OUT-1", body: "Olá", status: "sent", sentByUserId: "u1" });
     expect((f.mock.calls[0] as any)[0]).toContain("api.z-api.io");
   });
 
+  // LGPD 02-06: antes a Z-API respondia "a qualquer tempo" (contato proativo sem trava a quem pediu para parar)
+  it.each([
+    ["sem nenhuma mensagem do titular", null],
+    ["última mensagem do titular há mais de 24h", new Date("2026-10-10T11:00:00Z")],
+  ])("janela fechada (%s): não chama a Z-API nem grava nada", async (_d, last) => {
+    const { prisma, created } = fake(last as Date | null);
+    const f = jest.fn();
+    await expect(sendReply(prisma, "t1", "u1", "c1", { tipo: "text", texto: "Oferta!" }, { fetchImpl: f as any, now })).rejects.toMatchObject({ code: "JANELA_FECHADA" });
+    expect(f).not.toHaveBeenCalled();
+    expect(created).toHaveLength(0);
+  });
+
   it("anexo ainda não é aceito", async () => {
-    const { prisma, created } = fake(null);
-    await expect(sendReply(prisma, "t1", "u1", "c1", { tipo: "arquivo", nome: "a.png", mime: "image/png", data: Buffer.from([1]) }, { fetchImpl: jest.fn() as any })).rejects.toMatchObject({ code: "TIPO_INVALIDO" });
+    const { prisma, created } = fake(dentro);
+    await expect(sendReply(prisma, "t1", "u1", "c1", { tipo: "arquivo", nome: "a.png", mime: "image/png", data: Buffer.from([1]) }, { fetchImpl: jest.fn() as any, now })).rejects.toMatchObject({ code: "TIPO_INVALIDO" });
     expect(created).toHaveLength(0);
   });
 
   it("se a Z-API recusar, nada é gravado", async () => {
-    const { prisma, created } = fake(null);
+    const { prisma, created } = fake(dentro);
     const f = jest.fn(async () => resp({ error: "not connected" }, false, 400));
-    await expect(sendReply(prisma, "t1", "u1", "c1", { tipo: "text", texto: "oi" }, { fetchImpl: f as any })).rejects.toThrow(/not connected/);
+    await expect(sendReply(prisma, "t1", "u1", "c1", { tipo: "text", texto: "oi" }, { fetchImpl: f as any, now })).rejects.toThrow(/not connected/);
     expect(created).toHaveLength(0);
   });
 });

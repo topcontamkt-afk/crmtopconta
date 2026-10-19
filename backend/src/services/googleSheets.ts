@@ -1,4 +1,7 @@
 import { google } from "googleapis";
+import type { SheetConnection } from "@prisma/client";
+import { prisma, type AppPrismaClient } from "../config/db";
+import { withCrossTenantAccess } from "../config/tenantGuard";
 import { RawSheetRow } from "./importService";
 
 /**
@@ -12,7 +15,14 @@ export interface ColumnMapping {
   [field: string]: string; // ex: { id_cliente: "A", nome: "B", ... }
 }
 
-function getAuth() {
+// LGPD 06-02: escopo mínimo por operação. Ler a base só precisa de leitura; só o export BI
+// (writeSheetSummary: cria a aba, limpa e escreve o resumo) precisa de escrita. Um token de
+// leitura não consegue alterar a planilha nem que a Service Account tenha sido compartilhada
+// como Editor.
+export const SCOPE_LEITURA = "https://www.googleapis.com/auth/spreadsheets.readonly";
+export const SCOPE_ESCRITA = "https://www.googleapis.com/auth/spreadsheets";
+
+function getAuth(scope: string) {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
   if (!raw) {
     throw new Error(
@@ -23,10 +33,93 @@ function getAuth() {
   const credentials = JSON.parse(raw);
   return new google.auth.GoogleAuth({
     credentials,
-    // Escopo de leitura+escrita: além de importar a base (Fase 1), a Service Account também
-    // escreve o export/resumo agendado de volta na planilha (Fase 3 — conector BI leve).
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    scopes: [scope],
   });
+}
+
+/**
+ * E-mail da Service Account (identificador público, não é segredo): é com ele que o controlador
+ * compartilha a planilha. Nunca devolve a private_key. Null se a credencial não está configurada.
+ */
+export function serviceAccountEmail(): string | null {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!raw) return null;
+  try {
+    const email = JSON.parse(raw).client_email;
+    return typeof email === "string" ? email : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Aceita o link completo da planilha ou só o ID (mesma regra da tela de Integrações). */
+export function extractSheetId(input: string): string {
+  const trimmed = input.trim();
+  const match = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  return match ? match[1] : trimmed;
+}
+
+export class SheetAccessError extends Error {
+  constructor(
+    public status: number,
+    public codigo: "PLANILHA_NAO_CADASTRADA" | "PLANILHA_EM_OUTRO_CONTROLADOR",
+    message: string
+  ) {
+    super(message);
+  }
+}
+
+const ERRO_NAO_CADASTRADA = () =>
+  new SheetAccessError(
+    403,
+    "PLANILHA_NAO_CADASTRADA",
+    "Planilha não cadastrada para esta conta. Um administrador precisa salvá-la em Integrações → Google Sheets antes de sincronizar."
+  );
+
+/**
+ * LGPD 06-02: a Service Account é uma só para todos os tenants, então duas contas podem apontar
+ * para a MESMA planilha (por engano ou de propósito) e ler os dados uma da outra. Não dá para
+ * saber qual cadastro é o legítimo (o PUT /sheets atualiza a linha e mantém o createdAt antigo),
+ * então a regra falha FECHADA: planilha cadastrada como ativa em mais de um tenant não é lida nem
+ * escrita por nenhum deles até o operador resolver. A recusa no próprio cadastro (como já existe
+ * para o phoneNumberId do WhatsApp) fica em routes/integrations.ts, fora deste lote.
+ *
+ * Cross-tenant de propósito: só devolve os tenantIds que cadastraram o sheetId, nada da planilha
+ * nem do outro controlador.
+ */
+export async function assertPlanilhaExclusiva(prisma: AppPrismaClient, sheetId: string, tenantId?: string): Promise<void> {
+  const rows = await withCrossTenantAccess(() =>
+    prisma.sheetConnection.findMany({ where: { sheetId, active: true }, select: { tenantId: true } })
+  );
+  const donos = new Set(rows.map((r) => r.tenantId));
+  if (donos.size === 0 || (tenantId && !donos.has(tenantId))) throw ERRO_NAO_CADASTRADA();
+  if (donos.size > 1) {
+    throw new SheetAccessError(
+      409,
+      "PLANILHA_EM_OUTRO_CONTROLADOR",
+      "Esta planilha também está cadastrada em outra conta e, por segurança, não será lida por nenhuma delas. Confira o ID da planilha em Integrações ou fale com o suporte."
+    );
+  }
+}
+
+/**
+ * LGPD 06-02: trava da importação manual. Só devolve a planilha CADASTRADA como SheetConnection
+ * ativa do próprio tenant (cadastro só por ADMIN e auditado em PUT /api/integrations/sheets) e
+ * exclusiva dele (assertPlanilhaExclusiva). Um sheetId qualquer, mesmo compartilhado com a
+ * Service Account, não é mais aceito.
+ */
+export async function resolveTenantSheet(
+  prisma: AppPrismaClient,
+  tenantId: string,
+  sheetId?: string
+): Promise<SheetConnection> {
+  const pedido = sheetId ? extractSheetId(sheetId) : undefined;
+  const conn = await prisma.sheetConnection.findFirst({
+    where: { tenantId, active: true, ...(pedido ? { sheetId: pedido } : {}) },
+  });
+  if (!conn) throw ERRO_NAO_CADASTRADA();
+  await assertPlanilhaExclusiva(prisma, conn.sheetId, tenantId);
+  return conn;
 }
 
 /** Lê o range informado e converte para RawSheetRow[] usando o mapeamento de colunas. */
@@ -35,7 +128,9 @@ export async function fetchSheetRows(
   range: string,
   mapping: ColumnMapping
 ): Promise<RawSheetRow[]> {
-  const auth = getAuth();
+  // LGPD 06-02: vale também para o sync agendado (scheduler.ts), que lê direto daqui.
+  await assertPlanilhaExclusiva(prisma, sheetId);
+  const auth = getAuth(SCOPE_LEITURA);
   const sheets = google.sheets({ version: "v4", auth });
 
   const resp = await sheets.spreadsheets.values.get({
@@ -79,7 +174,9 @@ export async function writeSheetSummary(
   tabName: string,
   rows: (string | number)[][]
 ): Promise<void> {
-  const auth = getAuth();
+  // LGPD 06-02: o export BI (biExport.ts) não escreve numa planilha que outra conta também cadastrou.
+  await assertPlanilhaExclusiva(prisma, sheetId);
+  const auth = getAuth(SCOPE_ESCRITA);
   const sheets = google.sheets({ version: "v4", auth });
 
   // Garante que a aba de export existe antes de escrever nela.

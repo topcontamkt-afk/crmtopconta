@@ -65,6 +65,8 @@ export const TENANT_SCOPED_MODELS = [
   "TemplateMedia",
   "ImportChange",
   "CicloCidade",
+  "SupressaoTitular",
+  "PedidoTitular",
 ] as const;
 
 type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number];
@@ -151,8 +153,8 @@ export function whereHasTenantId(where: unknown): boolean {
  * a comment at the call site explaining why the query is legitimately cross-tenant. Every use of
  * this function is a manually-reviewed exception to the guard — grep for it to find all of them.
  * Legitimate callers today: the scheduler jobs in services/scheduler.ts and
- * services/automationEngine.ts, plus the AuditLog hash-chain reads in
- * services/auditIntegrity.ts (the tamper-evidence chain is global across tenants by design).
+ * services/automationEngine.ts, and the webhooks that find the tenant from the payload. The AuditLog
+ * hash chain is per tenant since LGPD 08-08, so services/auditIntegrity.ts no longer needs it.
  */
 const bypassContext = new AsyncLocalStorage<boolean>();
 

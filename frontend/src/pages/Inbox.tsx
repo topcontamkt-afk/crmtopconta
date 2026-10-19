@@ -213,7 +213,7 @@ function TemplatePicker({ conversaId, onEnviada }: { conversaId: string; onEnvia
   );
 }
 
-function Composer({ conversaId, janelaAberta, podeEnviar, semAnexo, onEnviada }: { conversaId: string; janelaAberta: boolean; podeEnviar: boolean; semAnexo?: boolean; onEnviada: () => void }) {
+function Composer({ conversaId, janelaAberta, podeEnviar, semAnexo, semTemplate, onEnviada }: { conversaId: string; janelaAberta: boolean; podeEnviar: boolean; semAnexo?: boolean; semTemplate?: boolean; onEnviada: () => void }) {
   const [texto, setTexto] = useState("");
   const [arquivo, setArquivo] = useState<File | null>(null);
   const [erro, setErro] = useState<string | null>(null);
@@ -227,6 +227,8 @@ function Composer({ conversaId, janelaAberta, podeEnviar, semAnexo, onEnviada }:
   }, [conversaId]);
 
   if (!podeEnviar) return <div className="inbox-composer">Seu perfil só visualiza conversas. Peça a um operador ou administrador para responder.</div>;
+  // A Z-API não tem template: fora da janela de 24h não há como responder por ela (LGPD 02-06).
+  if (!janelaAberta && semTemplate) return <div className="inbox-composer">Janela de 24h fechada: pela Z-API só dá para responder a quem escreveu nas últimas 24 horas.</div>;
   if (!janelaAberta) return <TemplatePicker conversaId={conversaId} onEnviada={onEnviada} />;
 
   function escolher(f: File | undefined) {
@@ -394,9 +396,9 @@ export default function Inbox() {
   useEffect(() => void carregarStatus(), [carregarStatus]);
 
   const carregarLista = useCallback(() => {
-    const qs = new URLSearchParams({ filtro });
-    if (busca.trim()) qs.set("busca", busca.trim());
-    return api<{ conversas: Conversa[]; naoLidas: number }>(`/inbox/conversations?${qs}`)
+    // LGPD 07-03: o nome/telefone procurado vai no corpo, nunca na URL
+    const body = { filtro, ...(busca.trim() ? { busca: busca.trim() } : {}) };
+    return api<{ conversas: Conversa[]; naoLidas: number }>("/inbox/conversations/search", { method: "POST", body })
       .then((r) => {
         setConversas(r.conversas);
         setNaoLidas(r.naoLidas);
@@ -542,13 +544,10 @@ export default function Inbox() {
                 </div>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {thread.cliente?.optOutEm && <span className="inbox-chip closed">Pediu descadastro</span>}
-                  {thread.conversa.canal === "ZAPI" ? (
-                    <span className="inbox-chip closed">Z-API (não oficial) · sem janela de 24h</span>
-                  ) : (
-                    <span className={`inbox-chip ${thread.conversa.janelaAberta ? "open" : "closed"}`}>
-                      {thread.conversa.janelaAberta ? `Janela de 24h aberta · ${restante}` : "Janela de 24h fechada · só template"}
-                    </span>
-                  )}
+                  {thread.conversa.canal === "ZAPI" && <span className="inbox-chip closed">Z-API (não oficial)</span>}
+                  <span className={`inbox-chip ${thread.conversa.janelaAberta ? "open" : "closed"}`}>
+                    {thread.conversa.janelaAberta ? `Janela de 24h aberta · ${restante}` : thread.conversa.canal === "ZAPI" ? "Janela de 24h fechada" : "Janela de 24h fechada · só template"}
+                  </span>
                 </div>
               </div>
               <div className="inbox-msgs">
@@ -571,6 +570,7 @@ export default function Inbox() {
                 conversaId={thread.conversa.id}
                 janelaAberta={thread.conversa.janelaAberta}
                 semAnexo={thread.conversa.canal === "ZAPI"}
+                semTemplate={thread.conversa.canal === "ZAPI"}
                 podeEnviar={user?.role === "ADMIN" || user?.role === "OPERATOR"}
                 onEnviada={() => { void carregarThread(); void carregarLista(); }}
               />

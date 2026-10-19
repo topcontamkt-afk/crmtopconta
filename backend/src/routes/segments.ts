@@ -3,8 +3,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { buildSegmentWhere, INATIVOS_FILTERS, INATIVOS_SEGMENT_NAME, PERFIL_RENDA_PRESETS, ETAPA_USO_PRESETS, SegmentPreset } from "../services/segments";
-import { PERFIS_RENDA } from "../services/rendaPerfil";
+import { buildSegmentWhere, INATIVOS_FILTERS, INATIVOS_SEGMENT_NAME, ETAPA_USO_PRESETS, SegmentPreset, filtrosRendaIgnorados } from "../services/segments";
 
 const router = Router();
 router.use(requireAuth);
@@ -14,7 +13,8 @@ router.get("/", async (req, res) => {
     where: { tenantId: req.user!.tenantId },
     orderBy: { updatedAt: "desc" },
   });
-  res.json(segments);
+  // LGPD 01-03: segmento salvo com filtro de renda passa a contar sem ele; a tela avisa
+  res.json(segments.map((s) => ({ ...s, filtrosIgnorados: filtrosRendaIgnorados(s.filters) })));
 });
 
 const filtersSchema = z.object({
@@ -31,8 +31,7 @@ const filtersSchema = z.object({
   categoriasCompra: z.array(z.string()).optional(),
   lojistaIds: z.array(z.string()).optional(),
   compraNosUltimosDias: z.number().optional(),
-  perfilRenda: z.array(z.enum(PERFIS_RENDA)).optional(),
-  noTetoLimite: z.boolean().optional(),
+  // LGPD 01-03: perfilRenda/noTetoLimite saíram (renda é só estatística); enviados por tela antiga são descartados
   saldoDisponivelMin: z.number().optional(),
   etapaUso: z.array(z.enum(ETAPAS_USO)).optional(),
   usosMin: z.number().int().min(0).optional(),
@@ -117,10 +116,8 @@ router.post("/presets/inativos", requireRole("ADMIN", "OPERATOR", "ANALYST"), as
 });
 
 /**
- * POST /api/segments/presets/perfis-renda — cria (ou apenas recontabiliza, se já existirem) os
- * segmentos prontos de perfil de renda PF1–PF4 × uso. Idempotente por nome: rodar de novo não
- * duplica nada e não mexe em segmentos com outros nomes. A renda é estimada pelo limite
- * (services/rendaPerfil.ts); os segmentos são dinâmicos e se recontam sozinhos.
+ * Cria (ou apenas recontabiliza, se já existirem) segmentos prontos. Idempotente por nome: rodar de novo não
+ * duplica nada e não mexe em segmentos com outros nomes. Os segmentos são dinâmicos e se recontam sozinhos.
  */
 async function applyPresets(tenantId: string, presets: SegmentPreset[]) {
   const out: Array<{ id: string; name: string; count: number; created: boolean }> = [];
@@ -137,8 +134,12 @@ async function applyPresets(tenantId: string, presets: SegmentPreset[]) {
   return { segments: out, criados: out.filter((x) => x.created).length };
 }
 
-router.post("/presets/perfis-renda", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
-  res.status(201).json(await applyPresets(req.user!.tenantId, PERFIL_RENDA_PRESETS));
+/**
+ * POST /api/segments/presets/perfis-renda — LGPD 01-03: desativado. Renda (estimada pelo limite) deixou de ser
+ * critério de público e fica só como estatística agregada no dashboard (GET /api/dashboard/perfis-renda).
+ */
+router.post("/presets/perfis-renda", requireRole("ADMIN", "OPERATOR", "ANALYST"), (_req, res) => {
+  res.status(410).json({ error: "Os segmentos por perfil de renda foram desativados (LGPD): a renda fica só como estatística no dashboard." });
 });
 
 /** POST /api/segments/presets/etapas-uso — segmentos prontos por etapa de uso real (etapaUso.ts). */

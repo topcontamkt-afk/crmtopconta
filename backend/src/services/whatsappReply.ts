@@ -4,6 +4,7 @@ import { zapiCredentialsOf, zapiSendText, ZapiError } from "./zapi";
 import { baseMime } from "./whatsappMedia";
 import {
   assertJanelaAberta,
+  janelaAberta,
   mediaTypeForMime,
   OUTBOUND_MAX_BYTES,
   SendError,
@@ -13,6 +14,8 @@ import {
   uploadMedia,
 } from "./whatsappSend";
 import { previewOf } from "./whatsappPayload";
+import { estaSuprimido, motivoBloqueioCliente, textoSupressao } from "./privacy";
+import { motivoSemBaseLegal } from "./baseLegal";
 import { templateContext } from "./messageContext";
 import { sendTemplateMessage, templateParams, templatePreview } from "./whatsappTemplates";
 import { unmappedPositions } from "./templateImport";
@@ -21,6 +24,14 @@ import { makeToken, trackedButtons } from "./trackedLinks";
 /**
  * Responde a um cliente dentro de uma conversa: confere a janela de 24 horas, envia pela Meta e só
  * então grava a mensagem de saída (nunca registra como enviado o que a Meta recusou).
+ *
+ * Regra de opt-out na Inbox (LGPD 02-03 / 02-06):
+ *  - TEXTO LIVRE (Meta ou Z-API) só sai dentro das 24 h seguintes a uma mensagem do PRÓPRIO titular
+ *    (`assertJanelaAberta`). Aí vale mesmo para quem pediu para parar: é atendimento a quem acabou de
+ *    escrever (inclusive confirmar o descadastro), não marketing. Fora da janela nada sai em texto livre.
+ *  - TEMPLATE (o único jeito de falar primeiro, fora da janela) é contato proativo: bloqueado para cliente
+ *    em opt-out/sem autorização/com tratamento bloqueado e para telefone/documento suprimido, também quando
+ *    a conversa não está ligada a um cliente (contato de lista manual).
  */
 export type ReplyInput =
   | { tipo: "text"; texto: string }
@@ -44,13 +55,19 @@ export async function sendReply(
 
   const conversation = await prisma.conversation.findFirst({
     where: { id: conversationId, tenantId },
-    include: { account: { select: { phoneNumberId: true, active: true, credentials: true, provider: true } } },
+    include: { account: { select: { tenantId: true, phoneNumberId: true, active: true, credentials: true, provider: true } } },
   });
   if (!conversation) throw new SendError("NAO_ENCONTRADA", "Conversa não encontrada.");
   if (!conversation.account.active) throw new SendError("META", "O número do WhatsApp desta conversa está desativado.");
 
-  // Conversa que veio pela Z-API (não oficial): responde pela própria Z-API, só texto, sem janela de 24h.
-  if (conversation.account.provider === "ZAPI") return sendZapiReply(prisma, tenantId, userId, conversation, input, deps, now);
+  // Conversa que veio pela Z-API (não oficial): responde pela própria Z-API, só texto. LGPD 02-06: com a MESMA
+  // janela de 24 h da Meta (antes era "a qualquer tempo", o que abria contato proativo a quem pediu para parar).
+  if (conversation.account.provider === "ZAPI") {
+    if (!janelaAberta(conversation.lastInboundAt, now)) {
+      throw new SendError("JANELA_FECHADA", "A janela de 24 horas está fechada: pela Z-API só dá para responder a quem escreveu nas últimas 24 horas (não há template).");
+    }
+    return sendZapiReply(prisma, tenantId, userId, conversation, input, deps, now);
+  }
 
   const token = deps.token ?? credentialsOf(conversation.account).accessToken;
   assertJanelaAberta(conversation.lastInboundAt, now);
@@ -123,6 +140,22 @@ async function sendZapiReply(
   return message;
 }
 
+/**
+ * LGPD 02-03 / 02-06: contato PROATIVO (template, fora da janela de atendimento) só para quem não pediu para
+ * parar. Confere o cadastro do cliente ligado à conversa E a supressão pelo telefone da conversa (e pelo
+ * documento do cliente), o que cobre contato de lista sem cliente e o mesmo número em outro cadastro.
+ */
+export async function assertContatoProativoPermitido(
+  prisma: AppPrismaClient,
+  tenantId: string,
+  conversation: { waId: string; client?: { autorizacaoComunicacao?: boolean | null; optOutAt?: Date | null; bloqueadoLgpdAt?: Date | null; cpfHash?: string | null } | null }
+): Promise<void> {
+  const doCliente = motivoBloqueioCliente(conversation.client);
+  if (doCliente) throw new SendError("OPT_OUT", `${doCliente}: o envio de template está bloqueado.`);
+  const motivo = await estaSuprimido(prisma, tenantId, { telefone: conversation.waId, docHash: conversation.client?.cpfHash ?? null });
+  if (motivo) throw new SendError("OPT_OUT", `${textoSupressao(motivo)}: o envio de template está bloqueado.`);
+}
+
 /** Ordem dos status de entrega: nunca volta de "lida" para "entregue" se o webhook chegar fora de ordem. */
 const RANK: Record<string, number> = { sent: 1, delivered: 2, read: 3 };
 
@@ -192,18 +225,21 @@ export async function sendTemplateReply(
   const now = deps.now ?? new Date();
   const conversation = await prisma.conversation.findFirst({
     where: { id: conversationId, tenantId },
-    include: { account: { select: { phoneNumberId: true, active: true, credentials: true, provider: true } }, client: true },
+    include: { account: { select: { tenantId: true, phoneNumberId: true, active: true, credentials: true, provider: true } }, client: true },
   });
   if (!conversation) throw new SendError("NAO_ENCONTRADA", "Conversa não encontrada.");
   if (conversation.account.provider === "ZAPI") throw new SendError("TEMPLATE_INDISPONIVEL", "Conversas pela Z-API não usam template: responda em texto.");
   if (!conversation.account.active) throw new SendError("META", "O número do WhatsApp desta conversa está desativado.");
   const token = deps.token ?? credentialsOf(conversation.account).accessToken;
-  if (conversation.client && (!conversation.client.autorizacaoComunicacao || conversation.client.optOutAt)) {
-    throw new SendError("OPT_OUT", "Este cliente pediu para não receber mensagens: o envio de template está bloqueado.");
-  }
+  await assertContatoProativoPermitido(prisma, tenantId, conversation);
 
   const template = await prisma.messageTemplate.findFirst({ where: { id: templateId, tenantId } });
   if (!template || !isSendableTemplate(template)) throw new SendError("TEMPLATE_INDISPONIVEL", "Este template não está aprovado pela Meta.");
+  // LGPD 02-01: template de marketing é contato proativo, com a mesma trava de base legal das campanhas
+  if (template.category !== "UTILITY") {
+    const semBase = motivoSemBaseLegal(await prisma.tenant.findUnique({ where: { id: tenantId }, select: { baseLegalMarketing: true } }));
+    if (semBase) throw new SendError("TEMPLATE_INDISPONIVEL", semBase);
+  }
 
   const { params, texto } = previewTemplateFor(template, conversation);
   let headerImageId: string | undefined;

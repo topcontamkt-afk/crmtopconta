@@ -3,12 +3,12 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { logAudit } from "../middleware/audit";
+import { ACOES_ACESSO_INDEVIDO, logAudit, logTentativaAcesso } from "../middleware/audit";
 import { runImport, RawSheetRow } from "../services/importService";
 import { runCardAccountImport, previewCardAccountImport, CardAccountRow, FieldPresence } from "../services/cardAccountImport";
 import { formatMismatch, FORMAT_LABEL, ImportFormat } from "../services/importFormat";
 import { assertUndoable, groupLotes, undoLoteBatch, UndoError } from "../services/importUndo";
-import { DEFAULT_COLUMN_MAPPING, fetchSheetRows } from "../services/googleSheets";
+import { DEFAULT_COLUMN_MAPPING, fetchSheetRows, resolveTenantSheet, serviceAccountEmail, SheetAccessError } from "../services/googleSheets";
 import { notify } from "../services/notifications";
 import { importLimiter } from "../middleware/rateLimit";
 
@@ -158,10 +158,15 @@ router.get("/:id", async (req, res) => {
   res.json(job);
 });
 
-/** POST /api/imports/google-sheets — trigger manual de sincronização (a automática roda via cron/scheduler). */
+/**
+ * POST /api/imports/google-sheets — trigger manual de sincronização (a automática roda via cron/scheduler).
+ * LGPD 06-02: só lê a planilha CADASTRADA do próprio tenant (SheetConnection, criada por ADMIN em
+ * Integrações). `sheetId` no corpo é opcional e, se vier, precisa ser o da planilha cadastrada; um
+ * sheetId qualquer não é mais aceito, mesmo que a planilha esteja compartilhada com a Service Account.
+ */
 const sheetsSchema = z.object({
-  sheetId: z.string(),
-  range: z.string().default("A1:Z"),
+  sheetId: z.string().max(300).optional(),
+  range: z.string().max(100).optional(),
   columnMapping: z.record(z.string()).optional(),
 });
 
@@ -169,14 +174,33 @@ router.post("/google-sheets", importLimiter, requireRole("ADMIN", "OPERATOR"), a
   const parsed = sheetsSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { tenantId, id: userId } = req.user!;
-  const { sheetId, range, columnMapping } = parsed.data;
+  const contaServico = serviceAccountEmail();
+
+  let conn;
+  try {
+    conn = await resolveTenantSheet(prisma, tenantId, parsed.data.sheetId);
+  } catch (e) {
+    if (!(e instanceof SheetAccessError)) throw e;
+    // LGPD 05-03/06-02: tentativa de ler planilha não cadastrada (ou de outro controlador) fica no AuditLog.
+    await logTentativaAcesso({
+      tenantId,
+      userId,
+      action: ACOES_ACESSO_INDEVIDO.IMPORTACAO_PLANILHA_NEGADA,
+      details: { codigo: e.codigo, sheetIdPedido: parsed.data.sheetId ?? null },
+    });
+    return res.status(e.status).json({ error: e.message, codigo: e.codigo, serviceAccountEmail: contaServico });
+  }
+  const sheetId = conn.sheetId;
+  const range = parsed.data.range || conn.sheetRange;
+  const columnMapping = parsed.data.columnMapping || (conn.columnMapping as Record<string, string> | null) || DEFAULT_COLUMN_MAPPING;
 
   try {
-    const rows = await fetchSheetRows(sheetId, range, columnMapping || DEFAULT_COLUMN_MAPPING);
+    const rows = await fetchSheetRows(sheetId, range, columnMapping);
     const { importJobId, result } = await runImport(prisma, tenantId, rows, userId, "google_sheets", sheetId);
     await logAudit({ tenantId, userId, action: "IMPORT_GOOGLE_SHEETS", target: "ImportJob", targetId: importJobId, details: result });
     await refreshCiclos(tenantId);
-    res.json({ importJobId, ...result });
+    // LGPD 06-02: devolve com qual Service Account a planilha precisa estar compartilhada (só leitura basta para importar).
+    res.json({ importJobId, ...result, serviceAccountEmail: contaServico });
   } catch (e: any) {
     // Detalhe completo do erro só vai para o log do servidor e para a notificação interna do
     // tenant (abaixo) — nunca é devolvido ao chamador HTTP, para não vazar internals do

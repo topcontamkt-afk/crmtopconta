@@ -1,4 +1,5 @@
-import { buildSegmentWhere, INATIVOS_FILTERS, ENVIAVEL_WHERE, PERFIL_RENDA_PRESETS } from "./segments";
+import * as segments from "./segments";
+import { buildSegmentWhere, INATIVOS_FILTERS, ENVIAVEL_WHERE, filtrosRendaIgnorados } from "./segments";
 
 describe("buildSegmentWhere", () => {
   it("mantém compatibilidade com filtros simples (flat)", () => {
@@ -81,18 +82,24 @@ describe("filtros de comércio credenciado (compras)", () => {
   });
 });
 
-describe("perfil de renda e público enviável", () => {
-  it("perfilRenda vira intervalos de limite combinados com OR", () => {
-    const where: any = buildSegmentWhere("t1", { perfilRenda: ["PF1", "PF4"] });
-    expect(where.AND[0].OR).toEqual([
-      { limiteTotal: { gt: 0, lte: 1600 } },
-      { limiteTotal: { gt: 4800 } },
-    ]);
+describe("LGPD 01-03: renda só como estatística, fora do público", () => {
+  it("perfilRenda e noTetoLimite NÃO filtram mais (segmento antigo conta sem eles)", () => {
+    const where: any = buildSegmentWhere("t1", { perfilRenda: ["PF1", "PF4"], noTetoLimite: true, cidade: ["Natal"] });
+    expect(where).toEqual({ tenantId: "t1", cidade: { in: ["Natal"] } });
+    expect(JSON.stringify(where)).not.toContain("limiteTotal");
   });
 
-  it("noTetoLimite filtra o limite exatamente no teto de R$ 2.000", () => {
-    const where: any = buildSegmentWhere("t1", { noTetoLimite: true });
-    expect(where.AND[0]).toEqual({ limiteTotal: 2000 });
+  it("filtrosRendaIgnorados acha o filtro de renda em qualquer nível de grupo (para a tela avisar)", () => {
+    expect(filtrosRendaIgnorados({ cidade: ["Natal"] })).toEqual([]);
+    expect(filtrosRendaIgnorados({ perfilRenda: [] })).toEqual([]);
+    expect(filtrosRendaIgnorados({ perfilRenda: ["PF2"] })).toEqual(["perfilRenda"]);
+    expect(
+      filtrosRendaIgnorados({ operator: "OR", groups: [{ operator: "AND", conditions: { cidade: ["X"] } }, { operator: "AND", conditions: { noTetoLimite: true } }] })
+    ).toEqual(["noTetoLimite"]);
+  });
+
+  it("não existem mais segmentos prontos de perfil de renda", () => {
+    expect((segments as any).PERFIL_RENDA_PRESETS).toBeUndefined();
   });
 
   it("saldoDisponivelMin filtra por saldo mínimo", () => {
@@ -100,17 +107,15 @@ describe("perfil de renda e público enviável", () => {
     expect(where.AND[0]).toEqual({ saldoDisponivel: { gte: 10 } });
   });
 
-  it("ENVIAVEL_WHERE exclui quem não tem limite (comércio credenciado)", () => {
-    expect(ENVIAVEL_WHERE).toEqual({ limiteTotal: { gt: 0 } });
+  it("ENVIAVEL_WHERE exclui sem limite, bloqueado (03-04), encerrado (04-06) e anonimizado (04-01)", () => {
+    expect(ENVIAVEL_WHERE).toEqual({ limiteTotal: { gt: 0 }, bloqueadoLgpdAt: null, encerradoEm: null, anonymizedAt: null });
   });
 
-  it("os presets de perfil têm nomes únicos e filtram por perfil", () => {
-    const nomes = PERFIL_RENDA_PRESETS.map((p) => p.name);
-    expect(new Set(nomes).size).toBe(nomes.length);
-    for (const p of PERFIL_RENDA_PRESETS) {
-      const w: any = buildSegmentWhere("t1", p.filters);
-      expect(JSON.stringify(w)).toContain("limiteTotal");
-    }
+  it("ENVIAVEL_WHERE não sobrescreve o filtro de segmento ao ser espalhado (só chaves de topo livres)", () => {
+    const where = buildSegmentWhere("t1", { contaEncerrada: true, cidades: ["Natal"] } as any);
+    const merged = { ...where, ...ENVIAVEL_WHERE };
+    for (const k of Object.keys(ENVIAVEL_WHERE)) expect(where).not.toHaveProperty(k);
+    expect(merged).toMatchObject({ tenantId: "t1", encerradoEm: null });
   });
 });
 

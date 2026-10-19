@@ -12,11 +12,13 @@ import {
   toMetaBody,
   validateTemplate,
   variableOrder,
+  ERRO_SEM_OPT_OUT,
+  templateTemOptOut,
 } from "./whatsappTemplates";
 
 const ok = (body: any) => ({ ok: true, status: 200, json: async () => body });
 const fail = (status: number, body: any) => ({ ok: false, status, json: async () => body });
-const base = { body: "Olá {{nome}}, seu limite é {{limite}}. Responda se quiser usar.", category: "MARKETING" };
+const base = { body: "Olá {{nome}}, seu limite é {{limite}}. Responda se quiser usar.", category: "MARKETING", footer: "Responda SAIR para não receber mais mensagens" };
 
 describe("variáveis e conversão para o formato da Meta", () => {
   it("numera na ordem em que aparecem, sem repetir", () => {
@@ -75,6 +77,16 @@ describe("validateTemplate", () => {
     expect(normalizeButtonPhone("(84) 99999-8888")).toBe("+5584999998888");
     expect(normalizeButtonPhone("+55 84 99999-8888")).toBe("+5584999998888");
     expect(normalizeButtonPhone("0800")).toBeNull();
+  });
+  it("LGPD 02-05: marketing sem rodapé de saída nem botão SAIR é recusado; utilidade não exige", () => {
+    const semSaida = { body: base.body, category: "MARKETING" };
+    expect(validateTemplate(semSaida)).toContain(ERRO_SEM_OPT_OUT);
+    expect(validateTemplate({ ...semSaida, footer: "TopConta, cartão de benefícios" })).toContain(ERRO_SEM_OPT_OUT);
+    expect(validateTemplate({ ...semSaida, quickReplies: ["Quero usar", "SAIR"] })).toEqual([]);
+    expect(validateTemplate({ ...semSaida, footer: "Para parar de receber, responda PARAR" })).toEqual([]);
+    expect(validateTemplate({ ...semSaida, category: "UTILITY" })).toEqual([]);
+    expect(templateTemOptOut({ footer: null, quickReplies: ["Sim", "Não quero"] })).toBe(false);
+    expect(templateTemOptOut({ footer: null, quickReplies: ["Sair da lista"] })).toBe(true);
   });
   it("exige a categoria", () => {
     expect(validateTemplate({ ...base, category: null }).join(" ")).toContain("categoria");

@@ -6,6 +6,7 @@ import { notify } from "./notifications";
 import { ImportRunResult } from "./importService";
 import { recordAccountSnapshots, SnapshotCandidate } from "./accountSnapshot";
 import { normalizeDocumentDigits, parseMoney } from "./purchaseParsing";
+import { decidirSupressao, liberarEliminacao, preservarCorrecoes, supressaoDaImportacao } from "./dedupe";
 
 /**
  * Importador para o formato real de "Cartões e contas" — cadastro/ativação de cartão vinculado
@@ -36,11 +37,11 @@ export interface CardAccountRow {
   documento?: string; // CPF (11 dígitos) ou CNPJ (14 dígitos) — coluna "CpfCnpjCliente"
   nome?: string;
   telefone?: string;
-  email?: string;
   cidade?: string;
-  razao_social?: string; // "razaoSocial" — razão social da promotora/associação
   id_cartao?: string; // "idCartao" — vira externalId
-  lotacao?: string; // "Lotação" — departamento/unidade de trabalho do titular
+  // LGPD 01-01 (decisão 3 da triagem): e-mail, razão social, lotação, bônus, saldo líquido para saque, vínculo,
+  // cidade da conveniada, motivo/observação do encerramento e status de validação NÃO são mais gravados
+  // (nenhuma tela, segmento ou template os usa). Coluna que vier com esses nomes é ignorada.
 
   data_cadastro?: string; // "DtSolicCadastro"
   data_ativacao?: string; // "DtAtivacaoCartao"
@@ -51,23 +52,17 @@ export interface CardAccountRow {
   limite?: string | number; // "LimiteDeCompras" / "limite_total"
   saldo_disponivel?: string | number;
   valor_utilizado?: string | number; // "SaldoUtilizado" — quando vem pronto da planilha, usa direto
-  bonus?: string | number;
-  saldo_liquido_saque?: string | number;
   remuneracao_bruta?: string | number;
   remuneracao_liquida?: string | number;
 
   status_cartao?: string; // "STATUS": ATIVOU_CARTAO | PODE_TER_MAS_NAO_ATIVOU | NAO_PODE_TER
-  status_cadastro?: string; // "StatusCadastro" (ex.: "APROVADO") — eixo de aprovação, sem lifecycle de ativação
+  status_cadastro?: string; // "StatusCadastro" (ex.: "APROVADO") — só lido para inferir o status, não é gravado
   bloqueado?: string | boolean; // "Bloqueado" (formato antigo)
   cartao_bloqueado?: string | boolean; // "CartaoBloqueado"
   conta_bloqueada?: string | boolean; // "ContaBloqueada"
   encerrado?: string | boolean; // "Encerramento"
-  motivo_encerramento?: string; // "Motivo"
-  obs_encerramento?: string; // "ObsEncerramento"
 
   empresa_conveniada?: string; // "nomeFantasia" (formato antigo)
-  cidade_empresa_conveniada?: string; // "nomeCidadeEmpresaConveniada" (formato antigo)
-  vinculo_empregaticio?: string;
 }
 
 interface RowError {
@@ -221,7 +216,6 @@ function prepareRow(rawIn: CardAccountRow, rowNumber: number, tenantCpfSalt: str
     cpfHash,
     cpfMasked,
     documentoTipo,
-    email: raw.email?.trim() || undefined,
     cidade: raw.cidade?.trim(),
     dataCadastro: parseDate(raw.data_cadastro),
     dataAberturaConta: parseDate(raw.data_ativacao),
@@ -235,26 +229,20 @@ function prepareRow(rawIn: CardAccountRow, rowNumber: number, tenantCpfSalt: str
     statusConta,
     origemCliente: isReprovado ? "comercio" : undefined,
     empresaConveniada: raw.empresa_conveniada?.trim() || undefined,
-    cidadeEmpresaConveniada: raw.cidade_empresa_conveniada?.trim() || undefined,
-    vinculoEmpregaticio: raw.vinculo_empregaticio?.trim() || undefined,
-    statusValidacaoCadastro: raw.status_cadastro?.trim() || undefined,
-    encerradoEm: encerrado ? new Date() : undefined,
-    motivoEncerramento: raw.motivo_encerramento?.trim() || undefined,
-    obsEncerramento: raw.obs_encerramento?.trim() || undefined,
-    razaoSocial: raw.razao_social?.trim() || undefined,
-    lotacao: raw.lotacao?.trim() || undefined,
+    // LGPD 04-06: data do PRIMEIRO encerramento visto (planUpdate não regrava em quem já tem). "Não" explícito na
+    // coluna = conta (re)aberta: limpa a data, senão o cliente seguiria fora das campanhas e no prazo de encerrado
+    encerradoEm: encerrado ? new Date() : filled(raw.encerrado) ? null : undefined,
     dataValidadeCartao: parseDate(raw.data_validade_cartao),
     dataNascimento: parseDate(raw.data_nascimento),
     sexo: raw.sexo?.trim() || undefined,
     remuneracaoBruta: parseNumber(raw.remuneracao_bruta),
     remuneracaoLiquida: parseNumber(raw.remuneracao_liquida),
-    bonus: parseNumber(raw.bonus),
-    saldoLiquidoSaque: parseNumber(raw.saldo_liquido_saque),
     // Base legal: aceite no contrato/abertura de conta (confirmado com o cliente) — todo
     // cadastro aprovado é considerado autorizado por padrão; reprovados nunca tiveram contrato
     // aceito, então ficam sem autorização. Sobrescrito por optOutAt sticky mais abaixo, se
-    // a linha já existir e tiver optado por sair.
-    autorizacaoComunicacao: !isReprovado,
+    // a linha já existir e tiver optado por sair. LGPD 04-06: conta encerrada sai de todo uso
+    // comercial (todo público de campanha exige a autorização).
+    autorizacaoComunicacao: !isReprovado && !encerrado,
     lastImportJobId: jobId,
   };
 
@@ -353,20 +341,27 @@ export function planUpdate(p: PreparedRow, existing: ClientRow, presence: FieldP
     delete update.autorizacaoComunicacao;
     delete update.origemCliente;
     delete update.encerradoEm;
-    delete update.motivoEncerramento;
-    delete update.obsEncerramento;
-    delete update.statusValidacaoCadastro;
   }
-  // opt-out é sticky: nunca reativa a autorização sozinho
+  // LGPD 04-06: a data do encerramento é a do primeiro registro; reimportar não a regrava (null = reaberta, limpa)
+  if (existing.encerradoEm && update.encerradoEm !== null) delete update.encerradoEm;
+  // LGPD 03-01: a data de ativação da planilha nunca faz regredir o último uso já conhecido (ex.: o do extrato)
+  const novoUso = update.dataUltimaUtilizacao as Date | undefined;
+  if (novoUso && existing.dataUltimaUtilizacao && novoUso.getTime() <= existing.dataUltimaUtilizacao.getTime()) delete update.dataUltimaUtilizacao;
+  // opt-out é sticky: nunca reativa a autorização sozinho (LGPD 02-02)
   if (existing.optOutAt && "autorizacaoComunicacao" in update) update.autorizacaoComunicacao = false;
 
   return { update, final: { limiteTotal: limite, saldoDisponivel: saldo, valorUtilizado: util, statusConta: status } };
 }
 
-/** Colunas que a importação vai gravar no cliente, com o valor de ANTES (para desfazer). */
+/**
+ * Colunas que a importação vai gravar no cliente, com o valor de ANTES (para desfazer). LGPD 01-02: só as que
+ * de fato vão ser gravadas — chave com valor undefined (coluna que o arquivo não traz) o Prisma ignora no update,
+ * então não entra aqui (antes ia o cadastro inteiro: renda, nascimento, sexo...).
+ */
 export function snapshotBefore(existing: ClientRow, update: Prisma.ClientUpdateInput): Record<string, unknown> {
   const before: Record<string, unknown> = {};
   for (const key of Object.keys(update)) {
+    if ((update as Record<string, unknown>)[key] === undefined) continue;
     if (key in existing) before[key] = (existing as any)[key];
   }
   return JSON.parse(JSON.stringify(before));
@@ -487,14 +482,17 @@ export async function previewCardAccountImport(prisma: AppPrismaClient, tenantId
   return out;
 }
 
+/** Avisos sem PII (só o número da linha vai junto) para linhas que a LGPD manda ignorar. */
+// a supressão vem do pedido do titular ou da retenção automática: o aviso não presume qual
+export const AVISO_ELIMINADO = "Aviso: dados do titular eliminados (pedido ou prazo de retenção, LGPD), linha ignorada";
+export const AVISO_BLOQUEADO = "Aviso: titular com tratamento bloqueado (LGPD), linha ignorada";
+
 export interface CardImportOptions {
   /** o que o ARQUIVO INTEIRO traz (a tela calcula no arquivo todo; sem isso vale o que este lote traz) */
   presence?: FieldPresence;
   loteId?: string;
   nomeArquivo?: string;
 }
-
-const CHANGE_TTL_DAYS = 30;
 
 /**
  * Importa o lote já mapeado para o vocabulário canônico (ver CardAccountRow). Aplica: validação
@@ -519,10 +517,7 @@ export async function runCardAccountImport(
   const job = await prisma.importJob.create({
     data: { tenantId, source: "csv", formato: "cartoes", loteId: opts.loteId, nomeArquivo: opts.nomeArquivo, status: "EM_EXECUCAO", totalRows: rows.length, triggeredBy },
   });
-  // Estados anteriores só servem para desfazer: depois de 30 dias não valem mais.
-  await prisma.importChange
-    .deleteMany({ where: { tenantId, createdAt: { lt: new Date(Date.now() - CHANGE_TTL_DAYS * 86_400_000) } } })
-    .catch(() => undefined);
+  // LGPD 04-04: a expiração do estado anterior (30 dias) agora é do job diário de retenção, para todos os formatos.
 
   const errors: RowError[] = [];
 
@@ -537,6 +532,11 @@ export async function runCardAccountImport(
   // consulta por linha) — dá pra saber criado-vs-atualizado e aplicar o opt-out sticky e o
   // registro de renovação de limite sem precisar reconsultar linha a linha.
   const existingByCpfHash = await fetchExisting(prisma, tenantId, prepared);
+  // LGPD 03-01 / 02-02: supressão por documento (eliminação, bloqueio) e por telefone (opt-out), em lote
+  const supressao = await supressaoDaImportacao(prisma, tenantId, prepared.map((p) => ({ telefone: p.data.telefone, cpfHash: p.cpfHash })));
+  const correcaoVence = (tenant as { correcaoManualVence?: boolean }).correcaoManualVence !== false;
+  const lgpd = { eliminadosAPedido: 0, bloqueadosLgpd: 0, supressoesLiberadas: 0, camposPreservadosCorrecao: 0, clientesComCorrecaoPreservada: 0 };
+  const liberados = new Set<string>();
 
   // Fase 3: grava em paralelo (upsert — INSERT ... ON CONFLICT no Postgres, atômico mesmo com
   // documentos duplicados dentro do mesmo lote rodando ao mesmo tempo).
@@ -548,8 +548,48 @@ export async function runCardAccountImport(
 
   await mapWithConcurrency(prepared, CONCURRENCY, async (p) => {
     const existing = existingByCpfHash.get(p.cpfHash);
-    const createData = { ...p.data, autorizacaoComunicacao: existing?.optOutAt ? false : p.data.autorizacaoComunicacao };
+    // LGPD 03-04: titular com tratamento suspenso não é atualizado pela planilha
+    if (existing?.bloqueadoLgpdAt) {
+      lgpd.bloqueadosLgpd++;
+      errors.push({ row: p.rowNumber, motivo: AVISO_BLOQUEADO });
+      return;
+    }
+    const dataRelacao = (p.data.dataAberturaConta as Date | undefined) ?? (p.data.dataCadastro as Date | undefined) ?? null;
+    const decisao = decidirSupressao(supressao, { telefone: p.data.telefone, cpfHash: p.cpfHash, dataRelacao });
+    if (decisao.acao === "IGNORAR") {
+      if (decisao.motivo === "BLOQUEADO") lgpd.bloqueadosLgpd++;
+      else lgpd.eliminadosAPedido++;
+      // sem PII no resultado: só o número da linha
+      errors.push({ row: p.rowNumber, motivo: decisao.motivo === "BLOQUEADO" ? AVISO_BLOQUEADO : AVISO_ELIMINADO });
+      return;
+    }
+    if (decisao.liberarEliminacao && !liberados.has(p.cpfHash)) {
+      // relação nova depois do pedido de eliminação: volta como cliente novo
+      liberados.add(p.cpfHash);
+      lgpd.supressoesLiberadas += await liberarEliminacao(prisma, tenantId, p.cpfHash, { motivo: "NOVA_RELACAO", origem: "importacao_cartoes", importJobId: job.id });
+    }
+    const semAutorizacao = decisao.semAutorizacao || !!existing?.optOutAt;
+    const createData = {
+      ...p.data,
+      autorizacaoComunicacao: semAutorizacao ? false : p.data.autorizacaoComunicacao,
+      ...(decisao.semAutorizacao && !existing ? { optOutAt: new Date() } : {}),
+    };
     const planned = existing ? planUpdate(p, existing, presence) : null;
+    if (planned && existing) {
+      // LGPD 02-02: telefone/documento com opt-out (em qualquer cadastro) nunca é religado pela planilha
+      if (decisao.semAutorizacao) {
+        planned.update.autorizacaoComunicacao = false;
+        if (!existing.optOutAt) planned.update.optOutAt = new Date();
+      }
+      // LGPD 03-03: correção manual vence a planilha
+      if (correcaoVence) {
+        const divergentes = preservarCorrecoes(planned.update as Record<string, unknown>, existing as unknown as Record<string, unknown>);
+        if (divergentes.length) {
+          lgpd.camposPreservadosCorrecao += divergentes.length;
+          lgpd.clientesComCorrecaoPreservada++;
+        }
+      }
+    }
     try {
       const saved = await prisma.client.upsert({
         where: { tenantId_cpfHash: { tenantId, cpfHash: p.cpfHash } },
@@ -645,6 +685,6 @@ export async function runCardAccountImport(
 
   return {
     importJobId: job.id,
-    result: { totalRows: rows.length, addedCount: added, updatedCount: updated, errorCount: errors.length, errors },
+    result: { totalRows: rows.length, addedCount: added, updatedCount: updated, errorCount: errors.length, errors, ...lgpd },
   };
 }
