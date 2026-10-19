@@ -70,8 +70,8 @@ barrando o número. Revisável pela controladora.
 `POST /api/segments` e `/preview` em produção (`ae033a0`): `z.union([groupSchema, filtersSchema])` com `groupSchema` não
 estrito transforma os filtros simples da tela (`{ cidade: [...] }`) em `{ operator: "AND" }`, ou seja, a base inteira.
 Campanha por segmento salvo pela tela vai para toda a base enviável. Reproduzido com zod; corrigido nesta branch
-(`.strict()`). Candidato a hotfix na `dreamy-brown` (decisão do usuário) e a conferir no banco quais segmentos estão salvos
-como `{"operator":"AND"}` e quais campanhas os usaram.
+(`.strict()`). Hotfix separado: PR #7 (`claude/hotfix-segmento-strict` → `dreamy-brown`, só o `.strict()` + teste). Falta
+conferir no banco quais segmentos estão salvos como `{"operator":"AND"}` e quais campanhas os usaram (fica com o usuário).
 
 ## Antes do deploy (operador)
 
