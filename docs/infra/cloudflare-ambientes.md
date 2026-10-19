@@ -5,6 +5,8 @@ primeiro pelo Worker). Configuração em `backend/wrangler.jsonc`, entrada em `b
 monta o mesmo Express do Node (`src/app.ts`) com `httpServerHandler` (`cloudflare:node`). `/api/health`
 responde direto, sem passar pelo Express. A homologação roda a API inteira desde 19/10/2026 (Fase 5).
 
+**Para retomar** (variáveis, subir a produção, testar disparos): `cloudflare-roteiro-producao.md`.
+
 | Ambiente | Onde | Worker | D1 | R2 |
 |---|---|---|---|---|
 | Local | `wrangler dev` (Miniflare, nada na conta) | `crmtopconta-local` | simulado | simulado |
