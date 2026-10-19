@@ -1,8 +1,8 @@
-import { google } from "googleapis";
 import type { SheetConnection } from "../generated/prisma/client";
 import { prisma, type AppPrismaClient } from "../config/db";
 import { withCrossTenantAccess } from "../config/tenantGuard";
 import { RawSheetRow } from "./importService";
+import { googleFetch } from "./googleApi";
 
 /**
  * Conector de Google Sheets.
@@ -22,20 +22,8 @@ export interface ColumnMapping {
 export const SCOPE_LEITURA = "https://www.googleapis.com/auth/spreadsheets.readonly";
 export const SCOPE_ESCRITA = "https://www.googleapis.com/auth/spreadsheets";
 
-function getAuth(scope: string) {
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!raw) {
-    throw new Error(
-      "GOOGLE_SERVICE_ACCOUNT_JSON não configurado. Defina a credencial da Service Account " +
-        "(Integrações → Google Sheets) para habilitar a sincronização automática."
-    );
-  }
-  const credentials = JSON.parse(raw);
-  return new google.auth.GoogleAuth({
-    credentials,
-    scopes: [scope],
-  });
-}
+const SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets";
+const planilha = (sheetId: string) => `${SHEETS_API}/${encodeURIComponent(sheetId)}`;
 
 /**
  * E-mail da Service Account (identificador público, não é segredo): é com ele que o controlador
@@ -130,15 +118,9 @@ export async function fetchSheetRows(
 ): Promise<RawSheetRow[]> {
   // LGPD 06-02: vale também para o sync agendado (scheduler.ts), que lê direto daqui.
   await assertPlanilhaExclusiva(prisma, sheetId);
-  const auth = getAuth(SCOPE_LEITURA);
-  const sheets = google.sheets({ version: "v4", auth });
+  const resp = await googleFetch<{ values?: unknown[][] }>(SCOPE_LEITURA, `${planilha(sheetId)}/values/${encodeURIComponent(range)}`);
 
-  const resp = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range,
-  });
-
-  const values = resp.data.values || [];
+  const values = resp.values || [];
   if (values.length === 0) return [];
 
   const header = values[0].map((h) => String(h).trim());
@@ -176,27 +158,25 @@ export async function writeSheetSummary(
 ): Promise<void> {
   // LGPD 06-02: o export BI (biExport.ts) não escreve numa planilha que outra conta também cadastrou.
   await assertPlanilhaExclusiva(prisma, sheetId);
-  const auth = getAuth(SCOPE_ESCRITA);
-  const sheets = google.sheets({ version: "v4", auth });
-
   // Garante que a aba de export existe antes de escrever nela.
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: sheetId });
-  const exists = meta.data.sheets?.some((s) => s.properties?.title === tabName);
+  const meta = await googleFetch<{ sheets?: { properties?: { title?: string } }[] }>(
+    SCOPE_ESCRITA,
+    `${planilha(sheetId)}?fields=${encodeURIComponent("sheets.properties.title")}`
+  );
+  const exists = meta.sheets?.some((s) => s.properties?.title === tabName);
   if (!exists) {
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: sheetId,
-      requestBody: { requests: [{ addSheet: { properties: { title: tabName } } }] },
+    await googleFetch(SCOPE_ESCRITA, `${planilha(sheetId)}:batchUpdate`, {
+      method: "POST",
+      body: { requests: [{ addSheet: { properties: { title: tabName } } }] },
     });
   }
 
   // Limpa o conteúdo anterior e escreve o snapshot atual — mantém a aba sempre com o resumo
   // mais recente, sem acumular histórico infinito de linhas.
-  await sheets.spreadsheets.values.clear({ spreadsheetId: sheetId, range: tabName });
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: sheetId,
-    range: `${tabName}!A1`,
-    valueInputOption: "RAW",
-    requestBody: { values: rows },
+  await googleFetch(SCOPE_ESCRITA, `${planilha(sheetId)}/values/${encodeURIComponent(tabName)}:clear`, { method: "POST", body: {} });
+  await googleFetch(SCOPE_ESCRITA, `${planilha(sheetId)}/values/${encodeURIComponent(`${tabName}!A1`)}?valueInputOption=RAW`, {
+    method: "PUT",
+    body: { values: rows },
   });
 }
 

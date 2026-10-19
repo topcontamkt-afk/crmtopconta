@@ -9,27 +9,17 @@ jest.mock("../config/db", () => ({
 }));
 jest.mock("../config/tenantGuard", () => ({ withCrossTenantAccess: (fn: () => any) => fn() }));
 
-const valuesGet = jest.fn(async (_a?: any) => ({ data: { values: [["nome"], ["Maria"]] } }));
-const ssGet = jest.fn(async (_a?: any) => ({ data: { sheets: [{ properties: { title: "CRM_Export" } }] } }));
-const valuesClear = jest.fn(async (_a?: any) => ({}));
-const valuesUpdate = jest.fn(async (_a?: any) => ({}));
-const authScopes: string[][] = [];
-jest.mock("googleapis", () => ({
-  google: {
-    auth: {
-      GoogleAuth: jest.fn().mockImplementation((o: any) => {
-        authScopes.push(o.scopes);
-        return {};
-      }),
-    },
-    sheets: () => ({
-      spreadsheets: {
-        get: (a: any) => ssGet(a),
-        batchUpdate: jest.fn(),
-        values: { get: (a: any) => valuesGet(a), clear: (a: any) => valuesClear(a), update: (a: any) => valuesUpdate(a) },
-      },
-    }),
-  },
+// Chamadas ao Google: escopo, método e URL de cada uma (o cliente HTTP em si é testado em googleApi.test.ts)
+const chamadas: { scope: string; method: string; url: string; body?: any }[] = [];
+const respostas: Record<string, any> = {};
+jest.mock("./googleApi", () => ({
+  googleFetch: jest.fn(async (scope: string, url: string, init: { method?: string; body?: unknown } = {}) => {
+    const method = init.method ?? "GET";
+    chamadas.push({ scope, method, url, body: init.body });
+    if (url.includes("/values/") && method === "GET") return respostas.values ?? { values: [["nome"], ["Maria"]] };
+    if (url.includes("?fields=")) return respostas.meta ?? { sheets: [{ properties: { title: "CRM_Export" } }] };
+    return {};
+  }),
 }));
 
 import { prisma } from "../config/db";
@@ -50,7 +40,7 @@ const conn = (tenantId: string, sheetId = "PLAN_A") => ({ id: `c-${tenantId}`, t
 
 beforeEach(() => {
   jest.clearAllMocks();
-  authScopes.length = 0;
+  chamadas.length = 0;
   process.env.GOOGLE_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: "crm@projeto.iam.gserviceaccount.com", private_key: "SEGREDO" });
 });
 
@@ -100,25 +90,40 @@ describe("fetchSheetRows / writeSheetSummary", () => {
     sheetFindMany.mockResolvedValue([{ tenantId: "t1" }]);
     const rows = await fetchSheetRows("PLAN_A", "A1:Z", { nome: "nome" });
     expect(rows).toEqual([{ nome: "Maria" }]);
-    expect(authScopes).toEqual([[SCOPE_LEITURA]]);
+    expect(chamadas).toEqual([{ scope: SCOPE_LEITURA, method: "GET", url: "https://sheets.googleapis.com/v4/spreadsheets/PLAN_A/values/A1%3AZ", body: undefined }]);
     expect(sheetFindMany.mock.calls[0][0].where).toEqual({ sheetId: "PLAN_A", active: true });
   });
 
   it("sync agendado não lê planilha cadastrada em dois tenants", async () => {
     sheetFindMany.mockResolvedValue([{ tenantId: "t1" }, { tenantId: "t2" }]);
     await expect(fetchSheetRows("PLAN_A", "A1:Z", {})).rejects.toMatchObject({ status: 409 });
-    expect(valuesGet).not.toHaveBeenCalled();
+    expect(chamadas).toHaveLength(0);
   });
 
   it("só o export BI usa escopo de escrita, e não escreve em planilha disputada", async () => {
     sheetFindMany.mockResolvedValue([{ tenantId: "t1" }]);
     await writeSheetSummary("PLAN_A", "CRM_Export", [["a"]]);
-    expect(authScopes).toEqual([[SCOPE_ESCRITA]]);
+    expect(chamadas.every((c) => c.scope === SCOPE_ESCRITA)).toBe(true);
+    // aba já existe: lê as abas, limpa e escreve a partir de A1
+    expect(chamadas.map((c) => `${c.method} ${c.url.replace("https://sheets.googleapis.com/v4/spreadsheets/", "")}`)).toEqual([
+      "GET PLAN_A?fields=sheets.properties.title",
+      "POST PLAN_A/values/CRM_Export:clear",
+      "PUT PLAN_A/values/CRM_Export!A1?valueInputOption=RAW",
+    ]);
+    expect(chamadas[2].body).toEqual({ values: [["a"]] });
 
     sheetFindMany.mockResolvedValue([{ tenantId: "t1" }, { tenantId: "t2" }]);
-    valuesUpdate.mockClear();
+    chamadas.length = 0;
     await expect(writeSheetSummary("PLAN_A", "CRM_Export", [["a"]])).rejects.toMatchObject({ status: 409 });
-    expect(valuesUpdate).not.toHaveBeenCalled();
+    expect(chamadas).toHaveLength(0);
+  });
+
+  it("export BI cria a aba quando ela não existe", async () => {
+    sheetFindMany.mockResolvedValue([{ tenantId: "t1" }]);
+    respostas.meta = { sheets: [{ properties: { title: "Base" } }] };
+    await writeSheetSummary("PLAN_A", "CRM_Export", [["a"]]);
+    delete respostas.meta;
+    expect(chamadas[1]).toMatchObject({ method: "POST", url: expect.stringMatching(/PLAN_A:batchUpdate$/), body: { requests: [{ addSheet: { properties: { title: "CRM_Export" } } }] } });
   });
 });
 
