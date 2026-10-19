@@ -1,7 +1,7 @@
-import { cidadeKey, cidadeKeySql } from "../services/cidades";
+import { cidadeKey } from "../services/cidades";
 import { hojeBrasilia } from "../services/ciclos";
 import { janelaCoberta, janelasDoCiclo } from "../services/cicloReport";
-import { USO_TIPO_SQL } from "../services/usageRefresh";
+import { antecipacaoSql, diaBrt, usoRealSql } from "../config/sql";
 import { faixaAdesao, faltamParaMeta, META_ADESAO, periodoAnterior, preencheDias, resolvePeriodo, taxaAdesao, variacaoPct, variacaoPontos } from "../services/usoPeriodo";
 import { avaliarFrescor, mensagemFrescor } from "../services/dataFreshness";
 import { ETAPA_CASE_SQL } from "../services/etapaUso";
@@ -19,6 +19,13 @@ import { loadRealHealth } from "../services/healthData";
 import { computeHealth } from "../services/health";
 import { ensureTodaySnapshot } from "../services/snapshots";
 import { computeOpportunities, OPPORTUNITY_KEYS, OpportunityKey, opportunityAudience, suggestedMessage } from "../services/opportunities";
+
+// Datas de nascimento são datas (meia-noite UTC): mês e idade saem sem fuso. "Hoje" é o de Brasília (UTC-3).
+const MES_NASCIMENTO = `CAST(strftime('%m', "dataNascimento") AS INTEGER)`;
+const MES_ATUAL_BRT = `CAST(strftime('%m', 'now', '-3 hours') AS INTEGER)`;
+/** Idade em anos completos (o AGE do Postgres): diferença de anos, menos 1 se o aniversário ainda não chegou. */
+const IDADE_SQL = `(CAST(strftime('%Y', 'now', '-3 hours') AS INTEGER) - CAST(strftime('%Y', "dataNascimento") AS INTEGER)
+  - (strftime('%m-%d', 'now', '-3 hours') < strftime('%m-%d', "dataNascimento")))`;
 
 const router = Router();
 
@@ -47,9 +54,9 @@ async function rankingPorCampo(tenantId: string, column: "cidade" | "empresaConv
     Array<{ chave: string; total: bigint; ativos: bigint; valor_utilizado: number | null }>
   >(
     `SELECT "${column}" AS chave,
-            COUNT(*)::bigint AS total,
-            COUNT(*) FILTER (WHERE "statusConta" = 'ATIVO')::bigint AS ativos,
-            COALESCE(SUM("valorUtilizado"), 0)::float AS valor_utilizado
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE "statusConta" = 'ATIVO') AS ativos,
+            COALESCE(SUM("valorUtilizado"), 0) AS valor_utilizado
      FROM "Client"
      WHERE "tenantId" = $1 ${SO_TRATAVEL} AND "${column}" IS NOT NULL
      GROUP BY "${column}"
@@ -143,12 +150,12 @@ router.get("/uso-mensal", async (req, res) => {
 
   const [totalClientes, porMesRaw] = await Promise.all([
     prisma.client.count({ where: { tenantId, ...TRATAVEL_WHERE } }),
-    tenantRaw.query<Array<{ mes: Date; usados: bigint }>>(
-      `SELECT date_trunc('month', "dataUltimaUtilizacao") AS mes, COUNT(*)::bigint AS usados
+    tenantRaw.query<Array<{ mes: string; usados: number }>>(
+      `SELECT strftime('%Y-%m', "dataUltimaUtilizacao") AS mes, COUNT(*) AS usados
        FROM "Client"
        WHERE "tenantId" = $1 ${SO_TRATAVEL}
          AND "dataUltimaUtilizacao" IS NOT NULL
-         AND "dataUltimaUtilizacao" >= date_trunc('month', now()) - interval '11 months'
+         AND "dataUltimaUtilizacao" >= strftime('%Y-%m-01T00:00:00.000+00:00', 'now', 'start of month', '-11 months')
        GROUP BY mes ORDER BY mes ASC`,
       tenantId
     ),
@@ -156,7 +163,7 @@ router.get("/uso-mensal", async (req, res) => {
 
   const usadosPorMes = new Map<string, number>();
   for (const row of porMesRaw) {
-    usadosPorMes.set(row.mes.toISOString().slice(0, 7), Number(row.usados));
+    usadosPorMes.set(row.mes, Number(row.usados));
   }
 
   const meses: Array<{ mes: string; label: string; usados: number; percent: number }> = [];
@@ -188,12 +195,12 @@ router.get("/encerramentos", async (req, res) => {
 
   const [totalClientes, porMesRaw, motivosRaw] = await Promise.all([
     prisma.client.count({ where: { tenantId, ...TRATAVEL_WHERE } }),
-    tenantRaw.query<Array<{ mes: Date; encerrados: bigint }>>(
-      `SELECT date_trunc('month', "encerradoEm") AS mes, COUNT(*)::bigint AS encerrados
+    tenantRaw.query<Array<{ mes: string; encerrados: number }>>(
+      `SELECT strftime('%Y-%m', "encerradoEm") AS mes, COUNT(*) AS encerrados
        FROM "Client"
        WHERE "tenantId" = $1 ${SO_TRATAVEL}
          AND "encerradoEm" IS NOT NULL
-         AND "encerradoEm" >= date_trunc('month', now()) - interval '11 months'
+         AND "encerradoEm" >= strftime('%Y-%m-01T00:00:00.000+00:00', 'now', 'start of month', '-11 months')
        GROUP BY mes ORDER BY mes ASC`,
       tenantId
     ),
@@ -208,7 +215,7 @@ router.get("/encerramentos", async (req, res) => {
 
   const encerradosPorMes = new Map<string, number>();
   for (const row of porMesRaw) {
-    encerradosPorMes.set(row.mes.toISOString().slice(0, 7), Number(row.encerrados));
+    encerradosPorMes.set(row.mes, Number(row.encerrados));
   }
 
   const meses: Array<{ mes: string; label: string; encerrados: number; percent: number }> = [];
@@ -257,25 +264,25 @@ router.get("/engajamento", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (r
            WHEN "percentualUtilizado" > 0 THEN 'baixo'
            ELSE 'sem_engajamento'
          END AS nivel,
-         COUNT(*)::bigint AS count
+         COUNT(*) AS count
        FROM "Client"
        WHERE "tenantId" = $1 ${SO_TRATAVEL}
        GROUP BY nivel`,
       tenantId
     ),
     tenantRaw.query<Array<{ count: bigint }>>(
-      `SELECT COUNT(*)::bigint AS count FROM "Client"
+      `SELECT COUNT(*) AS count FROM "Client"
        WHERE "tenantId" = $1 ${SO_TRATAVEL} AND "dataNascimento" IS NOT NULL
-         AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM CURRENT_DATE)`,
+         AND ${MES_NASCIMENTO} = ${MES_ATUAL_BRT}`,
       tenantId
     ),
     tenantRaw.query<
       Array<{ id: string; nome: string; telefone: string; cidade: string | null; dia: number }>
     >(
-      `SELECT "id", "nome", "telefone", "cidade", EXTRACT(DAY FROM "dataNascimento")::int AS dia
+      `SELECT "id", "nome", "telefone", "cidade", CAST(strftime('%d', "dataNascimento") AS INTEGER) AS dia
        FROM "Client"
        WHERE "tenantId" = $1 ${SO_TRATAVEL} AND "dataNascimento" IS NOT NULL
-         AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM CURRENT_DATE)
+         AND ${MES_NASCIMENTO} = ${MES_ATUAL_BRT}
        ORDER BY dia ASC
        LIMIT 100`,
       tenantId
@@ -327,14 +334,14 @@ router.get("/perfil", async (req, res) => {
       `SELECT
          CASE
            WHEN "dataNascimento" IS NULL THEN 'desconhecida'
-           WHEN DATE_PART('year', AGE(NOW(), "dataNascimento")) < 26 THEN '18-25'
-           WHEN DATE_PART('year', AGE(NOW(), "dataNascimento")) < 36 THEN '26-35'
-           WHEN DATE_PART('year', AGE(NOW(), "dataNascimento")) < 46 THEN '36-45'
-           WHEN DATE_PART('year', AGE(NOW(), "dataNascimento")) < 56 THEN '46-55'
-           WHEN DATE_PART('year', AGE(NOW(), "dataNascimento")) < 66 THEN '56-65'
+           WHEN ${IDADE_SQL} < 26 THEN '18-25'
+           WHEN ${IDADE_SQL} < 36 THEN '26-35'
+           WHEN ${IDADE_SQL} < 46 THEN '36-45'
+           WHEN ${IDADE_SQL} < 56 THEN '46-55'
+           WHEN ${IDADE_SQL} < 66 THEN '56-65'
            ELSE '66+'
          END AS faixa,
-         COUNT(*)::bigint AS count
+         COUNT(*) AS count
        FROM "Client"
        WHERE "tenantId" = $1 ${SO_TRATAVEL}
        GROUP BY faixa`,
@@ -351,7 +358,7 @@ router.get("/perfil", async (req, res) => {
            WHEN COALESCE("remuneracaoBruta", "remuneracaoLiquida") <= 8000 THEN 'R$ 5.001 – 8.000'
            ELSE 'Acima de R$ 8.000'
          END AS faixa,
-         COUNT(*)::bigint AS count
+         COUNT(*) AS count
        FROM "Client"
        WHERE "tenantId" = $1 ${SO_TRATAVEL}
        GROUP BY faixa`,
@@ -384,8 +391,10 @@ router.get("/evolucao", async (req, res) => {
   const { tenantId } = req.user!;
   const granularity = (req.query.granularity as string) === "monthly" ? "month" : "week";
 
-  const rows: Array<{ periodo: Date; total: bigint }> = await tenantRaw.query(
-    `SELECT date_trunc('${granularity}', "createdAt") AS periodo, COUNT(*)::bigint AS total
+  // início da semana (segunda) ou do mês, como o date_trunc do Postgres; meia-noite UTC em ISO
+  const inicio = granularity === "month" ? `strftime('%Y-%m-01', "createdAt")` : `date("createdAt", 'weekday 0', '-6 days')`;
+  const rows: Array<{ periodo: string; total: number }> = await tenantRaw.query(
+    `SELECT ${inicio} || 'T00:00:00.000Z' AS periodo, COUNT(*) AS total
      FROM "Client" WHERE "tenantId" = $1 ${SO_TRATAVEL}
      GROUP BY periodo ORDER BY periodo ASC LIMIT 52`,
     tenantId
@@ -505,9 +514,9 @@ router.get("/overview", async (req, res) => {
       take: 100,
     }),
     tenantRaw.query<Array<{ count: bigint }>>(
-      `SELECT COUNT(*)::bigint AS count FROM "Client"
+      `SELECT COUNT(*) AS count FROM "Client"
        WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL
-         AND EXTRACT(MONTH FROM "dataNascimento") = EXTRACT(MONTH FROM (now() AT TIME ZONE 'America/Sao_Paulo')) ${raw.sql}`,
+         AND ${MES_NASCIMENTO} = ${MES_ATUAL_BRT} ${raw.sql}`,
       tenantId,
       ...raw.params
     ),
@@ -797,21 +806,21 @@ router.get("/uso-periodo", async (req, res) => {
   if ("erro" in periodo) return res.status(400).json({ error: periodo.erro });
   const anterior = periodoAnterior(periodo);
   const raw = rawFilterSql({ cidade: q.data.cidade, empresaConveniada: q.data.empresaConveniada }, 4, "c");
-  const tipo = USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"');
-  const ANTEC = `p."tipo" ~* '^\\s*d[eé]bito\\s+pix'`;
-  const dia = `(p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date`;
+  const tipo = usoRealSql("p");
+  const ANTEC = antecipacaoSql("p");
+  const dia = diaBrt('p."occurredAt"');
   const from = `FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
-    WHERE p."tenantId" = $1 AND ${tipo} ${raw.sql} AND ${dia} BETWEEN $2::date AND $3::date`;
+    WHERE p."tenantId" = $1 AND ${tipo} ${raw.sql} AND ${dia} BETWEEN $2 AND $3`;
 
   const resumo = (de: string, ate: string) =>
     tenantRaw.query<Array<{ clientes: bigint; usos: bigint; valor: string; antec: bigint; antec_valor: string; juros: string; compras: bigint; compras_valor: string }>>(
-      `SELECT COUNT(DISTINCT p."clientId")::bigint AS clientes, COUNT(*)::bigint AS usos,
-              COALESCE(SUM(p."valorPrincipal"),0)::text AS valor,
-              COUNT(*) FILTER (WHERE ${ANTEC})::bigint AS antec,
-              COALESCE(SUM(p."valorPrincipal") FILTER (WHERE ${ANTEC}),0)::text AS antec_valor,
-              COALESCE(SUM(p."juros") FILTER (WHERE ${ANTEC}),0)::text AS juros,
-              COUNT(*) FILTER (WHERE NOT (${ANTEC}))::bigint AS compras,
-              COALESCE(SUM(p."valorPrincipal") FILTER (WHERE NOT (${ANTEC})),0)::text AS compras_valor
+      `SELECT COUNT(DISTINCT p."clientId") AS clientes, COUNT(*) AS usos,
+              COALESCE(SUM(p."valorPrincipal"),0) AS valor,
+              COUNT(*) FILTER (WHERE ${ANTEC}) AS antec,
+              COALESCE(SUM(p."valorPrincipal") FILTER (WHERE ${ANTEC}),0) AS antec_valor,
+              COALESCE(SUM(p."juros") FILTER (WHERE ${ANTEC}),0) AS juros,
+              COUNT(*) FILTER (WHERE NOT (${ANTEC})) AS compras,
+              COALESCE(SUM(p."valorPrincipal") FILTER (WHERE NOT (${ANTEC})),0) AS compras_valor
        ${from}`,
       tenantId,
       de,
@@ -823,7 +832,7 @@ router.get("/uso-periodo", async (req, res) => {
   const ativoComLimite = `c."statusConta" = 'ATIVO' AND c."limiteTotal" > 0`;
   const usaramAtivos = (de: string, ate: string) =>
     tenantRaw.query<Array<{ usaram: bigint }>>(
-      `SELECT COUNT(DISTINCT p."clientId")::bigint AS usaram ${from} AND ${ativoComLimite}`,
+      `SELECT COUNT(DISTINCT p."clientId") AS usaram ${from} AND ${ativoComLimite}`,
       tenantId,
       de,
       ate,
@@ -834,8 +843,8 @@ router.get("/uso-periodo", async (req, res) => {
     resumo(periodo.de, periodo.ate),
     resumo(anterior.de, anterior.ate),
     tenantRaw.query<Array<{ dia: string; usos: bigint; clientes: bigint; valor: string }>>(
-      `SELECT to_char(${dia}, 'YYYY-MM-DD') AS dia, COUNT(*)::bigint AS usos, COUNT(DISTINCT p."clientId")::bigint AS clientes,
-              COALESCE(SUM(p."valorPrincipal"),0)::text AS valor
+      `SELECT ${dia} AS dia, COUNT(*) AS usos, COUNT(DISTINCT p."clientId") AS clientes,
+              COALESCE(SUM(p."valorPrincipal"),0) AS valor
        ${from} GROUP BY 1 ORDER BY 1`,
       tenantId,
       periodo.de,
@@ -845,16 +854,16 @@ router.get("/uso-periodo", async (req, res) => {
     // Por cidade: base ativa com limite, quantos usaram, usos e valor. Cidade sem uso entra com zero (é a lacuna).
     tenantRaw.query<Array<{ cidade: string | null; base: bigint; usaram: bigint; usos: bigint; valor: string }>>(
       `WITH base AS (
-         SELECT ${cidadeKeySql('c."cidade"')} AS k, MIN(c."cidade") AS cidade, COUNT(*) AS base
+         SELECT c."cidadeKey" AS k, MIN(c."cidade") AS cidade, COUNT(*) AS base
          FROM "Client" c
-         WHERE c."tenantId" = $1 AND ${ativoComLimite} ${raw.sql} AND ${cidadeKeySql('c."cidade"')} <> '__SEM_CIDADE__'
+         WHERE c."tenantId" = $1 AND ${ativoComLimite} ${raw.sql} AND c."cidadeKey" <> '__SEM_CIDADE__'
          GROUP BY 1
        ), uso AS (
-         SELECT ${cidadeKeySql('c."cidade"')} AS k, COUNT(DISTINCT p."clientId") AS usaram, COUNT(*) AS usos, COALESCE(SUM(p."valorPrincipal"),0) AS valor
-         ${from} AND ${ativoComLimite} AND ${cidadeKeySql('c."cidade"')} <> '__SEM_CIDADE__'
+         SELECT c."cidadeKey" AS k, COUNT(DISTINCT p."clientId") AS usaram, COUNT(*) AS usos, COALESCE(SUM(p."valorPrincipal"),0) AS valor
+         ${from} AND ${ativoComLimite} AND c."cidadeKey" <> '__SEM_CIDADE__'
          GROUP BY 1
        )
-       SELECT base.cidade, base.base::bigint AS base, COALESCE(uso.usaram,0)::bigint AS usaram, COALESCE(uso.usos,0)::bigint AS usos, COALESCE(uso.valor,0)::text AS valor
+       SELECT base.cidade, base.base AS base, COALESCE(uso.usaram,0) AS usaram, COALESCE(uso.usos,0) AS usos, COALESCE(uso.valor,0) AS valor
        FROM base LEFT JOIN uso USING (k) ORDER BY base.base DESC LIMIT 30`,
       tenantId,
       periodo.de,
@@ -862,7 +871,7 @@ router.get("/uso-periodo", async (req, res) => {
       ...raw.params
     ),
     tenantRaw.query<Array<{ primeiro: string | null; ultimo: string | null }>>(
-      `SELECT to_char(MIN(${dia}), 'YYYY-MM-DD') AS primeiro, to_char(MAX(${dia}), 'YYYY-MM-DD') AS ultimo FROM "Purchase" p WHERE p."tenantId" = $1 AND ${tipo}`,
+      `SELECT MIN(${dia}) AS primeiro, MAX(${dia}) AS ultimo FROM "Purchase" p WHERE p."tenantId" = $1 AND ${tipo}`,
       tenantId
     ),
     prisma.client.count({ where: { ...clientWhere(tenantId, { cidade: q.data.cidade, empresaConveniada: q.data.empresaConveniada }), statusConta: "ATIVO", limiteTotal: { gt: 0 } } }),
@@ -956,38 +965,37 @@ router.get("/adesao-ciclo", async (req, res) => {
   );
   if (configs.length === 0) return res.json({ configurado: false, meta: META_ADESAO, cidades: [] });
 
-  const dia = `(p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date`;
+  const dia = diaBrt('p."occurredAt"');
   const [ext] = await tenantRaw.query<Array<{ primeiro: string | null; ultimo: string | null }>>(
-    `SELECT to_char(MIN(${dia}), 'YYYY-MM-DD') AS primeiro, to_char(MAX(${dia}), 'YYYY-MM-DD') AS ultimo FROM "Purchase" p WHERE p."tenantId" = $1 AND ${USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"')}`,
+    `SELECT MIN(${dia}) AS primeiro, MAX(${dia}) AS ultimo FROM "Purchase" p WHERE p."tenantId" = $1 AND ${usoRealSql("p")}`,
     tenantId
   );
   const extrato = { primeiro: ext?.primeiro ?? null, ultimo: ext?.ultimo ?? null };
 
   const jan = configs.map((c) => ({ c, j: janelasDoCiclo(c.diaAbertura, hoje) }));
-  const raw = rawFilterSql({ empresaConveniada: q.data.empresaConveniada }, 7, "c");
-  const tipo = USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"');
+  const raw = rawFilterSql({ empresaConveniada: q.data.empresaConveniada }, 3, "c");
+  const tipo = usoRealSql("p");
   const rows = await tenantRaw.query<Array<{ k: string; base: bigint; usaram_completo: bigint; usaram_atual: bigint }>>(
     `WITH j AS (
-       SELECT * FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[]) AS t(k, de_c, ate_c, de_a, ate_a)
+       SELECT json_extract(value, '$.k') AS k, json_extract(value, '$.de_c') AS de_c, json_extract(value, '$.ate_c') AS ate_c,
+              json_extract(value, '$.de_a') AS de_a, json_extract(value, '$.ate_a') AS ate_a
+       FROM json_each($2)
      ), cli AS (
-       SELECT c.id, ${cidadeKeySql('c."cidade"')} AS k FROM "Client" c
+       SELECT c.id, c."cidadeKey" AS k FROM "Client" c
        WHERE c."tenantId" = $1 AND c."statusConta" = 'ATIVO' AND c."limiteTotal" > 0 ${raw.sql}
      ), base AS (
        SELECT k, COUNT(*) AS base FROM cli GROUP BY k
      ), uso AS (
        SELECT cli.k, ${dia} AS d, p."clientId" AS cid FROM cli JOIN "Purchase" p ON p."clientId" = cli.id AND p."tenantId" = $1 WHERE ${tipo}
      )
-     SELECT j.k, COALESCE(base.base, 0)::bigint AS base,
-            COUNT(DISTINCT uso.cid) FILTER (WHERE uso.d BETWEEN j.de_c::date AND j.ate_c::date)::bigint AS usaram_completo,
-            COUNT(DISTINCT uso.cid) FILTER (WHERE uso.d BETWEEN j.de_a::date AND j.ate_a::date)::bigint AS usaram_atual
+     SELECT j.k, COALESCE(base.base, 0) AS base,
+            COUNT(DISTINCT uso.cid) FILTER (WHERE uso.d BETWEEN j.de_c AND j.ate_c) AS usaram_completo,
+            COUNT(DISTINCT uso.cid) FILTER (WHERE uso.d BETWEEN j.de_a AND j.ate_a) AS usaram_atual
      FROM j LEFT JOIN base ON base.k = j.k LEFT JOIN uso ON uso.k = j.k
      GROUP BY j.k, base.base`,
     tenantId,
-    jan.map((x) => x.c.cidadeKey),
-    jan.map((x) => x.j.completo.de),
-    jan.map((x) => x.j.completo.ate),
-    jan.map((x) => x.j.atual.de),
-    jan.map((x) => x.j.atual.ate),
+    // janelas por cidade num JSON só (o SQLite não tem array/unnest)
+    JSON.stringify(jan.map((x) => ({ k: x.c.cidadeKey, de_c: x.j.completo.de, ate_c: x.j.completo.ate, de_a: x.j.atual.de, ate_a: x.j.atual.ate }))),
     ...raw.params
   );
   const porKey = new Map(rows.map((r) => [r.k, r]));
@@ -1040,11 +1048,11 @@ router.get("/adesao-ciclo", async (req, res) => {
 
 /** GET /api/dashboard/frescor — o extrato de compras está em dia? (aviso de dado velho) */
 router.get("/frescor", async (req, res) => {
-  const [r] = await tenantRaw.query<Array<{ ultima: Date | null }>>(
+  const [r] = await tenantRaw.query<Array<{ ultima: string | null }>>(
     `SELECT MAX("occurredAt") AS ultima FROM "Purchase" WHERE "tenantId" = $1`,
     req.user!.tenantId
   );
-  const f = avaliarFrescor(r?.ultima ?? null);
+  const f = avaliarFrescor(r?.ultima ? new Date(r.ultima) : null);
   res.json({ ...f, mensagem: mensagemFrescor(f) });
 });
 
@@ -1064,16 +1072,16 @@ router.get("/perfis-renda", async (req, res) => {
     `SELECT
        CASE
          WHEN "limiteTotal" IS NULL OR "limiteTotal" <= 0 THEN NULL
-         WHEN "limiteTotal" <= $2::numeric THEN 'PF1'
-         WHEN "limiteTotal" <= $3::numeric THEN 'PF2'
-         WHEN "limiteTotal" <= $4::numeric THEN 'PF3'
+         WHEN "limiteTotal" <= $2 THEN 'PF1'
+         WHEN "limiteTotal" <= $3 THEN 'PF2'
+         WHEN "limiteTotal" <= $4 THEN 'PF3'
          ELSE 'PF4'
        END AS perfil,
-       "faixaUso"::text AS faixa,
+       "faixaUso" AS faixa,
        ${ETAPA_CASE_SQL} AS etapa,
-       COUNT(*)::bigint AS n,
-       COUNT(*) FILTER (WHERE "limiteTotal" = ${LIMITE_TETO})::bigint AS no_teto,
-       COUNT(*) FILTER (WHERE "faixaUso" = 'USO_100')::bigint AS sem_saldo
+       COUNT(*) AS n,
+       COUNT(*) FILTER (WHERE "limiteTotal" = ${LIMITE_TETO}) AS no_teto,
+       COUNT(*) FILTER (WHERE "faixaUso" = 'USO_100') AS sem_saldo
      FROM "Client"
      WHERE "tenantId" = $1 ${raw.sql}
      GROUP BY 1, 2, 3`,
@@ -1124,9 +1132,9 @@ router.get("/perfis-renda/:perfil", async (req, res) => {
 
   // SQL cru: parâmetros $1 tenant, $2 limite mínimo, $3 limite máximo (ou null), $4 cidade (ou null)
   const params: unknown[] = [tenantId, r.gt, r.lte ?? null, cidade ?? null];
-  const filtroCliente = `c."tenantId" = $1 AND c."limiteTotal" > $2::numeric AND ($3::numeric IS NULL OR c."limiteTotal" <= $3::numeric) AND ($4::text IS NULL OR c."cidade" = $4::text)`;
+  const filtroCliente = `c."tenantId" = $1 AND c."limiteTotal" > $2 AND ($3 IS NULL OR c."limiteTotal" <= $3) AND ($4 IS NULL OR c."cidade" = $4)`;
   const etapaRows = tenantRaw.query<Array<{ etapa: string; n: bigint }>>(
-    `SELECT ${ETAPA_CASE_SQL.replace(/"(ultimoUsoReal|usosTotal|usosUltimos90d)"/g, 'c."$1"')} AS etapa, COUNT(*)::bigint AS n FROM "Client" c WHERE ${filtroCliente} GROUP BY 1`,
+    `SELECT ${ETAPA_CASE_SQL.replace(/"(ultimoUsoReal|usosTotal|usosUltimos90d)"/g, 'c."$1"')} AS etapa, COUNT(*) AS n FROM "Client" c WHERE ${filtroCliente} GROUP BY 1`,
     ...params
   );
 
@@ -1138,20 +1146,20 @@ router.get("/perfis-renda/:perfil", async (req, res) => {
       }
     : null;
   const usoSql = `FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
-    WHERE ${filtroCliente} AND ${USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"')}
-      AND ($5::date IS NULL OR (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date >= $5::date)
-      AND ($6::date IS NULL OR (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date <= $6::date)`;
+    WHERE ${filtroCliente} AND ${usoRealSql("p")}
+      AND ($5 IS NULL OR ${diaBrt('p."occurredAt"')} >= $5)
+      AND ($6 IS NULL OR ${diaBrt('p."occurredAt"')} <= $6)`;
   const usoParams = [...params, de ?? null, ate ?? null];
   const usoResumo = tenantRaw.query<Array<{ clientes: bigint; usos: bigint; valor: string | null; juros: string | null }>>(
-    `SELECT COUNT(DISTINCT p."clientId")::bigint AS clientes, COUNT(*)::bigint AS usos,
-            COALESCE(SUM(p."valorPrincipal"),0)::text AS valor,
-            COALESCE(SUM(p."juros") FILTER (WHERE p."tipo" ~* '^\\s*d[eé]bito\\s+pix'),0)::text AS juros
+    `SELECT COUNT(DISTINCT p."clientId") AS clientes, COUNT(*) AS usos,
+            COALESCE(SUM(p."valorPrincipal"),0) AS valor,
+            COALESCE(SUM(p."juros") FILTER (WHERE ${antecipacaoSql("p")}),0) AS juros
      ${usoSql}`,
     ...usoParams
   );
   const usoSerie = tenantRaw.query<Array<{ dia: string; usos: bigint; clientes: bigint }>>(
-    `SELECT to_char((p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS dia,
-            COUNT(*)::bigint AS usos, COUNT(DISTINCT p."clientId")::bigint AS clientes
+    `SELECT ${diaBrt('p."occurredAt"')} AS dia,
+            COUNT(*) AS usos, COUNT(DISTINCT p."clientId") AS clientes
      ${usoSql} GROUP BY 1 ORDER BY 1`,
     ...usoParams
   );

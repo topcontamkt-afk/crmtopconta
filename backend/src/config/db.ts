@@ -1,5 +1,6 @@
 import { PrismaClient } from "../generated/prisma/client";
 import { checkRawTenant, tenantGuardExtension } from "./tenantGuard";
+import { derivedColumnsExtension } from "./derivedColumns";
 
 /**
  * Client do Prisma 7 com o isolamento por tenant (config/tenantGuard.ts). O banco chega por adapter,
@@ -19,7 +20,7 @@ function buildClient() {
   if (!adapterFactory) {
     throw new Error("[db] banco não configurado: chame configureDatabase() na entrada (Worker ou script)");
   }
-  return new PrismaClient({ adapter: adapterFactory() }).$extends(tenantGuardExtension);
+  return new PrismaClient({ adapter: adapterFactory() }).$extends(tenantGuardExtension).$extends(derivedColumnsExtension);
 }
 
 // O `$extends()` tira `$on`/`$use` do tipo, então ele não é atribuível a `PrismaClient`. Funções que
@@ -59,6 +60,26 @@ export function positionalParams(sql: string, params: unknown[]): { sql: string;
 }
 
 /**
+ * Linhas do SQL cru no mesmo formato nos dois adapters. O tipo de uma coluna calculada (COUNT, SUM,
+ * MAX(...)) é adivinhado pelo valor: no better-sqlite3 dos testes inteiro vem como BigInt, no D1 como
+ * number; e o D1 devolve como Date o texto que parece data ISO, o better-sqlite3 devolve o texto. Aqui
+ * inteiro é sempre number e data é sempre texto ISO (`new Date(...)` lê os dois formatos gravados).
+ */
+export function normalizeRawRows<T>(rows: T): T {
+  if (!Array.isArray(rows)) return rows;
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const r = row as Record<string, unknown>;
+    for (const k of Object.keys(r)) {
+      const v = r[k];
+      if (typeof v === "bigint") r[k] = Number.isSafeInteger(Number(v)) ? Number(v) : v.toString();
+      else if (v instanceof Date) r[k] = v.toISOString();
+    }
+  }
+  return rows;
+}
+
+/**
  * SQL cru. Não passa pela extensão do Prisma, então `checkRawTenant` exige o filtro
  * `"tenantId" = $1` com o tenant do contexto como 1º parâmetro. Os valores sempre vão como
  * parâmetros (`$n`, ver `positionalParams`), nunca interpolados no texto.
@@ -67,7 +88,7 @@ export const tenantRaw = {
   query: async <T = unknown>(sql: string, ...params: unknown[]): Promise<T> => {
     checkRawTenant(sql, params);
     const q = positionalParams(sql, params);
-    return prisma.$queryRawUnsafe<T>(q.sql, ...q.params);
+    return normalizeRawRows(await prisma.$queryRawUnsafe<T>(q.sql, ...q.params));
   },
   execute: async (sql: string, ...params: unknown[]): Promise<number> => {
     checkRawTenant(sql, params);

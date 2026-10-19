@@ -2,6 +2,7 @@ import { etapaWhere, EtapaUso } from "./etapaUso";
 import { Prisma } from "../generated/prisma/client";
 import { PerfilRenda } from "./rendaPerfil";
 import { diasAberturaNaFaixa, FaixaDias } from "./ciclos";
+import { textoBusca } from "../config/derivedColumns";
 
 /**
  * Definição de filtros de segmento (UI: filtros + preview count).
@@ -110,9 +111,8 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
   if (filters.search) {
     and.push({
       OR: [
-        // SQLite: `contains` vira LIKE, que já ignora maiúscula/minúscula só em ASCII ("joão" não acha
-        // "JOÃO"). A busca sem acento e sem caixa entra com a coluna `nomeBusca` (Fase 4 da migração).
-        { nome: { contains: filters.search } },
+        // nomeBusca: nome sem acento e em minúsculas (o LIKE do SQLite só ignora caixa em ASCII)
+        { nomeBusca: { contains: textoBusca(filters.search) } },
         { telefone: { contains: filters.search } },
       ],
     });

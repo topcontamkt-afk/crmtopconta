@@ -11,6 +11,7 @@ const db = {
   purchase: { count: jest.fn(async () => 0) },
   accountSnapshot: { count: jest.fn(async () => 0) },
   conversation: { count: jest.fn(async () => 0) },
+  waMessage: { findMany: jest.fn(async (..._a: any[]) => []) },
   segmentDefinition: { updateMany: jest.fn(async () => ({ count: 0 })) },
   rawExecute: jest.fn(async (..._a: any[]) => 0),
 };
@@ -348,7 +349,7 @@ describe("LGPD 02-02 / 02-03: opt-out manual e reautorização", () => {
 });
 
 describe("LGPD 04-05: limpar base", () => {
-  it("preserva opt-out como supressão, apaga tudo num bloco só (ordem das FKs) e redige a auditoria", async () => {
+  it("preserva opt-out como supressão, apaga em passos na ordem das FKs e redige a auditoria", async () => {
     db.client.findMany.mockImplementation(async ({ where }: any) =>
       where.OR ? [{ telefone: TEL, cpfHash: "h1", optOutAt: new Date(), bloqueadoLgpdAt: null }] : [{ id: "c1" }, { id: "c2" }]
     );
@@ -357,13 +358,13 @@ describe("LGPD 04-05: limpar base", () => {
     const r = await request(app).post("/clients/purge").set("x-role", "ADMIN").send({ confirm: "LIMPAR BASE" });
     expect(r.status).toBe(200);
     expect(db.supressaoTitular.createMany.mock.calls[0][0].data[0]).toMatchObject({ tenantId: "t1", motivo: "OPT_OUT", docHash: "h1" });
-    expect(db.rawExecute).toHaveBeenCalledTimes(1);
-    const sql: string = db.rawExecute.mock.calls[0][0];
-    const ordem = ['"WaMediaBlob"', '"WaMessage"', 'DELETE FROM "Conversation"', '"CampaignRecipient"', '"MessageEvent"', '"Movement"', '"AccountSnapshot"', '"Purchase"', '"ImportChange"', 'DELETE FROM "Client"'];
-    const pos = ordem.map((t) => sql.indexOf(t));
+    // passos em sequência (ordem das FKs), todos com o tenant da sessão em $1
+    const passos: string[] = db.rawExecute.mock.calls.map((c: any[]) => c[0]);
+    expect(db.rawExecute.mock.calls.every((c: any[]) => c[1] === "t1" && c[0].includes('"tenantId" = $1'))).toBe(true);
+    const ordem = ['"WaMessage"', 'DELETE FROM "Conversation"', '"CampaignRecipient"', '"MessageEvent"', '"Movement"', '"AccountSnapshot"', '"Purchase"', '"ImportChange"', 'DELETE FROM "Client"'];
+    const pos = ordem.map((t) => passos.findIndex((p) => p.includes(t)));
     expect(pos.every((p) => p >= 0)).toBe(true);
     expect([...pos].sort((x, y) => x - y)).toEqual(pos);
-    expect(sql).toContain("current_setting('app.tenant_id')");
     expect(mockRedigir).toHaveBeenCalledWith(db, "t1", ["c1", "c2"], "LIMPAR_BASE");
     expect(audit.mock.calls[0][0]).toMatchObject({ action: "PURGE_CLIENTS", details: { clients: 2, supressoesGravadas: 1, auditoriaRedigida: 3 } });
   });

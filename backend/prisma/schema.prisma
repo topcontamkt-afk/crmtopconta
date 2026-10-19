@@ -195,6 +195,9 @@ model Client {
 
   externalId    String? // id_cliente da planilha de origem
   nome          String
+  // nome sem acento e em minúsculas, para busca (o LIKE do SQLite só ignora caixa em ASCII). Preenchido pela
+  // extensão de colunas derivadas (config/derivedColumns.ts) a cada gravação de `nome`.
+  nomeBusca     String  @default("")
   telefone      String // normalizado E.164
   email         String?
   // cpfHash/cpfMasked guardam CPF (pessoa física) OU CNPJ (pessoa jurídica) — a coluna de
@@ -204,6 +207,9 @@ model Client {
   cpfMasked     String
   documentoTipo String? // "CPF" | "CNPJ"
   cidade        String?
+  // chave da cidade (services/cidades.ts cidadeKey): o SQLite não tem regex nem lower() fora do ASCII, então a
+  // regra roda em JS a cada gravação de `cidade` (config/derivedColumns.ts) e os filtros/agrupamentos usam esta.
+  cidadeKey     String  @default("__SEM_CIDADE__")
 
   dataCadastro         DateTime?
   dataAberturaConta    DateTime?
@@ -275,6 +281,7 @@ model Client {
   @@unique([tenantId, cpfHash])
   @@index([tenantId, telefone])
   @@index([tenantId, cidade])
+  @@index([tenantId, cidadeKey])
   @@index([tenantId, diaCicloAbertura])
   @@index([tenantId, faixaUso])
   @@index([tenantId, ultimoUsoReal])
@@ -708,6 +715,9 @@ model Purchase {
   externalId     String
   occurredAt     DateTime
   tipo           String // Descricao da planilha (ex.: "Compra à Vista Cartão Top Convênio")
+  // classifyTransaction(tipo).kind (ANTECIPACAO | COMPRA | ASSINATURA | OUTRO), gravado com o `tipo`
+  // (config/derivedColumns.ts): no SQLite não há regex para classificar na consulta.
+  usoTipo        String    @default("OUTRO")
   merchantName   String?
   valorPrincipal Decimal
   valorParcela   Decimal?
@@ -718,6 +728,7 @@ model Purchase {
 
   @@unique([tenantId, externalId])
   @@index([tenantId, occurredAt])
+  @@index([tenantId, usoTipo, occurredAt])
   @@index([clientId, occurredAt])
   @@index([merchantId, occurredAt])
 }

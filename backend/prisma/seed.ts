@@ -9,6 +9,7 @@ import { PrismaClient } from "../src/generated/prisma/client";
 import { hashCPF, maskCPF, normalizePhone } from "../src/services/masking";
 import { computeUsage } from "../src/services/usage";
 import { migrationsSql } from "../src/config/d1Migrations";
+import { derivedColumnsExtension } from "../src/config/derivedColumns";
 
 /**
  * Seed para o D1: monta os dados de demonstração com o Prisma num SQLite temporário (mesmas migrations
@@ -26,7 +27,7 @@ async function main() {
   sqlite.exec(migrationsSql());
   sqlite.close();
 
-  const prisma = new PrismaClient({ adapter: new PrismaBetterSqlite3({ url: `file:${dbFile}` }) });
+  const prisma = new PrismaClient({ adapter: new PrismaBetterSqlite3({ url: `file:${dbFile}` }) }).$extends(derivedColumnsExtension);
   try {
     const tenant = await prisma.tenant.create({ data: { name: "TopConta Demo" } });
 

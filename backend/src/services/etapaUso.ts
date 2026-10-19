@@ -20,6 +20,7 @@
  * outubro, quem usou em agosto aparece como nunca usou — o aviso de cobertura fica no dashboard.
  */
 import type { Prisma } from "../generated/prisma/client";
+import { agoraSql } from "../config/sql";
 
 export const ETAPAS_USO = ["NUNCA_USOU", "RECORRENTE", "OCASIONAL", "EM_RISCO", "INATIVO"] as const;
 export type EtapaUso = (typeof ETAPAS_USO)[number];
@@ -76,8 +77,8 @@ export function isEtapaUso(v: unknown): v is EtapaUso {
 /** CASE SQL com a mesma regra (para o dashboard). Cortes são constantes do código, não entrada. */
 export const ETAPA_CASE_SQL = `CASE
   WHEN "ultimoUsoReal" IS NULL OR "usosTotal" <= 0 THEN 'NUNCA_USOU'
-  WHEN "ultimoUsoReal" >= now() - interval '${DIAS_RECENTE} days' AND "usosUltimos90d" >= ${USOS_RECORRENTE} THEN 'RECORRENTE'
-  WHEN "ultimoUsoReal" >= now() - interval '${DIAS_RECENTE} days' THEN 'OCASIONAL'
-  WHEN "ultimoUsoReal" >= now() - interval '${DIAS_RISCO} days' THEN 'EM_RISCO'
+  WHEN "ultimoUsoReal" >= ${agoraSql(DIAS_RECENTE)} AND "usosUltimos90d" >= ${USOS_RECORRENTE} THEN 'RECORRENTE'
+  WHEN "ultimoUsoReal" >= ${agoraSql(DIAS_RECENTE)} THEN 'OCASIONAL'
+  WHEN "ultimoUsoReal" >= ${agoraSql(DIAS_RISCO)} THEN 'EM_RISCO'
   ELSE 'INATIVO'
 END`;

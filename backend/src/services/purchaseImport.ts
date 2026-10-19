@@ -3,6 +3,7 @@ import { AppPrismaClient, tenantRaw } from "../config/db";
 import { hashDocument } from "./masking";
 import { categorizeMerchant, normalizeMerchantName } from "./merchantCategories";
 import { isCommercePurchase, isUsageType, normalizeDocumentDigits, parseMoney, parsePurchaseDate } from "./purchaseParsing";
+import { sqlTs } from "../config/sql";
 
 /**
  * Importa a aba "Todas as Compras" (transações do cartão). As chaves abaixo são o vocabulário
@@ -211,14 +212,14 @@ export async function runPurchaseImport(
     if (!current || p.occurredAt > current) lastUse.set(clientId, p.occurredAt);
   }
   if (lastUse.size > 0) {
+    // pares [id, data] num JSON (o SQLite não tem array); a data no mesmo formato gravado pelo Prisma
     await tenantRaw.execute(
-      `UPDATE "Client" AS c SET "dataUltimaUtilizacao" = u.d
-       FROM (SELECT unnest($2::text[]) AS id, unnest($3::timestamptz[]) AS d) AS u
-       WHERE c.id = u.id AND c."tenantId" = $1
-         AND (c."dataUltimaUtilizacao" IS NULL OR c."dataUltimaUtilizacao" < u.d)`,
+      `UPDATE "Client" SET "dataUltimaUtilizacao" = u.d
+       FROM (SELECT json_extract(value, '$[0]') AS id, json_extract(value, '$[1]') AS d FROM json_each($2)) AS u
+       WHERE "Client".id = u.id AND "Client"."tenantId" = $1
+         AND ("Client"."dataUltimaUtilizacao" IS NULL OR "Client"."dataUltimaUtilizacao" < u.d)`,
       tenantId,
-      Array.from(lastUse.keys()),
-      Array.from(lastUse.values()).map((d) => d.toISOString())
+      JSON.stringify(Array.from(lastUse.entries()).map(([id, d]) => [id, sqlTs(d)]))
     );
   }
 

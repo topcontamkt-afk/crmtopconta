@@ -218,8 +218,9 @@ export async function validateWizard(
 
   // 4) extrato de compras (só faz sentido para público da base)
   if (usaBase) {
-    const [r] = await tenantRaw.query<Array<{ ultima: Date | null }>>(`SELECT MAX("occurredAt") AS ultima FROM "Purchase" WHERE "tenantId" = $1`, tenantId);
-    const f = avaliarFrescor(r?.ultima ?? null, now);
+    // SQL cru devolve o DateTime como texto ISO (SQLite)
+    const [r] = await tenantRaw.query<Array<{ ultima: string | null }>>(`SELECT MAX("occurredAt") AS ultima FROM "Purchase" WHERE "tenantId" = $1`, tenantId);
+    const f = avaliarFrescor(r?.ultima ? new Date(r.ultima) : null, now);
     const msg = mensagemFrescor(f);
     if (msg) add({ id: "extrato", nivel: "aviso", titulo: "Extrato de compras desatualizado", detalhe: `${msg} O resultado da campanha depende do extrato.` });
   }

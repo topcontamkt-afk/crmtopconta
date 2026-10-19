@@ -30,7 +30,7 @@ export async function loadRealHealth(
 
   const raw = rawFilterSql(filters, 2);
   const rows = await tenantRaw.query<Array<{ etapa: string; n: bigint }>>(
-    `SELECT ${ETAPA_CASE_SQL} AS etapa, COUNT(*)::bigint AS n FROM "Client"
+    `SELECT ${ETAPA_CASE_SQL} AS etapa, COUNT(*) AS n FROM "Client"
      WHERE "tenantId" = $1 AND "limiteTotal" > 0 ${raw.sql} GROUP BY 1`,
     tenantId,
     ...raw.params

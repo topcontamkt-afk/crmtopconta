@@ -27,7 +27,7 @@ describe("runPurchaseImport — cliente bloqueado (LGPD 03-04)", () => {
 
     const gravadas = prisma.purchase.createMany.mock.calls[0][0].data;
     expect(gravadas.map((p: any) => p.clientId)).toEqual(["livre"]);
-    expect(execute.mock.calls[0][2]).toEqual(["livre"]); // último uso só do cliente liberado
+    expect(JSON.parse(execute.mock.calls[0][2]).map((par: string[]) => par[0])).toEqual(["livre"]); // último uso só do cliente liberado
     expect(result).toMatchObject({ importedCount: 1, bloqueadasLgpd: 1, unmatchedRows: 0 });
     expect(result.errors[0].motivo).toContain("tratamento suspenso");
   });

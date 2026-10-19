@@ -309,7 +309,7 @@ export async function anonymizeClient(
   // reidentificaria pela própria planilha), sem a razão social e com a data reduzida ao mês. Um id por linha:
   // SQL cru pelo tenantRaw (RLS com o tenant).
   const compras = await tenantRaw.execute(
-    `UPDATE "Purchase" SET "externalId" = 'anon-' || "id", "razaoSocial" = NULL, "occurredAt" = date_trunc('month', "occurredAt")
+    `UPDATE "Purchase" SET "externalId" = 'anon-' || "id", "razaoSocial" = NULL, "occurredAt" = strftime('%Y-%m-01T00:00:00.000+00:00', "occurredAt")
      WHERE "tenantId" = $1 AND "clientId" = $2 AND "externalId" NOT LIKE 'anon-%'`,
     tenantId,
     clientId

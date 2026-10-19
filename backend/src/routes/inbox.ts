@@ -11,6 +11,7 @@ import { SendError, OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
 import { accessTokenFor, credentialsOf } from "../services/whatsappAccount";
 import { janelaAte } from "../services/whatsappPayload";
 import { AUTO_REPLY_JANELA_MS, AUTO_REPLY_MAX, autoReplyPadraoDo, autoReplyTextOf } from "../services/whatsappAutoReply";
+import { textoBusca } from "../config/derivedColumns";
 
 /**
  * Inbox do WhatsApp (Fase 1): lista de conversas e histórico de mensagens recebidas. Leitura e
@@ -131,9 +132,9 @@ async function listarConversas(req: Request, res: Response, src: unknown) {
   if (busca?.trim()) {
     const t = busca.trim();
     where.AND = [{ OR: [
-      // SQLite: LIKE ignora caixa só em ASCII (sem `mode: "insensitive"`; ver services/segments.ts)
+      // SQLite: LIKE ignora caixa só em ASCII; o nome do cliente tem a coluna sem acento (nomeBusca)
       { contactName: { contains: t } },
-      { client: { is: { nome: { contains: t } } } },
+      { client: { is: { nomeBusca: { contains: textoBusca(t) } } } },
       ...(/\d{4,}/.test(t) ? [{ waId: { contains: t.replace(/\D/g, "") } }] : []),
     ] }];
   }

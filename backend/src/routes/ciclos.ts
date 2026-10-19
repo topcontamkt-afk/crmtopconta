@@ -3,9 +3,9 @@ import { z } from "zod";
 import { prisma, tenantRaw } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
-import { cidadeKey, cidadeKeySql, SEM_CIDADE } from "../services/cidades";
+import { cidadeKey, SEM_CIDADE } from "../services/cidades";
 import { buildUsoPorDiaCiclo, periodoAnalise } from "../services/cicloReport";
-import { USO_TIPO_SQL } from "../services/usageRefresh";
+import { antecipacaoSql, diaBrt, usoRealSql } from "../config/sql";
 import { cicloInfo, diaFechamentoPadrao, formatDiaCivil, hojeBrasilia, validDiaAbertura } from "../services/ciclos";
 import { refreshCicloColumns } from "../services/cicloRefresh";
 import { ENVIAVEL_WHERE } from "../services/segments";
@@ -161,8 +161,7 @@ router.get("/uso-por-dia", async (req, res) => {
   const dias = Math.min(365, Math.max(7, Number(req.query.dias) || 90));
 
   const [cobertura] = await tenantRaw.query<{ primeiro: string | null; ultimo: string | null }[]>(
-    `SELECT to_char(min(("occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date), 'YYYY-MM-DD') AS primeiro,
-            to_char(max(("occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date), 'YYYY-MM-DD') AS ultimo
+    `SELECT min(${diaBrt('"occurredAt"')}) AS primeiro, max(${diaBrt('"occurredAt"')}) AS ultimo
      FROM "Purchase" WHERE "tenantId" = $1`,
     tenantId
   );
@@ -170,22 +169,21 @@ router.get("/uso-por-dia", async (req, res) => {
   const configs = await prisma.cicloCidade.findMany({ where: { tenantId }, orderBy: { cidade: "asc" } });
   if (!periodo || configs.length === 0) return res.json({ periodo, configurado: configs.length > 0, cidades: [] });
 
-  const tipo = USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"');
   const uso = await tenantRaw.query<{ cidadeKey: string; data: string; usos: number; antecipacoes: number }[]>(
-    `SELECT ${cidadeKeySql('c."cidade"')} AS "cidadeKey",
-            to_char((p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS data,
-            COUNT(*)::int AS usos,
-            COUNT(*) FILTER (WHERE p."tipo" ~* '^\\s*d[eé]bito\\s+pix')::int AS antecipacoes
+    `SELECT c."cidadeKey" AS "cidadeKey",
+            ${diaBrt('p."occurredAt"')} AS data,
+            COUNT(*) AS usos,
+            COUNT(*) FILTER (WHERE ${antecipacaoSql("p")}) AS antecipacoes
      FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
-     WHERE p."tenantId" = $1 AND ${tipo}
-       AND (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date BETWEEN $2::date AND $3::date
+     WHERE p."tenantId" = $1 AND ${usoRealSql("p")}
+       AND ${diaBrt('p."occurredAt"')} BETWEEN $2 AND $3
      GROUP BY 1, 2`,
     tenantId,
     periodo.de,
     periodo.ate
   );
   const clientes = await tenantRaw.query<{ cidadeKey: string; n: number }[]>(
-    `SELECT ${cidadeKeySql('"cidade"')} AS "cidadeKey", COUNT(*)::int AS n FROM "Client" WHERE "tenantId" = $1 AND "limiteTotal" > 0 GROUP BY 1`,
+    `SELECT "cidadeKey", COUNT(*) AS n FROM "Client" WHERE "tenantId" = $1 AND "limiteTotal" > 0 GROUP BY 1`,
     tenantId
   );
   const nClientes = new Map(clientes.map((c) => [c.cidadeKey, c.n]));

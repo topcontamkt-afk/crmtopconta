@@ -11,6 +11,7 @@ import { anonymizeClient, redigirAuditoria } from "../services/retention";
 import { estaSuprimido, phoneHash, registrarOptOutTelefone } from "../services/privacy";
 import { liberarEliminacao } from "../services/dedupe";
 import { normalizeDocumentDigits } from "../services/purchaseParsing";
+import { deleteMessageMedia } from "../services/mediaStore";
 
 const router = Router();
 router.use(requireAuth);
@@ -524,33 +525,41 @@ router.post("/supressao/liberar", requireRole("ADMIN"), async (req, res) => {
  * LGPD 04-05: apaga na ordem das chaves estrangeiras (compras e histórico de conta têm FK RESTRICT e antes
  * derrubavam tudo) e não deixa órfão com dado pessoal: as conversas da Inbox dos clientes (telefone, nome do
  * perfil, texto e mídia) são apagadas, os destinatários de listas manuais ligados a cliente são anonimizados,
- * e o estado de desfazer importação vai junto. Tudo numa transação só (um bloco no banco, com o tenant da
- * sessão: nada é interpolado). Antes, o opt-out e o bloqueio de cada cliente viram supressão por
+ * e o estado de desfazer importação vai junto. No D1 não há bloco nem transação interativa: os passos rodam em
+ * sequência, cada um filtrado pelo tenant da sessão ($1), e os arquivos de mídia saem do R2 antes das linhas. Se
+ * um passo falhar, o que já saiu não volta, mas repetir o "Limpar base" termina o serviço (todo passo é
+ * idempotente). Antes, o opt-out e o bloqueio de cada cliente viram supressão por
  * telefone/documento, para a reimportação não religar ninguém (LGPD 02-02). Depois, a PII de AuditLog antigos
  * dos clientes é redigida sem quebrar a cadeia. Campanhas, segmentos, templates e o histórico de importações ficam.
  */
 const PURGE_CONFIRMATION = "LIMPAR BASE";
 
-export const PURGE_SQL = `DO $purge$
-DECLARE t text := current_setting('app.tenant_id');
-BEGIN
-  DELETE FROM "WaMediaBlob" WHERE "tenantId" = t AND "messageId" IN (
-    SELECT m."id" FROM "WaMessage" m JOIN "Conversation" c ON c."id" = m."conversationId" WHERE c."tenantId" = t AND c."clientId" IS NOT NULL);
-  DELETE FROM "WaMessage" WHERE "tenantId" = t AND "conversationId" IN (SELECT "id" FROM "Conversation" WHERE "tenantId" = t AND "clientId" IS NOT NULL);
-  DELETE FROM "Conversation" WHERE "tenantId" = t AND "clientId" IS NOT NULL;
-  UPDATE "PedidoTitular" SET "descricao" = NULL, "resposta" = NULL, "telefoneMasked" = NULL, "clientId" = NULL
-    WHERE "tenantId" = t AND "clientId" IS NOT NULL;
-  UPDATE "CampaignRecipient" SET "nome" = 'Contato anonimizado', "telefone" = 'anon-' || "id", "cpfHash" = NULL, "cpfMasked" = NULL,
-    "limiteDisponivel" = NULL, "clientId" = NULL WHERE "tenantId" = t AND "clientId" IS NOT NULL;
-  DELETE FROM "MessageEvent" WHERE "clientId" IN (SELECT "id" FROM "Client" WHERE "tenantId" = t);
-  DELETE FROM "Movement" WHERE "clientId" IN (SELECT "id" FROM "Client" WHERE "tenantId" = t);
-  DELETE FROM "AccountSnapshot" WHERE "tenantId" = t;
-  DELETE FROM "Purchase" WHERE "tenantId" = t;
-  DELETE FROM "ImportChange" WHERE "tenantId" = t;
-  DELETE FROM "Notification" WHERE "tenantId" = t AND "relatedType" = 'Client';
-  DELETE FROM "Client" WHERE "tenantId" = t;
-END
-$purge$;`;
+export const PURGE_STEPS = [
+  `DELETE FROM "WaMessage" WHERE "tenantId" = $1 AND "conversationId" IN (SELECT "id" FROM "Conversation" WHERE "tenantId" = $1 AND "clientId" IS NOT NULL)`,
+  `DELETE FROM "Conversation" WHERE "tenantId" = $1 AND "clientId" IS NOT NULL`,
+  `UPDATE "PedidoTitular" SET "descricao" = NULL, "resposta" = NULL, "telefoneMasked" = NULL, "clientId" = NULL
+    WHERE "tenantId" = $1 AND "clientId" IS NOT NULL`,
+  `UPDATE "CampaignRecipient" SET "nome" = 'Contato anonimizado', "telefone" = 'anon-' || "id", "cpfHash" = NULL, "cpfMasked" = NULL,
+    "limiteDisponivel" = NULL, "clientId" = NULL WHERE "tenantId" = $1 AND "clientId" IS NOT NULL`,
+  `DELETE FROM "MessageEvent" WHERE "tenantId" = $1 AND "clientId" IS NOT NULL`,
+  `DELETE FROM "Movement" WHERE "tenantId" = $1`,
+  `DELETE FROM "AccountSnapshot" WHERE "tenantId" = $1`,
+  `DELETE FROM "Purchase" WHERE "tenantId" = $1`,
+  `DELETE FROM "ImportChange" WHERE "tenantId" = $1`,
+  `DELETE FROM "Notification" WHERE "tenantId" = $1 AND "relatedType" = 'Client'`,
+  // ClientTag sai junto (ON DELETE CASCADE)
+  `DELETE FROM "Client" WHERE "tenantId" = $1`,
+];
+
+/** Arquivos (R2) e linhas de mídia das conversas de clientes, antes de apagar as mensagens. */
+async function apagarMidiasDeClientes(tenantId: string): Promise<number> {
+  const msgs = await prisma.waMessage.findMany({ where: { tenantId, conversation: { clientId: { not: null } } }, select: { id: true } });
+  let apagadas = 0;
+  for (let i = 0; i < msgs.length; i += 500) {
+    apagadas += await deleteMessageMedia(prisma, { tenantId, messageId: { in: msgs.slice(i, i + 500).map((m) => m.id) } });
+  }
+  return apagadas;
+}
 
 /** LGPD 02-02: antes de apagar, o opt-out e o bloqueio de cada cliente viram supressão (só hashes), em lote. */
 async function preservarSupressoes(tenantId: string): Promise<number> {
@@ -593,7 +602,8 @@ router.post("/purge", requireRole("ADMIN"), async (req, res) => {
     prisma.conversation.count({ where: { tenantId, clientId: { not: null } } }),
   ]);
   const supressoesGravadas = await preservarSupressoes(tenantId);
-  await tenantRaw.execute(PURGE_SQL);
+  await apagarMidiasDeClientes(tenantId);
+  for (const passo of PURGE_STEPS) await tenantRaw.execute(passo, tenantId);
   // Segmentos dinâmicos passam a refletir a base vazia até a próxima recontagem.
   await prisma.segmentDefinition.updateMany({ where: { tenantId }, data: { lastCount: 0, lastRefreshedAt: new Date() } });
 
