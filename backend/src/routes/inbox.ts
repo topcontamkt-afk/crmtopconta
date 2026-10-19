@@ -131,8 +131,9 @@ async function listarConversas(req: Request, res: Response, src: unknown) {
   if (busca?.trim()) {
     const t = busca.trim();
     where.AND = [{ OR: [
-      { contactName: { contains: t, mode: "insensitive" } },
-      { client: { is: { nome: { contains: t, mode: "insensitive" } } } },
+      // SQLite: LIKE ignora caixa só em ASCII (sem `mode: "insensitive"`; ver services/segments.ts)
+      { contactName: { contains: t } },
+      { client: { is: { nome: { contains: t } } } },
       ...(/\d{4,}/.test(t) ? [{ waId: { contains: t.replace(/\D/g, "") } }] : []),
     ] }];
   }

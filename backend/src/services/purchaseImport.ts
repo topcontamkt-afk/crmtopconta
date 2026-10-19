@@ -153,7 +153,6 @@ export async function runPurchaseImport(
           category: categorizeMerchant(merchantNames.get(k)!),
           categorySource: "AUTO",
         })),
-        skipDuplicates: true,
       });
       merchantsCreated = created.count;
       const refetched = await prisma.merchant.findMany({ where: { tenantId, nameKey: { in: missing } }, select: { id: true, nameKey: true } });
@@ -161,11 +160,29 @@ export async function runPurchaseImport(
     }
   }
 
-  // Fase 4: grava as compras (createMany + skipDuplicates: uma ida ao banco para o lote todo).
+  // Fase 4: grava as compras numa ida ao banco para o lote todo. O SQLite não tem `skipDuplicates`:
+  // as transações que já existem (reenvio do arquivo, idempotente por `externalId`) e as repetidas
+  // dentro do lote ficam de fora antes do createMany.
   let importedCount = 0;
-  if (matched.length > 0) {
+  const jaGravadas = new Set(
+    matched.length
+      ? (
+          await prisma.purchase.findMany({
+            where: { tenantId, externalId: { in: [...new Set(matched.map((p) => p.externalId))] } },
+            select: { externalId: true },
+          })
+        ).map((p) => p.externalId)
+      : []
+  );
+  const novas: typeof matched = [];
+  for (const p of matched) {
+    if (jaGravadas.has(p.externalId)) continue;
+    jaGravadas.add(p.externalId);
+    novas.push(p);
+  }
+  if (novas.length > 0) {
     const created = await prisma.purchase.createMany({
-      data: matched.map((p) => ({
+      data: novas.map((p) => ({
         tenantId,
         clientId: clientByHash.get(p.cpfHash)!,
         merchantId: p.lojista && isCommercePurchase(p.tipo) ? merchantIdByKey.get(normalizeMerchantName(p.lojista)) ?? null : null,
@@ -179,7 +196,6 @@ export async function runPurchaseImport(
         razaoSocial: p.razaoSocial,
         importJobId: job.id,
       })),
-      skipDuplicates: true,
     });
     importedCount = created.count;
   }

@@ -1,5 +1,5 @@
 import { google } from "googleapis";
-import type { SheetConnection } from "@prisma/client";
+import type { SheetConnection } from "../generated/prisma/client";
 import { prisma, type AppPrismaClient } from "../config/db";
 import { withCrossTenantAccess } from "../config/tenantGuard";
 import { RawSheetRow } from "./importService";

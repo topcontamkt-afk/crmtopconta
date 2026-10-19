@@ -161,7 +161,8 @@ describe("dadosAnonimizados (LGPD 04-01): campo a campo", () => {
     ]) {
       expect(d[campo]).toBeNull();
     }
-    expect(d.tags).toEqual([]);
+    // etiquetas viraram a tabela ClientTag: anonimizar apaga todas as do cliente
+    expect(d.tags).toEqual({ deleteMany: {} });
     expect(d.dataCadastro).toEqual(new Date("2020-05-01T00:00:00Z"));
     expect(d.dataAberturaConta).toEqual(new Date("2020-05-01T00:00:00Z"));
     expect(d.createdAt).toEqual(new Date("2020-05-01T00:00:00Z"));

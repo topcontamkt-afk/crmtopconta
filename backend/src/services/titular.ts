@@ -75,8 +75,9 @@ export function suboperadoresDe(provedores: Array<{ provider: string | null | un
  * Devolve null se o cliente não existe neste tenant.
  */
 export async function relatorioTitular(prisma: AppPrismaClient, tenantId: string, clientId: string) {
-  const client = await prisma.client.findFirst({ where: { id: clientId, tenantId } });
-  if (!client) return null;
+  const row = await prisma.client.findFirst({ where: { id: clientId, tenantId }, include: { tags: { select: { tag: true } } } });
+  if (!row) return null;
+  const client = { ...row, tags: row.tags.map((t) => t.tag) };
   // hash do documento e chaves internas não são dado do titular legível; ficam de fora
   const { cpfHash, tenantId: _t, ...titular } = client;
 

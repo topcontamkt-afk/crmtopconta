@@ -46,7 +46,7 @@ describe("LGPD 03-02: relatorioTitular", () => {
       waMessage: { findMany: fn([{ conversationId: "cv1", direction: "ENTRADA", type: "image", body: null, mediaMime: "image/jpeg" }]) },
     } as any;
   }
-  const cliente = { id: "c1", tenantId: "t1", nome: "Maria", telefone: "+5584999998888", cpfHash: "HASH", cpfMasked: "***", origemCliente: "planilha", lastImportJobId: "j1" };
+  const cliente = { id: "c1", tenantId: "t1", nome: "Maria", telefone: "+5584999998888", cpfHash: "HASH", cpfMasked: "***", origemCliente: "planilha", lastImportJobId: "j1", tags: [{ tag: "vip" }] };
 
   it("devolve null para cliente fora do tenant", async () => {
     expect(await relatorioTitular(mockPrisma(null), "t1", "c1")).toBeNull();
@@ -57,6 +57,8 @@ describe("LGPD 03-02: relatorioTitular", () => {
     const r = (await relatorioTitular(p, "t1", "c1"))!;
     expect(r.titular).not.toHaveProperty("cpfHash");
     expect(r.titular).not.toHaveProperty("tenantId");
+    // etiquetas (tabela ClientTag no D1) entram no relatório como lista de textos
+    expect(r.titular.tags).toEqual(["vip"]);
     expect(r.compras).toHaveLength(1);
     expect(r.registrosAuditoria).toHaveLength(1);
     expect(r.conversas[0].mensagens[0]).toMatchObject({ type: "image", mediaMime: "image/jpeg" });

@@ -104,7 +104,7 @@ async function importOne(prisma: AppPrismaClient, tenantId: string, m: MetaTempl
     const img = await fetchHeaderImage(imp.headerExampleUrl, fetchImpl);
     if (img) {
       await prisma.templateMedia.create({
-        data: { tenantId, templateId: created.id, mime: img.mime, filename: `${m.name}.${img.mime === "image/png" ? "png" : "jpg"}`, size: img.data.length, data: img.data },
+        data: { tenantId, templateId: created.id, mime: img.mime, filename: `${m.name}.${img.mime === "image/png" ? "png" : "jpg"}`, size: img.data.length, data: new Uint8Array(img.data) },
       });
     }
   }

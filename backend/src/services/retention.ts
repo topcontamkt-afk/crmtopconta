@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../generated/prisma/client";
 import { AppPrismaClient, tenantRaw } from "../config/db";
 import { logAudit } from "../middleware/audit";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
@@ -155,7 +155,7 @@ export function dadosAnonimizados(c: ClienteParaAnonimizar, agora: Date): Prisma
     statusValidacaoCadastro: null,
     motivoEncerramento: null,
     obsEncerramento: null,
-    tags: [],
+    tags: { deleteMany: {} },
     camposCorrigidos: Prisma.DbNull,
     lastImportJobId: null,
     dataCadastro: inicioDoMes(c.dataCadastro),

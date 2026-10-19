@@ -290,6 +290,7 @@ export async function runImport(
         if (presentes.has("limite_total") && incoming.limiteTotal > Number(existing.limiteTotal)) {
           await prisma.movement.create({
             data: {
+              tenantId,
               clientId: existing.id,
               tipo: "renovacao_limite",
               valor: incoming.limiteTotal - Number(existing.limiteTotal),

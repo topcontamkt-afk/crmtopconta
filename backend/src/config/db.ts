@@ -1,35 +1,77 @@
-import { PrismaClient } from "@prisma/client";
-import { poolerSafeDatabaseUrl } from "./databaseUrl";
-import { runRawInTenantTx, tenantGuardExtension } from "./tenantGuard";
-
-// DATABASE_URL conecta como o role `app_runtime` (RLS real, sem BYPASSRLS — ver migration
-// add_rls_policies e services/auditIntegrity.ts/config/tenantGuard.ts para o resto do desenho).
-// tenantGuardExtension: (1) defesa em profundidade em código, lançando erro se uma query num
-// modelo tenant-scoped não filtrar por tenantId; (2) abre cada operação numa transaction que
-// primeiro seta a GUC `app.tenant_id` (via set_config, `SET LOCAL` não aceita bind parameter)
-// que as policies do Postgres usam — sem isso, toda query contra app_runtime veria zero linhas
-// (RLS falha fechado). Aplicado aqui para que todo chamador deste client compartilhado — rotas
-// e services — ganhe ambas as camadas automaticamente; não há outro lugar no backend que
-// construa um PrismaClient para tráfego de request (prisma/seed.ts é a única exceção
-// deliberada, por precisar do role administrativo para criar o próprio Tenant).
-export const prisma = new PrismaClient({
-  datasources: { db: { url: poolerSafeDatabaseUrl(process.env.DATABASE_URL) } },
-}).$extends(tenantGuardExtension);
-
-// Prisma's `$extends()` return type intentionally drops `$on`/`$use` (extensions replace the
-// old middleware API), so it isn't assignable to the plain `PrismaClient` type. Every service
-// function that receives the shared client as a parameter should be typed with this alias
-// instead of importing `PrismaClient` from "@prisma/client" directly.
-export type AppPrismaClient = typeof prisma;
+import { PrismaClient } from "../generated/prisma/client";
+import { checkRawTenant, tenantGuardExtension } from "./tenantGuard";
 
 /**
- * SQL cru com RLS: roda dentro de uma transaction com `app.tenant_id` setado (ver
- * runRawInTenantTx). `prisma.$queryRawUnsafe` direto NÃO enxerga nenhuma linha sob RLS real.
- * Os valores sempre vão como parâmetros ($1, $2...) — nunca interpolados no texto do SQL.
+ * Client do Prisma 7 com o isolamento por tenant (config/tenantGuard.ts). O banco chega por adapter,
+ * que cada ambiente registra uma vez com `configureDatabase`:
+ * - Worker (backend/worker/index.ts): `new PrismaD1(env.DB)`, o binding D1;
+ * - Node (testes de integração, seed): `new PrismaBetterSqlite3({ url })`, com as mesmas migrations.
+ *
+ * `prisma` é um Proxy: o client só é montado no primeiro uso (o binding do D1 não existe quando o
+ * módulo carrega) e depois é reaproveitado pelo isolate inteiro. Assim todos os arquivos continuam
+ * com `import { prisma } from "../config/db"`.
+ */
+type DatabaseAdapter = NonNullable<NonNullable<ConstructorParameters<typeof PrismaClient>[0]>["adapter"]>;
+
+let adapterFactory: (() => DatabaseAdapter) | undefined;
+
+function buildClient() {
+  if (!adapterFactory) {
+    throw new Error("[db] banco não configurado: chame configureDatabase() na entrada (Worker ou script)");
+  }
+  return new PrismaClient({ adapter: adapterFactory() }).$extends(tenantGuardExtension);
+}
+
+// O `$extends()` tira `$on`/`$use` do tipo, então ele não é atribuível a `PrismaClient`. Funções que
+// recebem o client compartilhado como parâmetro usam este alias.
+export type AppPrismaClient = ReturnType<typeof buildClient>;
+
+let client: AppPrismaClient | undefined;
+
+/** Registra o adapter do banco. Chamar de novo troca o banco (usado pelos testes de integração). */
+export function configureDatabase(factory: () => DatabaseAdapter): void {
+  adapterFactory = factory;
+  client = undefined;
+}
+
+export const prisma = new Proxy({} as AppPrismaClient, {
+  get(_target, prop) {
+    const c = (client ??= buildClient());
+    const value = Reflect.get(c, prop, c);
+    return typeof value === "function" ? value.bind(c) : value;
+  },
+});
+
+/**
+ * Parâmetros numerados (`$1`, `$2`, …, o mesmo número pode repetir) viram `?` posicionais, com os
+ * valores na ordem em que aparecem. O D1 aceitaria `?1`, mas o better-sqlite3 dos testes não aceita
+ * número com lista de valores; `?` simples funciona igual nos dois.
+ */
+export function positionalParams(sql: string, params: unknown[]): { sql: string; params: unknown[] } {
+  const out: unknown[] = [];
+  const text = sql.replace(/\$(\d+)/g, (_m, n: string) => {
+    const i = Number(n) - 1;
+    if (i < 0 || i >= params.length) throw new Error(`[db] SQL cru usa $${n}, mas só há ${params.length} parâmetro(s)`);
+    out.push(params[i]);
+    return "?";
+  });
+  return { sql: text, params: out };
+}
+
+/**
+ * SQL cru. Não passa pela extensão do Prisma, então `checkRawTenant` exige o filtro
+ * `"tenantId" = $1` com o tenant do contexto como 1º parâmetro. Os valores sempre vão como
+ * parâmetros (`$n`, ver `positionalParams`), nunca interpolados no texto.
  */
 export const tenantRaw = {
-  query: <T = unknown>(sql: string, ...params: unknown[]): Promise<T> =>
-    runRawInTenantTx(prisma, (tx) => tx.$queryRawUnsafe<T>(sql, ...params)),
-  execute: (sql: string, ...params: unknown[]): Promise<number> =>
-    runRawInTenantTx(prisma, (tx) => tx.$executeRawUnsafe(sql, ...params)),
+  query: async <T = unknown>(sql: string, ...params: unknown[]): Promise<T> => {
+    checkRawTenant(sql, params);
+    const q = positionalParams(sql, params);
+    return prisma.$queryRawUnsafe<T>(q.sql, ...q.params);
+  },
+  execute: async (sql: string, ...params: unknown[]): Promise<number> => {
+    checkRawTenant(sql, params);
+    const q = positionalParams(sql, params);
+    return prisma.$executeRawUnsafe(q.sql, ...q.params);
+  },
 };

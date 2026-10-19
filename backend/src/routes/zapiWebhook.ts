@@ -42,7 +42,7 @@ router.post("/:secret", webhookLimiter, async (req, res) => {
           return null;
         });
         if (file) {
-          await prisma.waMediaBlob.create({ data: { tenantId: account.tenantId, messageId: r.messageId, mime: file.mime, size: file.data.length, data: file.data } }).catch(() => undefined);
+          await prisma.waMediaBlob.create({ data: { tenantId: account.tenantId, messageId: r.messageId, mime: file.mime, size: file.data.length, data: new Uint8Array(file.data) } }).catch(() => undefined);
         }
       }
     });

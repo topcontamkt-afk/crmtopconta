@@ -117,7 +117,8 @@ export function areaForRequest(method: string, path: string): readonly Area[] | 
 export interface AccessProfile {
   role: string;
   areasRestritas: boolean;
-  areas: string[];
+  /** `User.areas` (Json no D1): lista de áreas; `cleanAreas` descarta o que não for área válida. */
+  areas: unknown;
 }
 
 /** Áreas liberadas para a pessoa: null = todas (Admin, ou sem restrição). */

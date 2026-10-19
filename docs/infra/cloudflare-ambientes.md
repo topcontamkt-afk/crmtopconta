@@ -1,9 +1,9 @@
-# Cloudflare: ambientes e deploy (Fase 1)
+# Cloudflare: ambientes, banco e deploy
 
 Um só Worker serve a SPA (`frontend/dist`, assets com fallback de SPA) e a API (`/api/*` e `/r/*` passam
 primeiro pelo Worker). Configuração em `backend/wrangler.jsonc`, entrada em `backend/worker/index.ts`.
-Na Fase 1 a API é só um esqueleto: `/api/health` (faz `SELECT 1` no D1) responde e o resto devolve
-`503 EM_MIGRACAO`. A API real (Express + Prisma 7 + D1) entra nas Fases 2 e 3.
+Até a Fase 3 a API é só um esqueleto: `/api/health` (consulta o D1 pelo Prisma) responde e o resto devolve
+`503 EM_MIGRACAO`.
 
 | Ambiente | Onde | Worker | D1 | R2 |
 |---|---|---|---|---|
@@ -14,15 +14,57 @@ Na Fase 1 a API é só um esqueleto: `/api/health` (faz `SELECT 1` no D1) respon
 ## Comandos (`cd backend`)
 
 ```bash
-npm run cf:dev          # build do frontend + wrangler dev em http://localhost:8787
-npm run cf:deploy:hml   # build do frontend + deploy da homologação
+npm run db:migrate:local   # aplica migrations/ no D1 local
+npm run prisma:seed        # gera prisma/seed.sql e aplica no D1 local (admin@topconta.demo / mudar123)
+npm run cf:dev             # build do frontend + wrangler dev em http://localhost:8787
+npm run cf:deploy:hml      # build do frontend + deploy da homologação
 npx tsc -p worker/tsconfig.json   # typecheck do Worker (fora do tsconfig do backend)
+
+# homologação (banco remoto): migrations antes do deploy que precisa delas
+npx wrangler d1 migrations apply crmtopconta-hml --env hml --remote
 ```
 
 O deploy usa o token da conta compartilhada em `backend/.dev.cloudflare` (fora do git):
 `set -a; . ./.dev.cloudflare; set +a` antes do `wrangler`. Nunca commitar nem imprimir o token.
 
+## Banco (Fase 2)
+
+- **Schema**: `backend/prisma/schema.prisma` agora é SQLite (Prisma 7, `prisma-client` com
+  `runtime = "cloudflare"`, gerado em `src/generated/prisma`, fora do git). Mudanças em relação ao Postgres:
+  `User.areas` virou `Json`; `Client.tags` virou a tabela `ClientTag` (a API continua devolvendo lista de
+  textos); `Movement` e `MessageEvent` ganharam `tenantId`; tipos `@db.*` saíram.
+- **Migrations**: `backend/migrations/NNNN_nome.sql`, aplicadas pelo wrangler (`d1 migrations apply`). Gerar
+  a próxima com `npx prisma migrate diff --from-schema <schema anterior> --to-schema prisma/schema.prisma
+  --script -o migrations/0002_nome.sql`. Os `.sql` de `prisma/sql/` são histórico do Postgres.
+- **Client** (`src/config/db.ts`): `prisma` é um Proxy montado no primeiro uso com o adapter que a entrada
+  registrou (`configureDatabase`: `PrismaD1(env.DB)` no Worker, `PrismaBetterSqlite3` nos testes e no seed).
+- **Isolamento** (`src/config/tenantGuard.ts`): sem RLS no SQLite, a extensão INJETA o `tenantId` do contexto
+  em toda operação (inclusive `findUnique`/`update`/`delete`/`upsert`) e o preenche nos `create`; tenant
+  explícito diferente do contexto é erro; sem contexto, toda query falha. Cross-tenant só com
+  `withCrossTenantAccess`. Prova: `src/config/tenantIsolation.int.test.ts` (2 tenants × 6 models × todas as
+  operações, num SQLite real com a migration do D1).
+- **SQL cru** (`tenantRaw`): exige `"tenantId" = $1` com o tenant do contexto como 1º parâmetro e converte
+  `$n` em `?` posicional (o better-sqlite3 não aceita `?1` com lista de valores; o D1 aceitaria). As 42
+  queries ainda estão no dialeto do Postgres e são reescritas na Fase 4; o `PURGE_SQL` (bloco `DO`) vira `batch`.
+- **Sem `skipDuplicates`** no SQLite: a importação de compras filtra as transações já gravadas antes do
+  `createMany`. **Sem `mode: "insensitive"`**: o LIKE do SQLite ignora caixa só em ASCII; busca sem acento
+  entra com `nomeBusca` na Fase 4.
+- **Testes no Node**: o client gerado para a Cloudflare importa o WASM como `.wasm?module` e uma "cola" ESM;
+  `jest.config.js` (moduleNameMapper) e `test/prismaNode.cjs` (para `ts-node -r`) apontam para versões que o
+  Node carrega. O `better-sqlite3` é nativo: depois de `npm install`, se faltar o binário, `npm rebuild better-sqlite3`.
+
 ## Estado
 
-Fase 1 concluída em 19/10/2026: o `workers.dev` abre a tela de login e o `/api/health` responde 200 com
-`banco: ok` e `r2: true` (latência do D1 a partir do Worker ≈ 165 ms na primeira chamada).
+- **Fase 1** (19/10/2026): o `workers.dev` abre a tela de login e o `/api/health` responde 200.
+- **Fase 2** (19/10/2026): schema no D1 (local e homologação, `0001_init`, 29 tabelas), Prisma 7 + guard no
+  Worker, seed local, 946 testes passando. Na homologação: bundle de 1,25 MB compactado (limite do grátis:
+  3 MB), inicialização de 20 ms, sem erro de CPU no plano grátis.
+
+## Decisão pendente para a Fase 3: onde o Worker roda (latência do D1)
+
+Cada consulta do Worker ao D1 da homologação leva **~150 ms** (`latenciaBancoMs` do health): o D1 fica nos EUA
+(ENAM; não há região na América do Sul) e o Worker roda no ponto da Cloudflare mais perto de quem acessa
+(Brasil). Uma tela que faz 5 consultas em sequência gastaria ~0,75 s só de ida e volta. A alternativa é o
+**Smart Placement** (`"placement": { "mode": "smart" }` no `wrangler.jsonc`): a Cloudflare passa a rodar o
+Worker perto do banco, e o custo vira uma ida e volta só (navegador → Worker, ~150 ms) por requisição.
+Medir na Fase 3, com a API real, as duas formas no login e no dashboard antes de decidir.

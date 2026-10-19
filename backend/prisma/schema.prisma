@@ -4,21 +4,17 @@
 // Campaign, MessageEvent, AutomationRule, AuditLog
 
 generator client {
-  provider      = "prisma-client-js"
-  // "native" para dev local; "rhel-openssl-3.0.x" é o runtime das Lambdas da Vercel/AWS.
-  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+  // Prisma 7 sem engine Rust: o compilador de queries é WASM e o banco chega por adapter
+  // (D1 no Worker, better-sqlite3 nos testes; ver src/config/db.ts).
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  runtime      = "cloudflare"
+  moduleFormat = "cjs"
 }
 
 datasource db {
-  provider  = "postgresql"
-  // Em serverless (Vercel), aponte para o connection pooler do Supabase (porta 6543,
-  // "Transaction" mode) — evita esgotar as conexões diretas do Postgres a cada invocação de
-  // função. Em servidor de longa duração (dev local, Railway/Render), a conexão direta (5432)
-  // funciona igualmente bem.
-  url       = env("DATABASE_URL")
-  // Conexão direta (porta 5432), usada apenas por `prisma migrate`/`prisma db push` — nunca em
-  // runtime. Pode apontar para o mesmo valor de DATABASE_URL quando não se usa pooler.
-  directUrl = env("DIRECT_URL")
+  // Cloudflare D1 (SQLite). A URL só existe no prisma.config.ts, para o `migrate diff`.
+  provider = "sqlite"
 }
 
 enum Role {
@@ -100,9 +96,9 @@ model Tenant {
   maxMsgsPerMinute  Int      @default(600) // rate limit global do tenant, aplicado no dispatch de campanhas
   // Custo estimado por mensagem do WhatsApp (tabela da Meta, em dólar, por categoria) e o câmbio usado
   // para mostrar em reais no assistente de campanhas. Nulo = usa o padrão de services/messageCost.ts.
-  custoMarketingUsd Decimal? @db.Decimal(10, 6)
-  custoUtilidadeUsd Decimal? @db.Decimal(10, 6)
-  cambioUsdBrl      Decimal? @db.Decimal(10, 4)
+  custoMarketingUsd Decimal?
+  custoUtilidadeUsd Decimal?
+  cambioUsdBrl      Decimal?
   // Qual conexão de WhatsApp o sistema usa para ENVIAR (campanhas): META (oficial, com template) ou ZAPI
   // (não oficial, texto livre). Receber vale para as duas conectadas. Configurações → WhatsApp.
   whatsappProvider  String   @default("META")
@@ -151,6 +147,9 @@ model Tenant {
   ciclosCidade       CicloCidade[]
   supressoes         SupressaoTitular[]
   pedidosTitular     PedidoTitular[]
+  clientTags         ClientTag[]
+  movements          Movement[]
+  messageEvents      MessageEvent[]
 }
 
 model User {
@@ -168,7 +167,7 @@ model User {
   // quem já existia); true = só as de `areas`. ADMIN sempre vê tudo. O papel (role) continua dizendo o que
   // a pessoa pode FAZER dentro da área; isto diz ONDE ela pode entrar.
   areasRestritas Boolean  @default(false)
-  areas          String[] @default([])
+  areas          Json     @default("[]") // string[] de services/areas.ts
 
   // Segurança de login (rate limiting anti brute-force) — armazenado no banco (não em memória
   // do processo) para funcionar de forma consistente entre invocações serverless distintas.
@@ -208,10 +207,10 @@ model Client {
 
   dataCadastro         DateTime?
   dataAberturaConta    DateTime?
-  limiteTotal          Decimal   @default(0) @db.Decimal(14, 2)
-  valorUtilizado       Decimal   @default(0) @db.Decimal(14, 2)
-  saldoDisponivel      Decimal   @default(0) @db.Decimal(14, 2)
-  valorAntecipado      Decimal   @default(0) @db.Decimal(14, 2)
+  limiteTotal          Decimal   @default(0)
+  valorUtilizado       Decimal   @default(0)
+  saldoDisponivel      Decimal   @default(0)
+  valorAntecipado      Decimal   @default(0)
   dataUltimaUtilizacao DateTime?
   // Uso REAL pelo extrato (antecipação/compra), refeito por services/usageRefresh.ts
   ultimoUsoReal        DateTime?
@@ -219,7 +218,7 @@ model Client {
   usosTotal            Int       @default(0)
   diaCicloAbertura     Int? // dia do mês em que o limite renova (da cidade; ver services/ciclos.ts)
 
-  percentualUtilizado Decimal    @default(0) @db.Decimal(6, 2)
+  percentualUtilizado Decimal    @default(0)
   faixaUso            UsageFaixa @default(SEM_USO)
 
   statusConta            ClientStatus @default(ATIVO)
@@ -249,12 +248,12 @@ model Client {
   dataValidadeCartao DateTime?
   dataNascimento     DateTime?
   sexo               String?
-  remuneracaoBruta   Decimal?  @db.Decimal(14, 2)
-  remuneracaoLiquida Decimal?  @db.Decimal(14, 2)
-  bonus              Decimal?  @db.Decimal(14, 2)
-  saldoLiquidoSaque  Decimal?  @db.Decimal(14, 2)
+  remuneracaoBruta   Decimal?
+  remuneracaoLiquida Decimal?
+  bonus              Decimal?
+  saldoLiquidoSaque  Decimal?
 
-  tags      String[]   @default([])
+  tags      ClientTag[]
   purchases Purchase[]
 
   createdAt       DateTime  @default(now())
@@ -330,14 +329,17 @@ model ImportChange {
 
 model Movement {
   id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
   clientId  String
   client    Client   @relation(fields: [clientId], references: [id])
   tipo      String // ex: utilizacao, pagamento, antecipacao
-  valor     Decimal  @db.Decimal(14, 2)
+  valor     Decimal
   data      DateTime
   createdAt DateTime @default(now())
 
   @@index([clientId, data])
+  @@index([tenantId])
 }
 
 // Histórico de saldo/limite/status da conta. Client guarda só o estado atual (sobrescrito a cada
@@ -356,10 +358,10 @@ model AccountSnapshot {
   clientId        String
   client          Client       @relation(fields: [clientId], references: [id])
   recordedAt      DateTime     @default(now())
-  limiteTotal     Decimal      @db.Decimal(14, 2)
-  saldoDisponivel Decimal      @db.Decimal(14, 2)
-  saldoAnterior   Decimal?     @db.Decimal(14, 2)
-  valorUtilizado  Decimal      @db.Decimal(14, 2)
+  limiteTotal     Decimal
+  saldoDisponivel Decimal
+  saldoAnterior   Decimal?
+  valorUtilizado  Decimal
   statusConta     ClientStatus
   importJobId     String?
 
@@ -425,7 +427,7 @@ model Campaign {
   // Grupo de controle (opcional): % do público reservado que NÃO recebe a mensagem, só para
   // comparar o uso de quem recebeu com o de quem não recebeu. Nulo/0 = desligado.
   controlGroupPercent Int?
-  costPerMessage      Decimal   @default(0) @db.Decimal(10, 4)
+  costPerMessage      Decimal   @default(0)
 
   audienceCount Int?
 
@@ -438,6 +440,8 @@ model Campaign {
 
 model MessageEvent {
   id             String             @id @default(uuid())
+  tenantId       String
+  tenant         Tenant             @relation(fields: [tenantId], references: [id])
   campaignId     String
   campaign       Campaign           @relation(fields: [campaignId], references: [id])
   // Nulo só em campanha manual (lista de planilha) com contato que ainda não está na base;
@@ -451,20 +455,21 @@ model MessageEvent {
   variant        String             @default("A") // "A" ou "B" — usado quando a campanha tem A/B testing ativo
   provider       String? // provedor efetivamente usado (para failover multi-provider de SMS)
   providerMsgId  String?
-  cost           Decimal            @default(0) @db.Decimal(10, 4)
+  cost           Decimal            @default(0)
   error          String?
   queuedAt       DateTime           @default(now())
   sentAt         DateTime?
   deliveredAt    DateTime?
   respondedAt    DateTime?
   convertedAt    DateTime? // primeira movimentação dentro da janela de atribuição
-  convertedValue Decimal?           @db.Decimal(14, 2) // valor da movimentação que gerou a conversão (ROI)
+  convertedValue Decimal? // valor da movimentação que gerou a conversão (ROI)
   clickedAt      DateTime? // 1º clique no botão de link rastreado (services/trackedLinks.ts, rota /r/:token)
   clickCount     Int                @default(0)
 
   @@index([campaignId, status])
   @@index([clientId])
   @@index([recipientId])
+  @@index([tenantId, status])
 }
 
 /// Destinatário de uma campanha manual (lista de planilha). Fica guardado depois do envio para
@@ -480,7 +485,7 @@ model CampaignRecipient {
   telefone         String // E.164
   cpfHash          String?
   cpfMasked        String?
-  limiteDisponivel Decimal?  @db.Decimal(14, 2) // valor da planilha; só aparece na mensagem, não altera o cliente
+  limiteDisponivel Decimal? // valor da planilha; só aparece na mensagem, não altera o cliente
   clientId         String?
   client           Client?   @relation(fields: [clientId], references: [id], onDelete: SetNull)
   optOutAt         DateTime? // pediu para parar (contato fora da base); vale para as próximas listas
@@ -644,15 +649,15 @@ model DashboardSnapshot {
   id              String   @id @default(uuid())
   tenantId        String
   tenant          Tenant   @relation(fields: [tenantId], references: [id])
-  day             DateTime @db.Date
+  day             DateTime
   totalClientes   Int
   ativos          Int
   inativos        Int
   bloqueados      Int
   semUso          Int
-  limiteTotal     Decimal  @db.Decimal(16, 2)
-  valorUtilizado  Decimal  @db.Decimal(16, 2)
-  saldoDisponivel Decimal  @db.Decimal(16, 2)
+  limiteTotal     Decimal
+  valorUtilizado  Decimal
+  saldoDisponivel Decimal
   usaramNoDia     Int      @default(0) // clientes com dataUltimaUtilizacao naquele dia
   encerradosNoDia Int      @default(0) // clientes com encerradoEm naquele dia
   faixas          Json // { FAIXA_USO: contagem }
@@ -699,9 +704,9 @@ model Purchase {
   occurredAt     DateTime
   tipo           String // Descricao da planilha (ex.: "Compra à Vista Cartão Top Convênio")
   merchantName   String?
-  valorPrincipal Decimal   @db.Decimal(14, 2)
-  valorParcela   Decimal?  @db.Decimal(14, 2)
-  juros          Decimal?  @db.Decimal(14, 2)
+  valorPrincipal Decimal
+  valorParcela   Decimal?
+  juros          Decimal?
   razaoSocial    String?
   importJobId    String?
   createdAt      DateTime  @default(now())
@@ -885,4 +890,18 @@ model CicloCidade {
   updatedAt     DateTime @updatedAt
 
   @@unique([tenantId, cidadeKey])
+}
+
+/// Etiqueta do cliente (era `Client.tags String[]` no Postgres; o SQLite não tem lista escalar).
+/// O filtro de segmento `tags` casa quem tem QUALQUER uma das etiquetas (`some` + `in`).
+model ClientTag {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  tag      String
+
+  @@unique([clientId, tag])
+  @@index([tenantId, tag])
 }

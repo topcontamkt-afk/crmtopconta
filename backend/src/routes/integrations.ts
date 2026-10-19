@@ -1,5 +1,5 @@
 import express, { Router } from "express";
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../generated/prisma/client";
 import crypto from "crypto";
 import { z } from "zod";
 import { prisma } from "../config/db";

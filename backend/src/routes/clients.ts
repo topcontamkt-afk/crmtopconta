@@ -1,5 +1,5 @@
 import { Request, Response, Router } from "express";
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../generated/prisma/client";
 import { z } from "zod";
 import { prisma, tenantRaw } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
@@ -37,6 +37,11 @@ const LISTA_SELECT = {
   bloqueadoLgpdAt: true,
 } satisfies Prisma.ClientSelect;
 
+/** `tags` vem da tabela ClientTag; a API continua devolvendo a lista de textos. */
+function comTagsPlanas<T extends { tags: { tag: string }[] }>(c: T): Omit<T, "tags"> & { tags: string[] } {
+  return { ...c, tags: c.tags.map((t) => t.tag) };
+}
+
 /** LGPD 01-04: só o que a ficha usa (sem renda, nascimento, cpfHash nem campos de RH). */
 const DETALHE_SELECT = {
   id: true,
@@ -53,7 +58,7 @@ const DETALHE_SELECT = {
   statusConta: true,
   autorizacaoComunicacao: true,
   optOutAt: true,
-  tags: true,
+  tags: { select: { tag: true }, orderBy: { tag: "asc" } },
   bloqueadoLgpdAt: true,
   camposCorrigidos: true,
   anonymizedAt: true,
@@ -250,7 +255,7 @@ router.get("/:id", async (req, res) => {
     },
   });
   if (!client) return res.status(404).json({ error: "Cliente não encontrado" });
-  res.json(comContatoPorPapel(client, role));
+  res.json(comContatoPorPapel(comTagsPlanas(client), role));
 });
 
 /**
@@ -414,7 +419,7 @@ router.patch("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   if (reautorizacao) {
     await logAudit({ tenantId, userId, action: "REAUTORIZACAO_COMUNICACAO", target: "Client", targetId: existing.id, details: reautorizacao });
   }
-  res.json(updated);
+  res.json(comTagsPlanas(updated));
 });
 
 /** POST /api/clients/bulk — ações em massa: tag ou bloqueio */
@@ -434,9 +439,13 @@ router.post("/bulk", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
 
   for (const c of clients) {
     if (action === "ADD_TAG" && tag) {
-      await prisma.client.update({ where: { id: c.id }, data: { tags: { push: tag } } });
+      await prisma.clientTag.upsert({
+        where: { clientId_tag: { clientId: c.id, tag } },
+        create: { tenantId, clientId: c.id, tag },
+        update: {},
+      });
     } else if (action === "REMOVE_TAG" && tag) {
-      await prisma.client.update({ where: { id: c.id }, data: { tags: c.tags.filter((t) => t !== tag) } });
+      await prisma.clientTag.deleteMany({ where: { tenantId, clientId: c.id, tag } });
     } else if (action === "BLOCK") {
       await prisma.client.update({ where: { id: c.id }, data: { statusConta: "BLOQUEADO" } });
     } else if (action === "OPT_OUT") {

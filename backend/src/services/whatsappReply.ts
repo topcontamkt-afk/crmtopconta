@@ -102,7 +102,7 @@ export async function sendReply(
   // A cópia local permite mostrar o arquivo enviado sem baixá-lo de volta da Meta.
   if (blob) {
     await prisma.waMediaBlob
-      .create({ data: { tenantId, messageId: message.id, mime: blob.mime, size: blob.data.length, data: blob.data } })
+      .create({ data: { tenantId, messageId: message.id, mime: blob.mime, size: blob.data.length, data: new Uint8Array(blob.data) } })
       .catch(() => undefined);
   }
   await prisma.conversation.update({

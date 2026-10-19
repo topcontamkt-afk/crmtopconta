@@ -21,7 +21,7 @@ describe("runPurchaseImport — cliente bloqueado (LGPD 03-04)", () => {
         ]),
       },
       merchant: { findMany: jest.fn(async () => []), createMany: jest.fn() },
-      purchase: { createMany: jest.fn(async ({ data }: any) => ({ count: data.length })) },
+      purchase: { findMany: jest.fn(async () => []), createMany: jest.fn(async ({ data }: any) => ({ count: data.length })) },
     };
     const { result } = await runPurchaseImport(prisma, "t1", [linha("a", "529.982.247-25"), linha("b", "111.444.777-35")], "u1");
 
@@ -30,5 +30,24 @@ describe("runPurchaseImport — cliente bloqueado (LGPD 03-04)", () => {
     expect(execute.mock.calls[0][2]).toEqual(["livre"]); // último uso só do cliente liberado
     expect(result).toMatchObject({ importedCount: 1, bloqueadasLgpd: 1, unmatchedRows: 0 });
     expect(result.errors[0].motivo).toContain("tratamento suspenso");
+  });
+
+  it("sem skipDuplicates (SQLite): transação já gravada ou repetida no lote não entra de novo", async () => {
+    const prisma: any = {
+      tenant: { findUniqueOrThrow: jest.fn(async () => ({ id: "t1", cpfSalt: SALT })) },
+      importJob: { create: jest.fn(async () => ({ id: "j1" })), update: jest.fn(async () => ({})) },
+      client: { findMany: jest.fn(async () => [{ id: "livre", cpfHash: hashDocument("52998224725", SALT), bloqueadoLgpdAt: null }]) },
+      merchant: { findMany: jest.fn(async () => []), createMany: jest.fn() },
+      purchase: {
+        findMany: jest.fn(async () => [{ externalId: "a" }]),
+        createMany: jest.fn(async ({ data }: any) => ({ count: data.length })),
+      },
+    };
+    const doc = "529.982.247-25";
+    const { result } = await runPurchaseImport(prisma, "t1", [linha("a", doc), linha("b", doc), linha("b", doc), linha("c", doc)], "u1");
+
+    expect(prisma.purchase.findMany.mock.calls[0][0].where).toEqual({ tenantId: "t1", externalId: { in: ["a", "b", "c"] } });
+    expect(prisma.purchase.createMany.mock.calls[0][0].data.map((p: any) => p.externalId)).toEqual(["b", "c"]);
+    expect(result.importedCount).toBe(2);
   });
 });

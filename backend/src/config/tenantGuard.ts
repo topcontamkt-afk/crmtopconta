@@ -1,60 +1,50 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { Prisma, PrismaClient } from "@prisma/client";
-import { poolerSafeDatabaseUrl } from "./databaseUrl";
+import { Prisma } from "../generated/prisma/client";
 
 /**
- * Tenant isolation: two layers, both enforced from this one Prisma Client extension.
+ * Isolamento por tenant no D1 (SQLite), que não tem RLS. No Postgres antigo quem filtrava de verdade
+ * era a RLS; aqui é esta extensão do Prisma, então ela não só confere, ela **injeta**:
  *
- * Layer 1 (RLS real): `DATABASE_URL` conecta como `app_runtime`, um role Postgres SEM
- * `BYPASSRLS`, e todas as 14 tabelas têm policies (`current_setting('app.tenant_id')`, ver
- * migration `add_rls_policies`) — o próprio Postgres recusa/filtra qualquer linha fora do
- * tenant da sessão, mesmo que o código esqueça um filtro. A GUC de sessão precisa ser setada a
- * cada operação (não por conexão inteira, porque o pooler do Supabase está em modo "transaction"
- * — uma mesma conexão física é reciclada entre requests diferentes) — é o que a parte "abre uma
- * transaction e roda set_config(...)" deste arquivo faz.
+ * - toda operação com `where` (inclusive findUnique, update, delete e upsert) recebe
+ *   `tenantId = <tenant do contexto>` no nível de cima do `where`. Um id de outro tenant não acha nada
+ *   (o findUnique devolve null, o update/delete lança "registro não encontrado");
+ * - todo `create`/`createMany` recebe o `tenantId` do contexto quando o `data` não traz um;
+ * - `tenantId` explícito diferente do contexto (no `where` ou no `data`) é erro: nunca é silencioso;
+ * - no model `Tenant` o mesmo vale para o `id`: no contexto de um tenant, só ele é visível.
  *
- * Layer 2 (defesa em profundidade em código, histórica): antes da RLS real existir, esta era a
- * ÚNICA linha de defesa (RLS estava ligado mas com zero policies, e o role de conexão tinha
- * `rolbypassrls = true` — decorativo). Mantida mesmo com a RLS real em vigor: lança erro — não
- * warning — se uma query "de conjunto" (findMany/updateMany/etc.) num modelo tenant-scoped não
- * filtrar por `tenantId`, pegando o bug em dev/CI antes mesmo de chegar ao banco (mais rápido e
- * mais claro que descobrir via "por que essa lista veio vazia" depois que a RLS já filtrou).
+ * Falha fechada: sem contexto de tenant (fora de uma request autenticada ou de
+ * `runWithTenantContextAsync`) e fora de `withCrossTenantAccess`, toda query lança erro, e model
+ * desconhecido (novo no schema sem entrar na lista abaixo) também.
+ *
+ * Limite conhecido: relações carregadas por `include`/`select` não são filtradas. Elas partem de um
+ * registro já filtrado e as chaves estrangeiras não atravessam tenants (todo create recebe o tenant do
+ * contexto), então só vazariam se o banco já tivesse uma ligação errada.
  */
 
 /**
- * Opções das transactions que isolam cada operação por tenant (uma por query, ver o hook abaixo).
- * O padrão do Prisma é maxWait=2s e timeout=5s. Só que o pool é pequeno (connection_limit=5, ver
- * databaseUrl.ts) e o dashboard dispara dezenas de queries em paralelo — cada uma é uma
- * transaction que precisa de uma conexão —, então as que ficam na fila por mais de 2s falhavam
- * com P2028 "Unable to start a transaction in the given time" e o painel inteiro caía com
- * "Erro interno do servidor". Aqui elas passam a esperar a vez (até 15s) em vez de falhar; a
- * query em si continua limitada pelo `timeout`.
- */
-export const TENANT_TX_OPTIONS = { maxWait: 15_000, timeout: 15_000 } as const;
-
-/**
- * Every Prisma model that carries its own `tenantId` scalar field, per prisma/schema.prisma.
- * Confirmed by grepping the schema for `tenantId` — NOT every model with tenant-owned data:
- * `Movement` (scoped via `Client.tenantId`) and `MessageEvent` (scoped via `Campaign.tenantId`)
- * are deliberately excluded because they have no `tenantId` column of their own to check; their
- * tenant scoping happens through their parent relation instead (e.g.
- * `movement.findMany({ where: { client: { tenantId } } } )`), which this guard cannot see.
- * `Tenant` itself is excluded — it IS the tenant, not tenant-scoped data.
+ * Todo model com coluna `tenantId` própria. `Movement`, `MessageEvent` e `ClientTag` entraram na
+ * migração para o D1: sem RLS, a coluna própria é o que permite injetar o filtro.
+ * `tenantGuard.test.ts` confere esta lista contra o schema.
  */
 export const TENANT_SCOPED_MODELS = [
   "User",
   "Client",
+  "ClientTag",
   "ImportJob",
+  "ImportChange",
+  "Movement",
+  "AccountSnapshot",
   "SegmentDefinition",
   "Campaign",
+  "MessageEvent",
   "CampaignRecipient",
   "AutomationRule",
   "AuditLog",
   "SheetConnection",
   "ChannelConfig",
   "MessageTemplate",
+  "TemplateMedia",
   "Notification",
-  "AccountSnapshot",
   "DashboardSnapshot",
   "Merchant",
   "Purchase",
@@ -62,251 +52,182 @@ export const TENANT_SCOPED_MODELS = [
   "Conversation",
   "WaMessage",
   "WaMediaBlob",
-  "TemplateMedia",
-  "ImportChange",
-  "CicloCidade",
   "SupressaoTitular",
   "PedidoTitular",
+  "CicloCidade",
 ] as const;
 
-type TenantScopedModel = (typeof TENANT_SCOPED_MODELS)[number];
+const SCOPED = new Set<string>(TENANT_SCOPED_MODELS);
 
-function isTenantScopedModel(model: string | undefined): model is TenantScopedModel {
-  return !!model && (TENANT_SCOPED_MODELS as readonly string[]).includes(model);
-}
+/** O próprio tenant: filtrado pelo `id`, não por `tenantId`. */
+const TENANT_MODEL = "Tenant";
 
-/**
- * Operations guarded (must have `tenantId` in `where`): findMany, findFirst, findFirstOrThrow,
- * count, aggregate, groupBy, updateMany, deleteMany.
- *
- * These are exactly the "set" operations — no unique identifier is required in their `where`,
- * so a missing/wrong filter silently returns or mutates rows across every tenant in the
- * database. That is the failure mode this guard exists to catch.
- *
- * Deliberately NOT guarded: findUnique/findUniqueOrThrow/update/delete/upsert. Prisma requires
- * these to be keyed by a globally-unique identifier (the `id` primary key, or a compound unique
- * constraint) — by construction they can touch at most one row, so a missing tenantId there
- * cannot cause the "silent whole-table leak" this guard targets; the residual risk is a
- * single-record IDOR (an attacker guessing/enumerating another tenant's id), which is a
- * different vulnerability class requiring a different fix (verify-then-act at the route level).
- * This codebase already follows a consistent verify-then-act convention for exactly that reason:
- * every by-id mutation route first does a tenant-scoped `findFirst({ where: { id, tenantId } })`
- * (which IS guarded) and only then calls `.update({ where: { id } })` / `.delete({ where: { id } })`
- * on the id it just verified — see e.g. routes/segments.ts, routes/templates.ts,
- * routes/notifications.ts, routes/integrations.ts. Hard-enforcing tenantId on the singular
- * update/delete call itself would require reshaping every one of those call sites (Prisma *does*
- * support extra non-unique filters alongside the unique key since the "extended where unique
- * input" feature, e.g. `update({ where: { id, tenantId } })`, so it's not impossible — just out
- * of scope for this pass). Flagging an audit of by-id GET/PATCH/DELETE routes for IDOR as a
- * follow-up is worth tracking alongside the real-RLS roadmap item.
- */
-const GUARDED_OPERATIONS = new Set([
-  "findMany",
+/** Operações que levam `where`. */
+const WHERE_OPERATIONS = new Set([
+  "findUnique",
+  "findUniqueOrThrow",
   "findFirst",
   "findFirstOrThrow",
+  "findMany",
   "count",
   "aggregate",
   "groupBy",
+  "update",
   "updateMany",
+  "updateManyAndReturn",
+  "delete",
   "deleteMany",
+  "upsert",
 ]);
 
-/** create/createMany take tenantId in `data`, not `where` — checked separately below. */
-const CREATE_OPERATIONS = new Set(["create", "createMany"]);
+/** Operações que levam `data` de criação. */
+const CREATE_OPERATIONS = new Set(["create", "createMany", "createManyAndReturn"]);
+
+/** Operações cujo `data` é de alteração (não pode trocar o tenant de uma linha). */
+const UPDATE_OPERATIONS = new Set(["update", "updateMany", "updateManyAndReturn"]);
 
 /**
- * Recursively checks whether a Prisma `where` object includes `tenantId` as a filter, including
- * when it's nested inside `AND` / `OR` / `NOT` combinators (which can themselves be a single
- * object or an array of objects, and can nest arbitrarily deep — see services/segments.ts
- * `buildGroupWhere`, which builds exactly this shape for dynamic segment queries).
- *
- * Note this only checks for the *key* `tenantId` being present — it doesn't (and can't cheaply)
- * verify the value is non-empty/correct. That's consistent with the rest of the app: the value
- * always comes from `req.user.tenantId` (a verified JWT claim) or a loop variable, never from
- * unauthenticated input.
+ * Confere se um `where` menciona `tenantId`, inclusive dentro de AND/OR/NOT (formato que
+ * services/segments.ts `buildGroupWhere` monta). Não decide nada sobre o isolamento (a injeção cuida
+ * disso); fica exportada para quem monta filtros conferir o próprio resultado.
  */
 export function whereHasTenantId(where: unknown): boolean {
   if (!where || typeof where !== "object") return false;
   const w = where as Record<string, unknown>;
-
   if ("tenantId" in w) return true;
-
   for (const combinator of ["AND", "OR", "NOT"] as const) {
     const value = w[combinator];
     if (value === undefined) continue;
     const items = Array.isArray(value) ? value : [value];
     if (items.some((item) => whereHasTenantId(item))) return true;
   }
-
   return false;
 }
 
 /**
- * Escape hatch for genuinely tenant-agnostic queries: background/cron jobs that must scan
- * across ALL tenants by design (e.g. "for every active SheetConnection, regardless of tenant,
- * check whether it's due to sync now"). There is no admin/cross-tenant role or endpoint in this
- * app (every HTTP route is scoped by `req.user.tenantId` from the JWT, see middleware/auth.ts)
- * — the only legitimate callers of this are the scheduler jobs in services/scheduler.ts and
- * services/automationEngine.ts.
- *
- * Wrap ONLY the specific prisma call(s) that need this, as narrowly as possible, and always with
- * a comment at the call site explaining why the query is legitimately cross-tenant. Every use of
- * this function is a manually-reviewed exception to the guard — grep for it to find all of them.
- * Legitimate callers today: the scheduler jobs in services/scheduler.ts and
- * services/automationEngine.ts, and the webhooks that find the tenant from the payload. The AuditLog
- * hash chain is per tenant since LGPD 08-08, so services/auditIntegrity.ts no longer needs it.
+ * Desvio para o que é cross-tenant de propósito: jobs agendados que varrem todos os tenants
+ * (services/scheduler.ts, automationEngine.ts, retention.ts…) e webhooks que descobrem o tenant pelo
+ * corpo (phone_number_id, segredo da URL). Dentro do callback as queries rodam SEM injeção. Envolva só
+ * a chamada que precisa, com um comentário no local explicando por quê; todo uso é uma exceção revisada
+ * à mão (grep por `withCrossTenantAccess`).
  */
 const bypassContext = new AsyncLocalStorage<boolean>();
 
 export function withCrossTenantAccess<T>(fn: () => Promise<T>): Promise<T> {
-  // Must `await` fn() *inside* the run() callback, not just return the un-awaited promise: Prisma's
-  // findMany()/etc. return a lazy thenable whose `.then()` (where the $allOperations hook actually
-  // fires — see tenantGuard.test.ts and the stack traces that motivated this comment) may not be
-  // called until the caller awaits the value returned by withCrossTenantAccess(). By then, run()
-  // has already returned synchronously and the ALS context is gone. Awaiting here ensures the
-  // `.then()` call happens while the "true" store is still the active context.
+  // `await` dentro do run(): as queries do Prisma são thenables preguiçosos, e o hook só roda no
+  // `.then()`. Sem o await aqui, ele rodaria depois que o contexto do run() já acabou.
   return bypassContext.run(true, async () => await fn());
 }
 
-/**
- * Client administrativo (role privilegiado de sempre, `DATABASE_URL_ADMIN` — o mesmo valor que
- * `DATABASE_URL` tinha antes da migração para RLS real, `rolbypassrls = true`), usado
- * EXCLUSIVAMENTE pelo desvio de `withCrossTenantAccess()` abaixo. Sem extensão nenhuma — os
- * scheduler jobs que usam esse caminho fazem queries genuinamente sem tenantId de propósito, e
- * não têm um `app.tenant_id` de sessão pra setar (não há "o" tenant de um job cross-tenant).
- * Construído de forma independente de config/db.ts (em vez de importado de lá) para não criar
- * import circular — db.ts já importa `tenantGuardExtension` deste módulo.
- */
-const prismaAdmin = new PrismaClient({
-  datasources: { db: { url: poolerSafeDatabaseUrl(process.env.DATABASE_URL_ADMIN) } },
-});
-
-/** "AutomationRule" -> "automationRule" — nome do model Prisma para a chave do client delegate. */
-function modelToDelegateKey(model: string): string {
-  return model.charAt(0).toLowerCase() + model.slice(1);
-}
-
-/**
- * tenantId da request atual (setado por middleware/auth.ts logo após verificar o JWT — ver
- * requireAuth). É o valor usado para popular a GUC `app.tenant_id` que as policies de RLS leem.
- * Nunca setado durante um job de scheduler (esses usam bypassContext/prismaAdmin acima, não
- * este contexto) nem em scripts fora do processo HTTP (ex.: prisma/seed.ts usa seu próprio
- * PrismaClient contra DATABASE_URL_ADMIN diretamente, por precisar criar o próprio Tenant antes
- * de qualquer tenantId existir para setar).
- */
+/** tenantId da request atual (middleware/auth.ts) ou do job que processa um tenant por vez. */
 const requestTenantContext = new AsyncLocalStorage<string>();
 
-/**
- * Versão síncrona — usada só por middleware/auth.ts para envolver `next()` (a chamada em si é
- * void/síncrona; o resto da cadeia de middlewares/rota herda o contexto normalmente via
- * continuação assíncrona nativa, sem risco de perda de contexto).
- */
+/** Versão síncrona: middleware/auth.ts envolve `next()`, e o resto da cadeia herda o contexto. */
 export function runWithTenantContext<T>(tenantId: string, fn: () => T): T {
   return requestTenantContext.run(tenantId, fn);
 }
 
-/**
- * Versão para trabalho assíncrono (jobs de scheduler processando um tenant por vez após uma
- * varredura cross-tenant — ver services/scheduler.ts/automationEngine.ts/retention.ts/
- * biExport.ts). `await fn()` *dentro* do callback de `run()`, não um tail-call sem await, pelo
- * mesmo motivo documentado em withCrossTenantAccess acima: a lazy thenable do Prisma só chama
- * `.then()` quando algo efetivamente aguarda a promise, e isso precisa acontecer sincronamente
- * dentro do `.run()` para não perder o contexto do AsyncLocalStorage. Centralizado aqui (em vez
- * de exigir que cada call site lembre de fazer isso certo) para não repetir o mesmo bug já
- * corrigido uma vez neste arquivo.
- */
+/** Para trabalho assíncrono (jobs por tenant depois de uma varredura cross-tenant). */
 export function runWithTenantContextAsync<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
   return requestTenantContext.run(tenantId, async () => await fn());
 }
 
-/**
- * Evita recursão infinita: depois de abrir a transaction e rodar `set_config(...)`, a operação
- * real é despachada de novo através de `tx[model][operation]()` — que passa por este MESMO hook
- * de extensão outra vez (extensions se aplicam a `tx` também). Esse flag marca "já estamos
- * dentro do nosso próprio wrapper, só execute a query" na segunda passada.
- */
-const withinRlsWrapper = new AsyncLocalStorage<boolean>();
+/** Tenant do contexto atual, ou undefined fora de request/job. */
+export function currentTenantId(): string | undefined {
+  return requestTenantContext.getStore();
+}
 
-/** Prisma Client extension implementing the guard described above. */
+function guardError(model: string, operation: string, motivo: string): Error {
+  return new Error(`[tenantGuard] Recusado ${model}.${operation}(): ${motivo}`);
+}
+
+/** Injeta `campo = tenantId` no `where`, recusando um valor explícito diferente. */
+function scopeWhere(model: string, operation: string, where: unknown, campo: string, tenantId: string) {
+  const w = where && typeof where === "object" ? (where as Record<string, unknown>) : {};
+  if (campo in w && w[campo] !== undefined && w[campo] !== tenantId) {
+    throw guardError(model, operation, `"${campo}" do where não é o tenant do contexto`);
+  }
+  return { ...w, [campo]: tenantId };
+}
+
+/** Preenche (ou confere) `tenantId` em cada item de `data` de criação. */
+function scopeCreateData(model: string, operation: string, data: unknown, tenantId: string) {
+  const fill = (item: unknown) => {
+    if (!item || typeof item !== "object") throw guardError(model, operation, "data inválido");
+    const d = item as Record<string, unknown>;
+    if (d.tenantId !== undefined && d.tenantId !== tenantId) {
+      throw guardError(model, operation, '"tenantId" do data não é o tenant do contexto');
+    }
+    // `tenant: { connect }` (forma com relação) não convive com `tenantId`: só confere.
+    if (d.tenant !== undefined) {
+      const id = (d.tenant as { connect?: { id?: unknown } })?.connect?.id;
+      if (id !== tenantId) throw guardError(model, operation, "relação tenant não é o tenant do contexto");
+      return d;
+    }
+    return { ...d, tenantId };
+  };
+  return Array.isArray(data) ? data.map(fill) : fill(data);
+}
+
+/** `data` de alteração não pode mover a linha para outro tenant. */
+function checkUpdateData(model: string, operation: string, data: unknown, tenantId: string) {
+  const d = data as Record<string, unknown> | undefined;
+  if (d && d.tenantId !== undefined && d.tenantId !== tenantId) {
+    throw guardError(model, operation, "não é permitido trocar o tenantId de uma linha");
+  }
+}
+
+/** Reescreve os argumentos de uma operação para o tenant do contexto (exportada para os testes). */
+export function scopeArgs(model: string, operation: string, args: unknown, tenantId: string): Record<string, unknown> {
+  const a = { ...((args as Record<string, unknown> | undefined) ?? {}) };
+
+  if (model === TENANT_MODEL) {
+    if (!WHERE_OPERATIONS.has(operation) || operation === "upsert") {
+      throw guardError(model, operation, "Tenant só é criado fora do contexto de um tenant (seed/withCrossTenantAccess)");
+    }
+    a.where = scopeWhere(model, operation, a.where, "id", tenantId);
+    return a;
+  }
+
+  if (!SCOPED.has(model)) {
+    throw guardError(model, operation, "model fora de TENANT_SCOPED_MODELS (inclua-o em config/tenantGuard.ts)");
+  }
+
+  if (CREATE_OPERATIONS.has(operation)) {
+    a.data = scopeCreateData(model, operation, a.data, tenantId);
+    return a;
+  }
+  if (!WHERE_OPERATIONS.has(operation)) {
+    throw guardError(model, operation, "operação desconhecida para o guard");
+  }
+  a.where = scopeWhere(model, operation, a.where, "tenantId", tenantId);
+  if (UPDATE_OPERATIONS.has(operation)) checkUpdateData(model, operation, a.data, tenantId);
+  if (operation === "upsert") {
+    a.create = scopeCreateData(model, operation, a.create, tenantId);
+    checkUpdateData(model, operation, a.update, tenantId);
+  }
+  return a;
+}
+
+/** Extensão do Prisma que aplica o isolamento descrito no topo do arquivo. */
 export const tenantGuardExtension = Prisma.defineExtension((client) =>
   client.$extends({
     name: "tenantGuard",
     query: {
       $allModels: {
         async $allOperations({ model, operation, args, query }) {
-          if (bypassContext.getStore()) {
-            // Cross-tenant de propósito (scheduler jobs): despacha no client administrativo, a
-            // única conexão que não tem RLS pra satisfazer — rodar isso em `query(args)` (a
-            // conexão restrita de app_runtime) veria zero linhas sob RLS sem GUC setada.
-            return (prismaAdmin as unknown as Record<string, Record<string, (a: unknown) => unknown>>)[
-              modelToDelegateKey(model)
-            ][operation](args);
-          }
-
-          if (withinRlsWrapper.getStore()) {
-            return query(args);
-          }
-
-          if (isTenantScopedModel(model)) {
-            if (GUARDED_OPERATIONS.has(operation)) {
-              const where = (args as { where?: unknown } | undefined)?.where;
-              if (!whereHasTenantId(where)) {
-                throw new Error(
-                  `[tenantGuard] Refusing to run ${model}.${operation}() without "tenantId" in ` +
-                    `the where clause. Every query against a tenant-scoped model must filter by ` +
-                    `tenantId to avoid a cross-tenant data leak. If this query is genuinely ` +
-                    `tenant-agnostic (e.g. a scheduler job scanning all tenants), wrap it in ` +
-                    `withCrossTenantAccess() from src/config/tenantGuard.ts and document why.`
-                );
-              }
-            } else if (CREATE_OPERATIONS.has(operation)) {
-              // Defense in depth: tenantId is a required, non-nullable, no-default scalar on
-              // every one of these models, so TypeScript/Prisma already reject a well-typed
-              // create() missing it at compile time. This extra runtime check only catches
-              // callers that bypass the types (e.g. `data: someUntypedObject as any`).
-              const data = (args as { data?: unknown } | undefined)?.data;
-              const items = Array.isArray(data) ? data : [data];
-              const missing = items.some(
-                (item) => !item || typeof item !== "object" || !("tenantId" in item)
-              );
-              if (missing) {
-                throw new Error(
-                  `[tenantGuard] Refusing to run ${model}.${operation}() with "data" missing ` +
-                    `"tenantId". Every row created on a tenant-scoped model must carry its tenantId.`
-                );
-              }
-            }
-          }
-
+          if (bypassContext.getStore()) return query(args);
           const tenantId = requestTenantContext.getStore();
           if (!tenantId) {
-            throw new Error(
-              `[tenantGuard] Refusing to run ${model}.${operation}() with no tenant context set. ` +
-                `Every query outside a scheduler job (withCrossTenantAccess) must run inside an ` +
-                `authenticated request (requireAuth sets this via runWithTenantContext) — RLS ` +
-                `would silently return zero rows without it.`
+            throw guardError(
+              model,
+              operation,
+              "sem contexto de tenant. Fora de uma request autenticada use runWithTenantContextAsync() " +
+                "ou, se for cross-tenant de propósito, withCrossTenantAccess()"
             );
           }
-
-          // RLS real: abre uma transaction (o pooler do Supabase está em modo "transaction" —
-          // uma GUC setada fora de uma transaction não sobreviveria de forma confiável até a
-          // query real rodar, podendo vazar para o próximo request que reusar a mesma conexão
-          // física). set_config(..., true) = equivalente a SET LOCAL, mas aceita bind parameter
-          // (SET LOCAL em si não aceita — por isso não é `SET LOCAL app.tenant_id = ${tenantId}`).
-          return client.$transaction(async (tx) => {
-            await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
-            // async+await (not a bare arrow returning the promise) is required here for the same
-            // reason documented on withCrossTenantAccess above: Prisma's query objects are lazy
-            // thenables whose .then() may not fire until awaited, and by then run()'s ALS context
-            // could already be gone.
-            return withinRlsWrapper.run(
-              true,
-              async () =>
-                await (tx as unknown as Record<string, Record<string, (a: unknown) => unknown>>)[
-                  modelToDelegateKey(model)
-                ][operation](args)
-            );
-          }, TENANT_TX_OPTIONS);
+          // `query` aceita os argumentos reescritos; o tipo dele é por operação, daí o cast.
+          return query(scopeArgs(model, operation, args, tenantId) as typeof args);
         },
       },
     },
@@ -314,28 +235,19 @@ export const tenantGuardExtension = Prisma.defineExtension((client) =>
 );
 
 /**
- * Consultas SQL cruas ($queryRaw/$executeRaw) NÃO passam pelo hook $allModels acima — então rodam
- * numa conexão sem `app.tenant_id` e, sob RLS real (role `app_runtime`), enxergariam zero linhas.
- * Esta função abre a mesma transaction com `set_config` que as queries de model usam e executa o
- * callback dentro dela. Use sempre que precisar de SQL cru (ver `tenantRaw` em config/db.ts).
- * Continua exigindo contexto de tenant: fora de uma request/job com tenant, lança erro.
+ * SQL cru não passa pela extensão acima. Para não depender de cada chamador lembrar do filtro,
+ * `tenantRaw` (config/db.ts) exige contexto de tenant e que o SQL filtre `"tenantId" = $1`, com o
+ * tenant do contexto como PRIMEIRO parâmetro.
+ * Dentro de `withCrossTenantAccess` a conferência não se aplica.
  */
-export async function runRawInTenantTx<T>(
-  // `any`: o client estendido tem `$transaction` sobrecarregado (array de promises OU callback), o
-  // que não casa com uma assinatura estrutural simples. Só a forma com callback é usada aqui.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  client: any,
-  fn: (tx: Prisma.TransactionClient) => Promise<T>
-): Promise<T> {
+export function checkRawTenant(sql: string, params: unknown[]): void {
+  if (bypassContext.getStore()) return;
   const tenantId = requestTenantContext.getStore();
-  if (!tenantId) {
-    throw new Error(
-      "[tenantGuard] Refusing to run raw SQL with no tenant context set. Use it only inside an " +
-        "authenticated request (requireAuth) or runWithTenantContextAsync()."
-    );
+  if (!tenantId) throw new Error("[tenantGuard] SQL cru recusado: sem contexto de tenant");
+  if (params[0] !== tenantId) {
+    throw new Error("[tenantGuard] SQL cru recusado: o 1º parâmetro tem de ser o tenant do contexto");
   }
-  return client.$transaction(async (tx: Prisma.TransactionClient) => {
-    await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
-    return fn(tx);
-  }, TENANT_TX_OPTIONS);
+  if (!/"tenantId"\s*=\s*\$1(?!\d)/.test(sql)) {
+    throw new Error('[tenantGuard] SQL cru recusado: o SQL precisa filtrar "tenantId" = $1');
+  }
 }

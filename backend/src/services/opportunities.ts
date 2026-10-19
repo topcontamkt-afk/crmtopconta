@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../generated/prisma/client";
 import { AppPrismaClient, tenantRaw } from "../config/db";
 import { addDays, clientWhere, DashboardFilters, rawFilterSql } from "./dashboardMetrics";
 

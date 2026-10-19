@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../generated/prisma/client";
 import { AppPrismaClient } from "../config/db";
 import { computeUsage } from "./usage";
 import { hashDocument, isValidDocument, maskDocument, detectDocumentType, normalizePhone } from "./masking";
@@ -639,7 +639,7 @@ export async function runCardAccountImport(
   if (movementsToCreate.length > 0) {
     await prisma.movement
       .createMany({
-        data: movementsToCreate.map((m) => ({ clientId: m.clientId, tipo: "renovacao_limite", valor: m.valor, data: new Date() })),
+        data: movementsToCreate.map((m) => ({ tenantId, clientId: m.clientId, tipo: "renovacao_limite", valor: m.valor, data: new Date() })),
       })
       .catch(() => {});
   }

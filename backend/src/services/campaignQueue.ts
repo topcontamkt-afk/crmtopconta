@@ -282,7 +282,7 @@ export async function enqueueCampaign(
     // controle não distorcer a divisão entre A e B.
     if (campaign.controlGroupPercent && Math.random() * 100 < campaign.controlGroupPercent) {
       await prisma.messageEvent.create({
-        data: { campaignId, clientId: client.id, channel: campaign.channel, status: "CONTROLE", variant: "A" },
+        data: { tenantId, campaignId, clientId: client.id, channel: campaign.channel, status: "CONTROLE", variant: "A" },
       });
       control++;
       continue;
@@ -293,6 +293,7 @@ export async function enqueueCampaign(
 
     await prisma.messageEvent.create({
       data: {
+        tenantId,
         campaignId,
         clientId: client.id,
         channel: campaign.channel,
@@ -356,7 +357,7 @@ export async function enqueueManualCampaign(prisma: AppPrismaClient, tenantId: s
       data: novos.slice(i, i + 500).map((r) => {
         const motivo = motivoBloqueioDestinatario(r, lote);
         if (motivo) bloqueados++;
-        return { campaignId: campaign.id, clientId: r.clientId, recipientId: r.id, channel: campaign.channel, status: motivo ? ("BLOQUEADO" as const) : ("FILA" as const), ...(motivo ? { error: motivo } : {}) };
+        return { tenantId, campaignId: campaign.id, clientId: r.clientId, recipientId: r.id, channel: campaign.channel, status: motivo ? ("BLOQUEADO" as const) : ("FILA" as const), ...(motivo ? { error: motivo } : {}) };
       }),
     });
   }

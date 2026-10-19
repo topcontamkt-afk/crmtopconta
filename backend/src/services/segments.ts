@@ -1,5 +1,5 @@
 import { etapaWhere, EtapaUso } from "./etapaUso";
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../generated/prisma/client";
 import { PerfilRenda } from "./rendaPerfil";
 import { diasAberturaNaFaixa, FaixaDias } from "./ciclos";
 
@@ -71,7 +71,7 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
   if (filters.autorizacaoComunicacao !== undefined) {
     where.autorizacaoComunicacao = filters.autorizacaoComunicacao;
   }
-  if (filters.tags?.length) where.tags = { hasSome: filters.tags };
+  if (filters.tags?.length) where.tags = { some: { tag: { in: filters.tags } } };
   if (filters.semUsoDiasMin !== undefined) {
     const cutoff = new Date(Date.now() - filters.semUsoDiasMin * 24 * 60 * 60 * 1000);
     and.push({ OR: [{ dataUltimaUtilizacao: null }, { dataUltimaUtilizacao: { lte: cutoff } }] });
@@ -110,7 +110,9 @@ function buildLeafWhere(tenantId: string, filters: SegmentFilters): Prisma.Clien
   if (filters.search) {
     and.push({
       OR: [
-        { nome: { contains: filters.search, mode: "insensitive" } },
+        // SQLite: `contains` vira LIKE, que já ignora maiúscula/minúscula só em ASCII ("joão" não acha
+        // "JOÃO"). A busca sem acento e sem caixa entra com a coluna `nomeBusca` (Fase 4 da migração).
+        { nome: { contains: filters.search } },
         { telefone: { contains: filters.search } },
       ],
     });

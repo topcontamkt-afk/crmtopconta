@@ -19,7 +19,7 @@
  * Atenção: "NUNCA_USOU" vale para o período coberto pelo extrato enviado. Se o extrato começa em
  * outubro, quem usou em agosto aparece como nunca usou — o aviso de cobertura fica no dashboard.
  */
-import type { Prisma } from "@prisma/client";
+import type { Prisma } from "../generated/prisma/client";
 
 export const ETAPAS_USO = ["NUNCA_USOU", "RECORRENTE", "OCASIONAL", "EM_RISCO", "INATIVO"] as const;
 export type EtapaUso = (typeof ETAPAS_USO)[number];

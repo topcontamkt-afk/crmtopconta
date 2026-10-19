@@ -1,398 +1,205 @@
-/**
- * Fake do PrismaClient administrativo (usado só pelo desvio de withCrossTenantAccess — ver
- * tenantGuard.ts). Precisa ser mockado ANTES do import de "./tenantGuard" porque esse módulo
- * constrói `prismaAdmin = new PrismaClient(...)` no escopo do módulo. Nome prefixado com "mock"
- * por exigência do jest (module factories não podem referenciar variáveis fora de escopo a
- * menos que comecem com "mock").
- */
-const mockAdminCalls: Array<{ model: string; operation: string; args: unknown }> = [];
-const mockAdminDelegate = new Proxy(
-  {},
-  {
-    get: (_target, model: string) =>
-      new Proxy(
-        {},
-        {
-          get:
-            (_t2, operation: string) =>
-            (args: unknown) => {
-              mockAdminCalls.push({ model, operation, args });
-              return Promise.resolve(["admin-result"]);
-            },
-        }
-      ),
-  }
-);
-
-jest.mock("@prisma/client", () => {
-  const actual = jest.requireActual("@prisma/client");
-  return { ...actual, PrismaClient: jest.fn().mockImplementation(() => mockAdminDelegate) };
-});
-
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   TENANT_SCOPED_MODELS,
-  TENANT_TX_OPTIONS,
-  runRawInTenantTx,
-  runWithTenantContextAsync as runWithTenantCtxForRaw,
+  checkRawTenant,
   runWithTenantContext,
+  runWithTenantContextAsync,
+  scopeArgs,
   tenantGuardExtension,
   whereHasTenantId,
   withCrossTenantAccess,
 } from "./tenantGuard";
 
 /**
- * These tests exercise the guard's decision logic without touching a real database — see the
- * live smoke test performed manually against local Postgres (docker compose) in this session,
- * which is what actually proves the transaction/recursion mechanics work end-to-end (login +
- * tenant update + tamper-detection all correctly RLS-scoped). These tests cover the DECISION
- * logic in isolation: what gets rejected, what gets dispatched, and to which connection.
- *
- * `makeFakeClient()` extracts the extension's `$allOperations` hook the same way Prisma's
- * extension runtime invokes it, and provides a fake `$transaction(callback)` whose `tx` records
- * every `[model][operation](args)` call instead of really opening a DB transaction — good enough
- * to prove tenantGuard opens ONE transaction, sets the right GUC value, and dispatches the right
- * op/args, without needing to fully re-simulate Prisma's extension-composes-with-tx behavior.
+ * Lógica de decisão do guard, sem banco. A prova contra um SQLite de verdade (2 tenants × models ×
+ * operações) fica em tenantIsolation.int.test.ts.
  */
-function makeFakeClient() {
-  let captured: any;
-  const txCalls: Array<{ model: string; operation: string; args: unknown }> = [];
-  const executeRawCalls: unknown[][] = [];
-  const txOptions: unknown[] = [];
 
-  const fakeClient = {
+/** Extrai o hook `$allOperations` da extensão do mesmo jeito que o runtime do Prisma o chama. */
+function hook() {
+  let captured: any;
+  (tenantGuardExtension as unknown as (client: any) => any)({
     $extends(config: any) {
       captured = config.query.$allModels.$allOperations;
       return config;
     },
-    async $transaction(callback: (tx: any) => Promise<any>, options?: unknown) {
-      txOptions.push(options);
-      const txBase = {
-        $executeRaw: (_strings: TemplateStringsArray, ...values: unknown[]) => {
-          executeRawCalls.push(values);
-          return Promise.resolve(undefined);
-        },
-      };
-      const tx = new Proxy(txBase, {
-        get(target, prop: string) {
-          if (prop in target) return (target as any)[prop];
-          return new Proxy(
-            {},
-            {
-              get:
-                (_t2, operation: string) =>
-                (args: unknown) => {
-                  txCalls.push({ model: prop, operation, args });
-                  return Promise.resolve({ ok: true });
-                },
-            }
-          );
-        },
-      });
-      return callback(tx);
-    },
-  };
-
-  (tenantGuardExtension as unknown as (client: any) => any)(fakeClient);
-  if (typeof captured !== "function") {
-    throw new Error("could not extract $allOperations hook from tenantGuardExtension");
-  }
-
-  return {
-    hook: captured as (params: {
-      model?: string;
-      operation: string;
-      args: any;
-      query: (args: any) => Promise<any>;
-    }) => Promise<any>,
-    txCalls,
-    executeRawCalls,
-    txOptions,
+  });
+  return (model: string, operation: string, args: unknown) => {
+    const query = jest.fn(async (a: unknown) => a);
+    return { result: captured({ model, operation, args, query }) as Promise<any>, query };
   };
 }
 
-describe("whereHasTenantId", () => {
-  it("finds a flat top-level tenantId", () => {
-    expect(whereHasTenantId({ tenantId: "t1", cidade: "São Paulo" })).toBe(true);
+describe("TENANT_SCOPED_MODELS confere com o schema", () => {
+  const schema = readFileSync(join(__dirname, "../../prisma/schema.prisma"), "utf8");
+  const models = [...schema.matchAll(/^model (\w+) \{([\s\S]*?)^\}/gm)].map((m) => ({
+    name: m[1],
+    temTenantId: /^\s+tenantId\s+String\b/m.test(m[2]),
+  }));
+
+  it("todo model com coluna tenantId está na lista, e só eles", () => {
+    expect([...TENANT_SCOPED_MODELS].sort()).toEqual(models.filter((m) => m.temTenantId).map((m) => m.name).sort());
   });
 
-  it("returns false when tenantId is absent", () => {
-    expect(whereHasTenantId({ cidade: "São Paulo" })).toBe(false);
-    expect(whereHasTenantId(undefined)).toBe(false);
-    expect(whereHasTenantId(null)).toBe(false);
-    expect(whereHasTenantId({})).toBe(false);
-  });
-
-  it("finds tenantId nested inside OR (array form), matching buildGroupWhere's output", () => {
-    const where = {
-      OR: [
-        { tenantId: "t1", cidade: "São Paulo" },
-        { tenantId: "t1", cidade: "Rio de Janeiro" },
-      ],
-    };
-    expect(whereHasTenantId(where)).toBe(true);
-  });
-
-  it("finds tenantId nested inside AND (array form)", () => {
-    const where = { AND: [{ tenantId: "t1" }, { faixaUso: "USO_71_99" }] };
-    expect(whereHasTenantId(where)).toBe(true);
-  });
-
-  it("finds tenantId nested inside NOT (single-object form)", () => {
-    const where = { NOT: { tenantId: "t1" } };
-    expect(whereHasTenantId(where)).toBe(true);
-  });
-
-  it("does not find tenantId when every branch of OR lacks it", () => {
-    const where = { OR: [{ cidade: "São Paulo" }, { cidade: "Rio de Janeiro" }] };
-    expect(whereHasTenantId(where)).toBe(false);
-  });
-
-  it("recurses into deeply nested AND/OR combinations", () => {
-    const where = { AND: [{ OR: [{ AND: [{ tenantId: "t1" }] }] }] };
-    expect(whereHasTenantId(where)).toBe(true);
+  it("o único model sem tenantId é o próprio Tenant", () => {
+    expect(models.filter((m) => !m.temTenantId).map((m) => m.name)).toEqual(["Tenant"]);
   });
 });
 
-describe("TENANT_SCOPED_MODELS", () => {
-  it("lists exactly the models that carry their own tenantId column in prisma/schema.prisma", () => {
-    expect([...TENANT_SCOPED_MODELS].sort()).toEqual(
-      [
-        "User",
-        "Client",
-        "ImportJob",
-        "SegmentDefinition",
-        "Campaign",
-        "CampaignRecipient",
-        "AutomationRule",
-        "AuditLog",
-        "SheetConnection",
-        "ChannelConfig",
-        "MessageTemplate",
-        "Notification",
-        "AccountSnapshot",
-        "DashboardSnapshot",
-        "Merchant",
-        "Purchase",
-        "WhatsAppAccount",
-        "Conversation",
-        "WaMessage",
-        "WaMediaBlob",
-        "TemplateMedia",
-        "ImportChange",
-        "CicloCidade",
-        "SupressaoTitular",
-        "PedidoTitular",
-      ].sort()
-    );
-  });
-});
-
-describe("tenantGuard $allOperations hook — code-level checks (run before any DB access)", () => {
-  it("throws on a guarded operation against a tenant-scoped model with no tenantId in where", async () => {
-    const { hook, txCalls } = makeFakeClient();
-
-    await expect(
-      hook({ model: "Client", operation: "findMany", args: { where: { cidade: "São Paulo" } }, query: jest.fn() })
-    ).rejects.toThrow(/tenantGuard/);
-
-    // The whole point: no transaction/DB access happens on the reject path.
-    expect(txCalls).toHaveLength(0);
-  });
-
-  it("throws for every guarded operation, not just findMany", async () => {
-    const { hook, txCalls } = makeFakeClient();
-    const guardedOps = ["findFirst", "findFirstOrThrow", "count", "aggregate", "groupBy", "updateMany", "deleteMany"];
-
-    for (const operation of guardedOps) {
-      await expect(
-        hook({ model: "SegmentDefinition", operation, args: { where: { name: "x" } }, query: jest.fn() })
-      ).rejects.toThrow(/tenantGuard/);
+describe("scopeArgs: injeta o tenant do contexto", () => {
+  it("põe tenantId no where de toda operação com where, inclusive as por id", () => {
+    for (const op of ["findUnique", "findUniqueOrThrow", "findFirst", "findMany", "count", "aggregate", "groupBy", "update", "updateMany", "delete", "deleteMany"]) {
+      expect(scopeArgs("Client", op, { where: { id: "c1" } }, "t1").where).toEqual({ id: "c1", tenantId: "t1" });
     }
-    expect(txCalls).toHaveLength(0);
   });
 
-  it("throws on create/createMany for a tenant-scoped model when data is missing tenantId", async () => {
-    const { hook, txCalls } = makeFakeClient();
-
-    await expect(
-      hook({ model: "Notification", operation: "create", args: { data: { message: "oi" } }, query: jest.fn() })
-    ).rejects.toThrow(/tenantGuard/);
-
-    await expect(
-      hook({
-        model: "Notification",
-        operation: "createMany",
-        args: { data: [{ message: "oi" }, { tenantId: "t1", message: "ok" }] },
-        query: jest.fn(),
-      })
-    ).rejects.toThrow(/tenantGuard/);
-    expect(txCalls).toHaveLength(0);
+  it("cria o where quando a operação veio sem nenhum", () => {
+    expect(scopeArgs("Campaign", "findMany", undefined, "t1")).toEqual({ where: { tenantId: "t1" } });
   });
 
-  it("throws when there is no tenant context set (not inside an authenticated request nor a bypass)", async () => {
-    const { hook } = makeFakeClient();
-
-    await expect(
-      hook({ model: "Movement", operation: "findMany", args: { where: {} }, query: jest.fn() })
-    ).rejects.toThrow(/tenant context/);
-  });
-});
-
-describe("tenantGuard $allOperations hook — RLS transaction wrapping (real tenant context)", () => {
-  it("abre a transaction com maxWait/timeout folgados: o pool é pequeno e o painel dispara dezenas de queries em paralelo", async () => {
-    const { hook, txOptions } = makeFakeClient();
-    await runWithTenantContext("tenant-A", () =>
-      hook({ model: "Client", operation: "findMany", args: { where: { tenantId: "tenant-A" } }, query: jest.fn() })
-    );
-    // O padrão do Prisma (maxWait 2s) derrubava o painel com P2028 quando as queries ficavam na fila do pool.
-    expect(txOptions).toEqual([TENANT_TX_OPTIONS]);
-    expect(TENANT_TX_OPTIONS.maxWait).toBeGreaterThan(2000);
+  it("mantém filtros compostos (AND/OR) e acrescenta o tenant no nível de cima", () => {
+    const where = { OR: [{ cidade: "Natal" }, { cidade: "Lagarto" }] };
+    expect(scopeArgs("Client", "findMany", { where }, "t1").where).toEqual({ ...where, tenantId: "t1" });
   });
 
-  it("opens one transaction, sets app.tenant_id via set_config, and dispatches the real op to tx", async () => {
-    const { hook, txCalls, executeRawCalls } = makeFakeClient();
-    const args = { where: { tenantId: "t1", cidade: "São Paulo" } };
-
-    const result = await runWithTenantContext("t1", () =>
-      hook({ model: "Client", operation: "findMany", args, query: jest.fn() })
-    );
-
-    expect(result).toEqual({ ok: true });
-    expect(executeRawCalls).toEqual([["t1"]]);
-    // "Client" -> "client": dispatched on the tx's Prisma delegate key, not the raw model name.
-    expect(txCalls).toEqual([{ model: "client", operation: "findMany", args }]);
+  it("aceita tenantId igual ao do contexto e recusa um diferente", () => {
+    expect(scopeArgs("Client", "findMany", { where: { tenantId: "t1" } }, "t1").where).toEqual({ tenantId: "t1" });
+    expect(() => scopeArgs("Client", "findMany", { where: { tenantId: "t2" } }, "t1")).toThrow(/tenantGuard/);
   });
 
-  it("accepts tenantId nested inside AND/OR, matching services/segments.ts buildGroupWhere output", async () => {
-    const { hook, txCalls } = makeFakeClient();
-
-    const orShape = { where: { tenantId: "t1", OR: [{ cidade: "São Paulo" }, { cidade: "Rio de Janeiro" }] } };
-    await runWithTenantContext("t1", () => hook({ model: "Client", operation: "findMany", args: orShape, query: jest.fn() }));
-
-    const nestedShape = { where: { AND: [{ tenantId: "t1" }, { faixaUso: "USO_71_99" }] } };
-    await runWithTenantContext("t1", () =>
-      hook({ model: "Client", operation: "findMany", args: nestedShape, query: jest.fn() })
-    );
-
-    expect(txCalls).toEqual([
-      { model: "client", operation: "findMany", args: orShape },
-      { model: "client", operation: "findMany", args: nestedShape },
+  it("preenche tenantId no create e em cada item do createMany", () => {
+    expect(scopeArgs("Notification", "create", { data: { message: "oi" } }, "t1").data).toEqual({ message: "oi", tenantId: "t1" });
+    expect(scopeArgs("Movement", "createMany", { data: [{ tipo: "a" }, { tipo: "b", tenantId: "t1" }] }, "t1").data).toEqual([
+      { tipo: "a", tenantId: "t1" },
+      { tipo: "b", tenantId: "t1" },
     ]);
   });
 
-  it("does not code-guard models outside the tenant-scoped list (Movement, MessageEvent, Tenant), but still wraps them in the RLS transaction", async () => {
-    const { hook, txCalls } = makeFakeClient();
-
-    for (const [model, delegateKey] of [
-      ["Movement", "movement"],
-      ["MessageEvent", "messageEvent"],
-      ["Tenant", "tenant"],
-    ]) {
-      const args = { where: { tipo: "utilizacao" } };
-      const result = await runWithTenantContext("t1", () => hook({ model, operation: "findMany", args, query: jest.fn() }));
-      expect(result).toEqual({ ok: true });
-      expect(txCalls).toContainEqual({ model: delegateKey, operation: "findMany", args });
-    }
+  it("recusa create com tenantId ou relação tenant de outro tenant", () => {
+    expect(() => scopeArgs("Notification", "create", { data: { tenantId: "t2" } }, "t1")).toThrow(/tenantGuard/);
+    expect(() => scopeArgs("Notification", "createMany", { data: [{ tenantId: "t1" }, { tenantId: "t2" }] }, "t1")).toThrow(/tenantGuard/);
+    expect(() => scopeArgs("Notification", "create", { data: { tenant: { connect: { id: "t2" } } } }, "t1")).toThrow(/tenantGuard/);
+    expect(scopeArgs("Notification", "create", { data: { tenant: { connect: { id: "t1" } } } }, "t1").data).toEqual({ tenant: { connect: { id: "t1" } } });
   });
 
-  it("leaves unguarded operations (findUnique, update, delete by id) alone at the code-level check, but still dispatches them inside the RLS transaction", async () => {
-    const { hook, txCalls } = makeFakeClient();
-
-    for (const operation of ["findUnique", "findUniqueOrThrow", "update", "delete", "upsert"]) {
-      const args = { where: { id: "c1" } };
-      const result = await runWithTenantContext("t1", () => hook({ model: "Client", operation, args, query: jest.fn() }));
-      expect(result).toEqual({ ok: true });
-      expect(txCalls).toContainEqual({ model: "client", operation, args });
-    }
+  it("upsert: where e create recebem o tenant; o update não pode trocar o tenant", () => {
+    const out = scopeArgs("Merchant", "upsert", { where: { id: "m1" }, create: { name: "x" }, update: { name: "y" } }, "t1");
+    expect(out).toEqual({ where: { id: "m1", tenantId: "t1" }, create: { name: "x", tenantId: "t1" }, update: { name: "y" } });
+    expect(() => scopeArgs("Merchant", "upsert", { where: { id: "m1" }, create: {}, update: { tenantId: "t2" } }, "t1")).toThrow(/tenantGuard/);
   });
 
-  it("does NOT throw on create when data includes tenantId, dispatches to tx", async () => {
-    const { hook, txCalls } = makeFakeClient();
-    const args = { data: { tenantId: "t1", message: "oi", type: "IMPORT_FAILED" } };
+  it("update não pode mover a linha para outro tenant", () => {
+    expect(() => scopeArgs("Client", "update", { where: { id: "c1" }, data: { tenantId: "t2" } }, "t1")).toThrow(/trocar o tenantId/);
+    expect(() => scopeArgs("Client", "updateMany", { where: {}, data: { tenantId: "t2" } }, "t1")).toThrow(/trocar o tenantId/);
+  });
 
-    const result = await runWithTenantContext("t1", () => hook({ model: "Notification", operation: "create", args, query: jest.fn() }));
+  it("Tenant: filtra pelo id e não deixa criar nem ler outro", () => {
+    expect(scopeArgs("Tenant", "findUnique", { where: { id: "t1" } }, "t1").where).toEqual({ id: "t1" });
+    expect(scopeArgs("Tenant", "findMany", {}, "t1").where).toEqual({ id: "t1" });
+    expect(() => scopeArgs("Tenant", "findUnique", { where: { id: "t2" } }, "t1")).toThrow(/tenantGuard/);
+    expect(() => scopeArgs("Tenant", "create", { data: { name: "x" } }, "t1")).toThrow(/tenantGuard/);
+    expect(() => scopeArgs("Tenant", "upsert", { where: { id: "t1" }, create: {}, update: {} }, "t1")).toThrow(/tenantGuard/);
+  });
 
-    expect(result).toEqual({ ok: true });
-    expect(txCalls).toEqual([{ model: "notification", operation: "create", args }]);
+  it("falha fechada para model ou operação desconhecidos", () => {
+    expect(() => scopeArgs("ModelNovo", "findMany", {}, "t1")).toThrow(/TENANT_SCOPED_MODELS/);
+    expect(() => scopeArgs("Client", "operacaoNova", {}, "t1")).toThrow(/operação desconhecida/);
+  });
+
+  it("não altera o objeto recebido", () => {
+    const args = { where: { id: "c1" } };
+    scopeArgs("Client", "findUnique", args, "t1");
+    expect(args).toEqual({ where: { id: "c1" } });
   });
 });
 
-describe("withCrossTenantAccess exemption", () => {
-  beforeEach(() => {
-    mockAdminCalls.length = 0;
+describe("hook $allOperations", () => {
+  it("sem contexto de tenant, recusa sem chegar ao banco", async () => {
+    const { result, query } = hook()("Client", "findMany", { where: { tenantId: "t1" } });
+    await expect(result).rejects.toThrow(/sem contexto de tenant/);
+    expect(query).not.toHaveBeenCalled();
   });
 
-  it("dispatches to the admin client (bypasses RLS entirely) for calls made inside its callback", async () => {
-    const { hook, txCalls } = makeFakeClient();
+  it("com contexto, despacha os argumentos já com o tenant", async () => {
+    const run = hook();
+    const out = await runWithTenantContext("t1", () => run("Client", "findUnique", { where: { id: "c1" } }).result);
+    expect(out).toEqual({ where: { id: "c1", tenantId: "t1" } });
+  });
+
+  it("o contexto assíncrono vale para o job que processa um tenant", async () => {
+    const run = hook();
+    const out = await runWithTenantContextAsync("t9", async () => {
+      await new Promise((r) => setTimeout(r, 1));
+      return run("Purchase", "count", {}).result;
+    });
+    expect(out).toEqual({ where: { tenantId: "t9" } });
+  });
+
+  it("withCrossTenantAccess roda a query como veio, sem injeção", async () => {
+    const run = hook();
     const args = { where: { active: true } };
-
-    const result = await withCrossTenantAccess(() =>
-      hook({ model: "SheetConnection", operation: "findMany", args, query: jest.fn() })
-    );
-
-    expect(result).toEqual(["admin-result"]);
-    expect(mockAdminCalls).toEqual([{ model: "sheetConnection", operation: "findMany", args }]);
-    // Never touches the RLS-restricted connection/transaction — a different DB role entirely.
-    expect(txCalls).toHaveLength(0);
+    const out = await withCrossTenantAccess(() => run("SheetConnection", "findMany", args).result);
+    expect(out).toBe(args);
   });
 
-  it("does not leak the bypass to calls outside the callback (doesn't accidentally exempt everything)", async () => {
-    const { hook } = makeFakeClient();
-
-    await withCrossTenantAccess(() =>
-      hook({ model: "SheetConnection", operation: "findMany", args: { where: { active: true } }, query: jest.fn() })
-    );
-
-    // A call made after the bypass callback has returned, on the same guarded model/op without
-    // tenantId, must still be rejected — the exemption must not persist globally.
-    await expect(
-      hook({ model: "SheetConnection", operation: "findMany", args: { where: { active: true } }, query: jest.fn() })
-    ).rejects.toThrow(/tenantGuard/);
-  });
-
-  it("does not exempt sibling async calls that aren't inside the bypass callback", async () => {
-    const { hook } = makeFakeClient();
-    const guardedCall = () =>
-      hook({ model: "Client", operation: "findMany", args: { where: { cidade: "x" } }, query: jest.fn() });
-
-    // Run a real bypassed call and an unrelated guarded call concurrently — AsyncLocalStorage
-    // must keep them isolated (the bypass must not "leak" across concurrent async contexts).
-    const [, rejection] = await Promise.all([
+  it("o desvio não vaza para chamadas fora do callback nem para chamadas concorrentes", async () => {
+    const run = hook();
+    const [, fora] = await Promise.all([
       withCrossTenantAccess(async () => {
         await new Promise((r) => setTimeout(r, 10));
         return "ok";
       }),
-      guardedCall().catch((e) => e),
+      run("Client", "findMany", {}).result.catch((e: Error) => e),
     ]);
+    expect((fora as Error).message).toMatch(/sem contexto de tenant/);
+    await expect(run("Client", "findMany", {}).result).rejects.toThrow(/sem contexto/);
+  });
 
-    expect(rejection).toBeInstanceOf(Error);
-    expect((rejection as Error).message).toMatch(/tenantGuard/);
+  it("contextos de tenants diferentes em paralelo não se misturam", async () => {
+    const run = hook();
+    const [a, b] = await Promise.all([
+      runWithTenantContextAsync("tA", async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        return run("Client", "findMany", {}).result;
+      }),
+      runWithTenantContextAsync("tB", () => run("Client", "findMany", {}).result),
+    ]);
+    expect(a.where.tenantId).toBe("tA");
+    expect(b.where.tenantId).toBe("tB");
   });
 });
 
-describe("runRawInTenantTx (SQL cru sob RLS)", () => {
-  function fakeRawClient() {
-    const executed: unknown[][] = [];
-    const tx = { $executeRaw: jest.fn(async (...args: unknown[]) => { executed.push(args); return 1; }) };
-    const client = { $transaction: jest.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx)) };
-    return { client, tx, executed };
-  }
+describe("checkRawTenant (SQL cru)", () => {
+  const sql = 'SELECT COUNT(*) FROM "Purchase" p WHERE p."tenantId" = $1 AND p."tipo" = $2';
 
-  it("recusa SQL cru sem contexto de tenant", async () => {
-    const { client } = fakeRawClient();
-    await expect(runRawInTenantTx(client, async () => "x")).rejects.toThrow(/no tenant context/);
-    expect(client.$transaction).not.toHaveBeenCalled();
+  it("recusa sem contexto", () => {
+    expect(() => checkRawTenant(sql, ["t1", "x"])).toThrow(/sem contexto/);
   });
 
-  it("seta app.tenant_id na mesma transaction antes de rodar o callback", async () => {
-    const { client, tx } = fakeRawClient();
-    const order: string[] = [];
-    tx.$executeRaw.mockImplementationOnce(async () => { order.push("set_config"); return 1; });
-    const result = await runWithTenantCtxForRaw("tenant-1", () =>
-      runRawInTenantTx(client, async () => { order.push("callback"); return 42; })
-    );
-    expect(result).toBe(42);
-    expect(order).toEqual(["set_config", "callback"]);
-    expect(client.$transaction).toHaveBeenCalledTimes(1);
+  it("exige o tenant do contexto como 1º parâmetro", () => {
+    expect(() => runWithTenantContext("t1", () => checkRawTenant(sql, ["t2", "x"]))).toThrow(/1º parâmetro/);
+    expect(() => runWithTenantContext("t1", () => checkRawTenant(sql, ["t1", "x"]))).not.toThrow();
+  });
+
+  it('exige o filtro "tenantId" = $1 no SQL', () => {
+    const semFiltro = 'SELECT COUNT(*) FROM "Purchase" WHERE "tipo" = $2 AND $1 IS NOT NULL';
+    expect(() => runWithTenantContext("t1", () => checkRawTenant(semFiltro, ["t1", "x"]))).toThrow(/precisa filtrar/);
+    expect(() => runWithTenantContext("t1", () => checkRawTenant('SELECT 1 FROM "Client" WHERE "tenantId" = $1', ["t1"]))).not.toThrow();
+    // $10 não é $1
+    expect(() => runWithTenantContext("t1", () => checkRawTenant('SELECT 1 WHERE "tenantId" = $10', ["t1"]))).toThrow(/precisa filtrar/);
+  });
+
+  it("dentro de withCrossTenantAccess não confere", async () => {
+    await expect(withCrossTenantAccess(async () => checkRawTenant("SELECT 1", []))).resolves.toBeUndefined();
+  });
+});
+
+describe("whereHasTenantId", () => {
+  it("acha tenantId no topo e dentro de AND/OR/NOT", () => {
+    expect(whereHasTenantId({ tenantId: "t1" })).toBe(true);
+    expect(whereHasTenantId({ AND: [{ OR: [{ NOT: { tenantId: "t1" } }] }] })).toBe(true);
+    expect(whereHasTenantId({ OR: [{ cidade: "x" }] })).toBe(false);
+    expect(whereHasTenantId(undefined)).toBe(false);
   });
 });

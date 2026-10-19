@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../generated/prisma/client";
 import { storeInboundMessage } from "./whatsappInbox";
 
 jest.mock("../middleware/audit", () => ({ logAudit: jest.fn(async () => undefined) }));

@@ -1,4 +1,4 @@
-import { User } from "@prisma/client";
+import { User } from "../generated/prisma/client";
 import { AppPrismaClient } from "../config/db";
 
 /**

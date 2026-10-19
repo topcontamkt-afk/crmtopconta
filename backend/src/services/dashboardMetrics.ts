@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../generated/prisma/client";
 import { AppPrismaClient } from "../config/db";
 
 /** Recortes que o dashboard aceita (todos opcionais). */

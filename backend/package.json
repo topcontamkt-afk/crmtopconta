@@ -11,14 +11,17 @@
     "postinstall": "prisma generate",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "prisma:seed": "ts-node prisma/seed.ts",
+    "prisma:seed": "npm run seed:sql && wrangler d1 execute crmtopconta-local --local --file=prisma/seed.sql",
     "test": "jest --runInBand",
     "cf:build-front": "npm --prefix ../frontend run build",
     "cf:dev": "npm run cf:build-front && wrangler dev",
-    "cf:deploy:hml": "npm run cf:build-front && wrangler deploy --env hml"
+    "cf:deploy:hml": "npm run cf:build-front && wrangler deploy --env hml",
+    "seed:sql": "ts-node -r ./test/prismaNode.cjs prisma/seed.ts",
+    "db:migrate:local": "wrangler d1 migrations apply crmtopconta-local --local"
   },
   "dependencies": {
-    "@prisma/client": "^5.19.1",
+    "@prisma/adapter-d1": "7.10.0",
+    "@prisma/client": "7.10.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -37,7 +40,9 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261003.1",
+    "@prisma/adapter-better-sqlite3": "7.10.0",
     "@types/bcryptjs": "^2.4.6",
+    "@types/better-sqlite3": "9.6.0",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/jest": "^29.5.12",
@@ -48,7 +53,7 @@
     "@types/supertest": "^7.2.1",
     "@types/ws": "^8.18.2",
     "jest": "^29.7.0",
-    "prisma": "^5.19.1",
+    "prisma": "7.10.0",
     "supertest": "^7.2.2",
     "ts-jest": "^29.2.5",
     "ts-node": "^10.9.2",
@@ -57,10 +62,13 @@
     "wrangler": "^4.147.0"
   },
   "allowScripts": {
-    "@prisma/client@5.22.0": true,
-    "@prisma/engines@5.22.0": true,
     "esbuild@0.28.1": true,
-    "prisma@5.22.0": true,
-    "workerd@1.20261001.1": true
+    "workerd@1.20261001.1": true,
+    "better-sqlite3@12.11.1": true,
+    "prisma@7.10.0": true,
+    "@prisma/engines@7.10.0": true
+  },
+  "overrides": {
+    "iconv-lite": "0.7.3"
   }
 }

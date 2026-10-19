@@ -93,7 +93,7 @@ describe("LGPD 01-04: listagem mínima, mascarada para VIEWER e com trilha em vo
   });
 
   it("detalhe: select sem cpfHash/renda e telefone mascarado para VIEWER", async () => {
-    db.client.findFirst.mockResolvedValue({ ...linha(1), email: "a@b.com", cpfMasked: "***.***.***-25", movements: [], messageEvents: [] });
+    db.client.findFirst.mockResolvedValue({ ...linha(1), email: "a@b.com", cpfMasked: "***.***.***-25", tags: [{ tag: "vip" }], movements: [], messageEvents: [] });
     const r = await request(app).get("/clients/c1").set("x-role", "VIEWER");
     expect(r.body.telefone).toBe("*********8888");
     expect(r.body.email).toBeUndefined();
@@ -190,7 +190,7 @@ describe("LGPD 03-03: correção de telefone e e-mail", () => {
   const existente = { id: "c1", tenantId: "t1", nome: "Maria", cidade: "Natal", telefone: "+5584988887777", email: null, autorizacaoComunicacao: true, camposCorrigidos: { nome: "2026-01-01T00:00:00.000Z" } };
 
   it("normaliza o telefone, grava a trava de cada campo que mudou e audita sem valores", async () => {
-    db.client.update.mockResolvedValue({ id: "c1" });
+    db.client.update.mockResolvedValue({ id: "c1", tags: [] });
     db.client.findFirst.mockResolvedValue({ ...existente, email: "maria@exemplo.com" });
     const r = await request(app).patch("/clients/c1").send({ telefone: "(84) 99999-8888", email: null, cidade: "Natal" });
     expect(r.status).toBe(200);
@@ -307,7 +307,7 @@ describe("LGPD 02-02 / 02-03: opt-out manual e reautorização", () => {
 
   it("tirar a autorização registra o opt-out do TELEFONE (canal MANUAL)", async () => {
     db.client.findFirst.mockResolvedValue(base);
-    db.client.update.mockResolvedValue({ id: "c1" });
+    db.client.update.mockResolvedValue({ id: "c1", tags: [] });
     const r = await request(app).patch("/clients/c1").send({ autorizacaoComunicacao: false });
     expect(r.status).toBe(200);
     expect(mockOptOutTel).toHaveBeenCalledWith(db, "t1", expect.objectContaining({ telefone: TEL, canal: "MANUAL" }));
@@ -317,7 +317,7 @@ describe("LGPD 02-02 / 02-03: opt-out manual e reautorização", () => {
   it("religar quem tem opt-out: OPERATOR 403, ADMIN sem motivo 400, com motivo remove a supressão e audita", async () => {
     const optado = { ...base, autorizacaoComunicacao: false, optOutAt: new Date("2026-09-01T00:00:00Z") };
     db.client.findFirst.mockResolvedValue(optado);
-    db.client.update.mockResolvedValue({ id: "c1" });
+    db.client.update.mockResolvedValue({ id: "c1", tags: [] });
     expect((await request(app).patch("/clients/c1").send({ autorizacaoComunicacao: true })).status).toBe(403);
     expect((await request(app).patch("/clients/c1").set("x-role", "ADMIN").send({ autorizacaoComunicacao: true })).status).toBe(400);
     expect(db.client.update).not.toHaveBeenCalled();

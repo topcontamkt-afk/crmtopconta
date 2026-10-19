@@ -43,6 +43,13 @@ npm run build       # tsc -b && vite build
 
 ## Architecture
 
+> **Branch `claude/cloudflare` (migração para Cloudflare Workers + D1 + R2, em andamento):** o banco deixou de
+> ser Postgres/Supabase. Schema SQLite com Prisma 7, client por adapter (`configureDatabase` em `config/db.ts`),
+> isolamento por tenant INJETADO pela extensão `config/tenantGuard.ts` (não há RLS), `tenantRaw` exige
+> `"tenantId" = $1`, migrations em `backend/migrations/` (wrangler). Onde o texto abaixo fala de RLS,
+> `DATABASE_URL`, `set_config` ou Vercel, vale o novo desenho: ver `docs/infra/cloudflare-ambientes.md`.
+
+
 ### Request flow / entry points
 
 `backend/src/app.ts` builds the Express app (middleware, all `/api/*` route

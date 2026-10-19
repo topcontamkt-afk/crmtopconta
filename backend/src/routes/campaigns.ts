@@ -167,7 +167,7 @@ router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const saved = d.rascunho ? [] : await prisma.campaignRecipient.findMany({ where: { tenantId, campaignId: campaign.id }, select: { id: true, clientId: true } });
   for (let i = 0; i < saved.length; i += 500) {
     await prisma.messageEvent.createMany({
-      data: saved.slice(i, i + 500).map((rec) => ({ campaignId: campaign.id, clientId: rec.clientId, recipientId: rec.id, channel: "WHATSAPP" as const, status: "FILA" as const })),
+      data: saved.slice(i, i + 500).map((rec) => ({ tenantId, campaignId: campaign.id, clientId: rec.clientId, recipientId: rec.id, channel: "WHATSAPP" as const, status: "FILA" as const })),
     });
   }
 

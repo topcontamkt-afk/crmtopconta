@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../generated/prisma/client";
 import { AppPrismaClient } from "../config/db";
 import { logAudit } from "../middleware/audit";
 import { InboundMessage, isOptOutMessage, phoneCandidates, previewOf } from "./whatsappPayload";

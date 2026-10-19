@@ -108,7 +108,7 @@ export async function getOrCacheMessageMedia(
 
   const fetched = await fetchMetaMedia(message.mediaId, token, fetchImpl);
   try {
-    await prisma.waMediaBlob.create({ data: { tenantId, messageId: message.id, mime: fetched.mime, size: fetched.data.length, data: fetched.data } });
+    await prisma.waMediaBlob.create({ data: { tenantId, messageId: message.id, mime: fetched.mime, size: fetched.data.length, data: new Uint8Array(fetched.data) } });
   } catch {
     // outra requisição guardou ao mesmo tempo (messageId é único): serve o que já baixamos
   }
