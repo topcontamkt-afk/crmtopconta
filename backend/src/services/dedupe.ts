@@ -51,6 +51,40 @@ export async function findExistingClient(
   return null;
 }
 
+/**
+ * Clientes já cadastrados para as linhas de UM lote, lidos de uma vez (por CPF e por telefone) no lugar de
+ * `findExistingClient` linha a linha: no Worker cada consulta é uma chamada ao D1, e 2 por linha estouram o limite
+ * por invocação num lote de importação. Mesma prioridade: CPF, depois telefone de cliente não anonimizado.
+ * `lembrar` registra o cliente criado ou alterado pelo próprio lote, para que uma linha repetida mais adiante o
+ * encontre como encontraria no banco.
+ */
+export async function clientesExistentes(prisma: AppPrismaClient, tenantId: string, linhas: { cpfHash: string; telefone?: string | null }[]) {
+  const cpfs = [...new Set(linhas.map((l) => l.cpfHash))];
+  const fones = [...new Set(linhas.map((l) => l.telefone).filter((t): t is string => !!t))];
+  const [porCpf, porFone] = await Promise.all([
+    cpfs.length ? prisma.client.findMany({ where: { tenantId, cpfHash: { in: cpfs } } }) : Promise.resolve([]),
+    // LGPD 03-01: o telefone nunca casa com cliente anonimizado
+    fones.length ? prisma.client.findMany({ where: { tenantId, telefone: { in: fones }, anonymizedAt: null } }) : Promise.resolve([]),
+  ]);
+  type Cliente = (typeof porCpf)[number];
+  const cpfMap = new Map<string, Cliente>();
+  const foneMap = new Map<string, Cliente>();
+  for (const c of porCpf) cpfMap.set(c.cpfHash, c);
+  for (const c of porFone) if (!foneMap.has(c.telefone)) foneMap.set(c.telefone, c);
+
+  return {
+    achar(row: { cpfHash: string; telefone?: string | null }): Cliente | null {
+      return cpfMap.get(row.cpfHash) ?? (row.telefone ? foneMap.get(row.telefone) : undefined) ?? null;
+    },
+    lembrar(c: Cliente) {
+      // a gravação pode ter trocado CPF ou telefone: tira as chaves antigas do mesmo cliente
+      for (const m of [cpfMap, foneMap]) for (const [k, v] of m) if (v.id === c.id) m.delete(k);
+      cpfMap.set(c.cpfHash, c);
+      if (!c.anonymizedAt && !foneMap.has(c.telefone)) foneMap.set(c.telefone, c);
+    },
+  };
+}
+
 /* ───────────────────────── supressão na importação (LGPD 03-01 / 02-02) ───────────────────────── */
 
 /**

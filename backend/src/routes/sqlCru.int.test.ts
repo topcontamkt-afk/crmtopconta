@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import request from "supertest";
 import type { Express } from "express";
-import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
+import { d1LikeAdapter } from "../config/d1Like";
 import { configureDatabase, prisma } from "../config/db";
 import { migrationStatements } from "../config/d1Migrations";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
@@ -34,7 +34,7 @@ const hojeBrt = new Date(agora - 3 * 3600_000); // calendário de Brasília (UTC
 const get = (url: string) => request(app).get(url).set("authorization", `Bearer ${token}`);
 
 beforeAll(async () => {
-  configureDatabase(() => new PrismaBetterSqlite3({ url: `file:${dbFile}` }));
+  configureDatabase(() => d1LikeAdapter(`file:${dbFile}`));
   app = (await import("../app")).default as Express;
   const { signToken } = await import("../middleware/auth");
 

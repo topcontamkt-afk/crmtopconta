@@ -1,7 +1,7 @@
 import { AppPrismaClient } from "../config/db";
 import { computeUsage } from "./usage";
 import { digitsOnly, hashCPF, isValidCPF, maskCPF, normalizePhone } from "./masking";
-import { decidirSupressao, findExistingClient, IncomingClientRow, liberarEliminacao, preservarCorrecoes, supressaoDaImportacao } from "./dedupe";
+import { clientesExistentes, decidirSupressao, IncomingClientRow, liberarEliminacao, preservarCorrecoes, supressaoDaImportacao } from "./dedupe";
 import { notify } from "./notifications";
 import { AVISO_BLOQUEADO, AVISO_ELIMINADO, snapshotBefore } from "./cardAccountImport";
 
@@ -164,6 +164,11 @@ export async function runImport(
     cpfHash: r.cpf && isValidCPF(r.cpf) ? hashCPF(r.cpf, tenant.cpfSalt) : null,
   }));
   const supressao = await supressaoDaImportacao(prisma, tenantId, contatos);
+  const existentes = await clientesExistentes(
+    prisma,
+    tenantId,
+    contatos.flatMap((c) => (c.cpfHash ? [{ cpfHash: c.cpfHash, telefone: c.telefone }] : []))
+  );
   const correcaoVence = (tenant as { correcaoManualVence?: boolean }).correcaoManualVence !== false;
   const lgpd = { eliminadosAPedido: 0, bloqueadosLgpd: 0, supressoesLiberadas: 0, camposPreservadosCorrecao: 0, clientesComCorrecaoPreservada: 0 };
 
@@ -215,7 +220,7 @@ export async function runImport(
         errors.push({ row: rowNumber, motivo: decisao.motivo === "BLOQUEADO" ? AVISO_BLOQUEADO : AVISO_ELIMINADO });
         continue;
       }
-      const existing = await findExistingClient(prisma, tenantId, incoming);
+      const existing = existentes.achar(incoming);
       // LGPD 03-04: titular com tratamento suspenso não é atualizado pela planilha
       if (existing?.bloqueadoLgpdAt) {
         lgpd.bloqueadosLgpd++;
@@ -283,7 +288,7 @@ export async function runImport(
           }
         }
         changes.push({ clientId: existing.id, kind: "ATUALIZADO", before: snapshotBefore(existing as any, update as any) });
-        await prisma.client.update({ where: { id: existing.id }, data: update });
+        existentes.lembrar(await prisma.client.update({ where: { id: existing.id }, data: update }));
         // Detecta renovação de limite (aumento de limiteTotal) para alimentar a automação
         // LIMITE_RENOVADO — não há campo de histórico de limite dedicado, então o próprio
         // aumento observado entre importações é registrado como Movement.
@@ -300,7 +305,8 @@ export async function runImport(
         }
         updated++;
       } else {
-        const created = await prisma.client.create({ data: { ...data, ...(decisao.semAutorizacao ? { optOutAt: new Date() } : {}) }, select: { id: true } });
+        const created = await prisma.client.create({ data: { ...data, ...(decisao.semAutorizacao ? { optOutAt: new Date() } : {}) } });
+        existentes.lembrar(created);
         changes.push({ clientId: created.id, kind: "CRIADO", before: null });
         added++;
       }

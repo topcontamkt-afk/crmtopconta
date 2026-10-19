@@ -147,6 +147,19 @@ function scopeWhere(model: string, operation: string, where: unknown, campo: str
   if (campo in w && w[campo] !== undefined && w[campo] !== tenantId) {
     throw guardError(model, operation, `"${campo}" do where não é o tenant do contexto`);
   }
+  // Chave única composta que já começa pelo tenant (`tenantId_cpfHash: { tenantId, cpfHash }`): conferida e
+  // mantida sem o `tenantId` solto ao lado. Com o campo extra, o Prisma deixa de fazer o upsert nativo
+  // (INSERT ... ON CONFLICT, 1 consulta) e cai em ler + gravar + ler numa transação (~5 consultas por linha),
+  // o que estoura o limite de consultas por invocação do D1 numa importação.
+  if (campo === "tenantId") {
+    const compostas = Object.keys(w).filter((k) => k.startsWith("tenantId_") && w[k] && typeof w[k] === "object");
+    for (const k of compostas) {
+      if ((w[k] as Record<string, unknown>).tenantId !== tenantId) {
+        throw guardError(model, operation, `"${k}.tenantId" do where não é o tenant do contexto`);
+      }
+    }
+    if (compostas.length) return w;
+  }
   return { ...w, [campo]: tenantId };
 }
 

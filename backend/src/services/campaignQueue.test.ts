@@ -207,7 +207,8 @@ describe("processQueueBatch — opt-out/supressão no envio (LGPD 02-03)", () =>
     const { prisma, statusDe } = fakeEnvio(eventos);
     await processQueueBatch(prisma, "camp1");
     expect(eventos.map((e) => statusDe(e.id)?.status)).toEqual(["ENVIADO", "ENVIADO", "ENVIADO"]);
-    expect(prisma.supressaoTitular.findMany).toHaveBeenCalledTimes(1);
+    // uma consulta por coluna (telefone e documento) para o lote todo, não uma por mensagem
+    expect(prisma.supressaoTitular.findMany).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -2,7 +2,7 @@ import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
+import { d1LikeAdapter } from "../config/d1Like";
 import { configureDatabase, prisma } from "../config/db";
 import { migrationStatements } from "../config/d1Migrations";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
@@ -27,7 +27,7 @@ let templateA = "";
 const bytes = (s: string) => new Uint8Array(Buffer.from(s));
 
 beforeAll(async () => {
-  configureDatabase(() => new PrismaBetterSqlite3({ url: `file:${dbFile}` }));
+  configureDatabase(() => d1LikeAdapter(`file:${dbFile}`));
   configureMediaStore(store);
   await withCrossTenantAccess(async () => {
     for (const stmt of migrationStatements()) await prisma.$executeRawUnsafe(stmt);

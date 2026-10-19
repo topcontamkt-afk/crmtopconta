@@ -207,7 +207,7 @@ function fakeCartoes(opts: { existentes?: any[]; supressoes?: any[]; tenant?: an
         supressoes.filter(
           (r) =>
             r.tenantId === where.tenantId &&
-            ((where.docHash?.in ?? []).includes(r.docHash) || (where.OR ?? []).some((o: any) => (o.phoneHash && o.phoneHash === r.phoneHash) || (o.docHash && o.docHash === r.docHash)))
+            ((where.docHash?.in ?? []).includes(r.docHash) || (where.phoneHash?.in ?? []).includes(r.phoneHash))
         )
       ),
       deleteMany: jest.fn(async ({ where }: any) => {

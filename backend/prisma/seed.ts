@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
-import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
+import { d1LikeAdapter } from "../src/config/d1Like";
 import bcrypt from "bcryptjs";
 import { PrismaClient } from "../src/generated/prisma/client";
 import { hashCPF, maskCPF, normalizePhone } from "../src/services/masking";
@@ -27,7 +27,7 @@ async function main() {
   sqlite.exec(migrationsSql());
   sqlite.close();
 
-  const prisma = new PrismaClient({ adapter: new PrismaBetterSqlite3({ url: `file:${dbFile}` }) }).$extends(derivedColumnsExtension);
+  const prisma = new PrismaClient({ adapter: d1LikeAdapter(`file:${dbFile}`) }).$extends(derivedColumnsExtension);
   try {
     const tenant = await prisma.tenant.create({ data: { name: "TopConta Demo" } });
 

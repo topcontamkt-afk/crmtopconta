@@ -138,7 +138,8 @@ export interface LoteSupressao {
   docsEliminadosPorTelefone: Map<string, Set<string | null>>;
 }
 
-const CHUNK = 1000;
+// `in` com `not: null` ao lado: o Prisma não divide sozinho, e o D1 aceita ~98 valores por consulta
+const CHUNK = 90;
 const chunks = <T>(xs: T[]) => Array.from({ length: Math.ceil(xs.length / CHUNK) }, (_, i) => xs.slice(i * CHUNK, (i + 1) * CHUNK));
 
 /**
@@ -176,14 +177,19 @@ export async function suprimidosEmLote(
     for (const c of canon) porHash.set(phoneHash(salt, c)!, c);
   }
   const hashes = [...porHash.keys()];
-  for (const parte of chunks([...hashes.map((h) => ({ phoneHash: h })), ...docs.map((d) => ({ docHash: d }))])) {
-    const rows = await prisma.supressaoTitular.findMany({ where: { tenantId, OR: parte }, select: { phoneHash: true, docHash: true, motivo: true } });
-    for (const r of rows) {
-      if (r.phoneHash && porHash.has(r.phoneHash)) marcarTelefone(porHash.get(r.phoneHash)!, r.motivo, r.docHash ?? null);
-      if (r.docHash && docs.includes(r.docHash)) {
-        out.docHashes.add(r.docHash);
-        if (!out.motivos.has(`doc:${r.docHash}`)) out.motivos.set(`doc:${r.docHash}`, r.motivo);
-      }
+  // Um `in` por coluna, nunca uma lista de OR: o Prisma divide um `in` simples no limite de parâmetros do D1
+  // (98 por consulta), mas não um OR com centenas de itens (P2029 a partir de ~100 contatos).
+  const select = { phoneHash: true, docHash: true, motivo: true } as const;
+  const [porTelefone, porDoc] = await Promise.all([
+    hashes.length ? prisma.supressaoTitular.findMany({ where: { tenantId, phoneHash: { in: hashes } }, select }) : Promise.resolve([]),
+    docs.length ? prisma.supressaoTitular.findMany({ where: { tenantId, docHash: { in: docs } }, select }) : Promise.resolve([]),
+  ]);
+  // a mesma linha pode vir nas duas consultas (telefone e documento); marcar de novo não muda nada
+  for (const r of [...porTelefone, ...porDoc]) {
+    if (r.phoneHash && porHash.has(r.phoneHash)) marcarTelefone(porHash.get(r.phoneHash)!, r.motivo, r.docHash ?? null);
+    if (r.docHash && docs.includes(r.docHash)) {
+      out.docHashes.add(r.docHash);
+      if (!out.motivos.has(`doc:${r.docHash}`)) out.motivos.set(`doc:${r.docHash}`, r.motivo);
     }
   }
 

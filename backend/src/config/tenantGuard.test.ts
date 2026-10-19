@@ -89,6 +89,16 @@ describe("scopeArgs: injeta o tenant do contexto", () => {
     expect(() => scopeArgs("Merchant", "upsert", { where: { id: "m1" }, create: {}, update: { tenantId: "t2" } }, "t1")).toThrow(/tenantGuard/);
   });
 
+  it("chave composta com o tenant (tenantId_x): conferida e mantida sem tenantId solto (upsert nativo)", () => {
+    const where = { tenantId_cpfHash: { tenantId: "t1", cpfHash: "h" } };
+    expect(scopeArgs("Client", "upsert", { where, create: { nome: "a" }, update: {} }, "t1").where).toEqual(where);
+    expect(scopeArgs("Client", "findUnique", { where }, "t1").where).toEqual(where);
+    expect(() => scopeArgs("Client", "findUnique", { where: { tenantId_cpfHash: { tenantId: "t2", cpfHash: "h" } } }, "t1")).toThrow(/tenantGuard/);
+    expect(() => scopeArgs("Client", "upsert", { where: { tenantId_cpfHash: { cpfHash: "h" } }, create: {}, update: {} }, "t1")).toThrow(/tenantGuard/);
+    // relação que só menciona tenantId não conta como chave composta: o tenant continua sendo injetado
+    expect(scopeArgs("Purchase", "findMany", { where: { client: { tenantId: "t1" } } }, "t1").where).toEqual({ client: { tenantId: "t1" }, tenantId: "t1" });
+  });
+
   it("update não pode mover a linha para outro tenant", () => {
     expect(() => scopeArgs("Client", "update", { where: { id: "c1" }, data: { tenantId: "t2" } }, "t1")).toThrow(/trocar o tenantId/);
     expect(() => scopeArgs("Client", "updateMany", { where: {}, data: { tenantId: "t2" } }, "t1")).toThrow(/trocar o tenantId/);

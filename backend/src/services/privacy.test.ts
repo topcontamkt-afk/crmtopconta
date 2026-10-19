@@ -24,7 +24,11 @@ function fakePrisma(opts: { supressoes?: any[]; clientesOptOut?: any[]; destinat
   const matches = (row: any, where: any) =>
     row.tenantId === where.tenantId &&
     (!where.motivo || row.motivo === where.motivo) &&
-    (where.OR ?? []).some((o: any) => (o.phoneHash && o.phoneHash === row.phoneHash) || (o.docHash && o.docHash === row.docHash));
+    (where.OR ?? [where]).some(
+      (o: any) =>
+        (o.phoneHash && (o.phoneHash.in ? o.phoneHash.in.includes(row.phoneHash) : o.phoneHash === row.phoneHash)) ||
+        (o.docHash && (o.docHash.in ? o.docHash.in.includes(row.docHash) : o.docHash === row.docHash))
+    );
   const prisma: any = {
     tenant: { findUnique: jest.fn(async () => ({ cpfSalt: SALT })) },
     supressaoTitular: {

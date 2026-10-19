@@ -20,11 +20,10 @@ function fake(existing: any, opts: { supressoes?: any[]; tenant?: any } = {}) {
     importJob: { create: jest.fn(async ({ data }: any) => ({ id: "job1", ...data })), update: jest.fn(async () => ({})) },
     importChange: { createMany: jest.fn(async ({ data }: any) => void changes.push(...data)) },
     client: {
-      findUnique: jest.fn(async () => existing),
-      findFirst: jest.fn(async () => null),
-      findMany: jest.fn(async () => []),
-      update: jest.fn(async (a: any) => void updates.push(a)),
-      create: jest.fn(async () => ({ id: "novo" })),
+      // clientesExistentes: busca por CPF devolve o existente; a por telefone (e a da supressão), nada
+      findMany: jest.fn(async ({ where }: any) => (existing && where.cpfHash?.in ? [{ cpfHash: hashCPF(CPF, SALT), ...existing }] : [])),
+      update: jest.fn(async (a: any) => (updates.push(a), { ...existing, ...a.data })),
+      create: jest.fn(async (a: any) => ({ id: "novo", ...a.data })),
     },
     movement: { create: jest.fn(async () => ({})) },
     notification: { create: jest.fn() },
@@ -104,7 +103,8 @@ describe("runImport (genérico) — LGPD", () => {
   it("o fallback por telefone nunca casa com cliente anonimizado", async () => {
     const f = fake(null);
     await runImport(f.prisma, "t1", [linha], "u1", "csv");
-    expect(f.prisma.client.findFirst.mock.calls[0][0].where).toMatchObject({ tenantId: "t1", anonymizedAt: null });
+    const porTelefone = f.prisma.client.findMany.mock.calls.map((c: any) => c[0].where).filter((w: any) => w.telefone?.in && "anonymizedAt" in w);
+    expect(porTelefone).toEqual([{ tenantId: "t1", telefone: { in: ["+5584999998888"] }, anonymizedAt: null }]);
   });
 });
 

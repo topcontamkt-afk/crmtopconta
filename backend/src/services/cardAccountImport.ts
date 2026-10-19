@@ -147,7 +147,7 @@ export interface PreparedRow {
   saldoDisponivel: number;
   valorUtilizado: number;
   statusConta: "ATIVO" | "INATIVO" | "BLOQUEADO";
-  data: Prisma.ClientCreateInput;
+  data: Prisma.ClientUncheckedCreateInput;
 }
 
 /** Fase 1 (sem banco): valida e transforma cada linha crua no formato de gravação. */
@@ -208,8 +208,10 @@ function prepareRow(rawIn: CardAccountRow, rowNumber: number, tenantCpfSalt: str
   const cpfHash = hashDocument(raw.documento!, tenantCpfSalt);
   const cpfMasked = maskDocument(raw.documento!);
 
-  const data: Prisma.ClientCreateInput = {
-    tenant: { connect: { id: tenantId } },
+  // `tenantId` escalar, não `tenant: { connect }`: escrita aninhada tira o upsert nativo do Prisma (vira ler +
+  // gravar + ler por linha, ~5 consultas ao D1 em vez de 1).
+  const data: Prisma.ClientUncheckedCreateInput = {
+    tenantId,
     externalId: raw.id_cartao?.trim() || undefined,
     nome: raw.nome!.trim(),
     telefone: phone,
@@ -308,8 +310,8 @@ interface AccountStateLike {
  * arquivo não informa fica como está; `valorAntecipado` nunca é tocado (não vem desta planilha).
  */
 export function planUpdate(p: PreparedRow, existing: ClientRow, presence: FieldPresence): PlannedUpdate {
-  const update: Prisma.ClientUpdateInput = { ...p.data };
-  delete (update as any).tenant;
+  const { tenantId: _tenantId, ...semTenant } = p.data;
+  const update = semTenant as Prisma.ClientUpdateInput;
   delete (update as any).valorAntecipado;
 
   const exLimite = Number(existing.limiteTotal);
