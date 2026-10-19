@@ -20,13 +20,12 @@ import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tena
  */
 
 /** Sincronização automática do Google Sheets (PRD — Must have), respeitando o cron por tenant. */
-export async function runSheetSyncJob() {
+export async function runSheetSyncJob(now: Date = new Date()) {
   // Genuinely cross-tenant by design: sweeps every tenant's active SheetConnection to check
   // whose cron is due right now. Each row is re-scoped to its own tenant below (conn.tenantId).
   const connections = await withCrossTenantAccess(() =>
     prisma.sheetConnection.findMany({ where: { active: true } })
   );
-  const now = new Date();
   let synced = 0;
 
   for (const conn of connections) {
@@ -59,13 +58,12 @@ export async function runSheetSyncJob() {
 }
 
 /** Recontagem periódica de segmentos dinâmicos (Fase 2), cada um no seu próprio refreshCron. */
-export async function runSegmentRefreshJob() {
+export async function runSegmentRefreshJob(now: Date = new Date()) {
   // Genuinely cross-tenant by design: sweeps every tenant's dynamic segments to check whose
   // refreshCron is due right now. Each row is re-scoped via buildSegmentWhere(segment.tenantId).
   const segments = await withCrossTenantAccess(() =>
     prisma.segmentDefinition.findMany({ where: { dynamic: true } })
   );
-  const now = new Date();
   let refreshed = 0;
 
   for (const segment of segments) {

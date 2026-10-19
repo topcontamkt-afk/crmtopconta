@@ -112,6 +112,21 @@ O deploy usa o token da conta compartilhada em `backend/.dev.cloudflare` (fora d
   números de dashboard, uso no período, perfis de renda, oportunidades e todos os públicos, comércio, ciclos,
   anonimização e limpar base. No `wrangler dev` (D1 local) todas essas telas respondem 200.
 
+## Crons (Fase 5)
+
+- Os 7 jobs diários do antigo `backend/vercel.json` viram 3 Cron Triggers (`triggers.crons` no `wrangler.jsonc`,
+  local e hml), porque o plano grátis dá **5 triggers para a conta inteira** (compartilhada): `0 3 * * *` retenção
+  + BI, `0 6 * * *` sync da planilha + foto do dashboard, `0 9-11 * * *` disparo (9h), automações (10h) e
+  segmentos (11h), todos em UTC e nos horários de antes. O `scheduled()` de `worker/index.ts` chama
+  `runCronTrigger` (`src/services/cronTriggers.ts`): em ordem, falha de um não impede o seguinte, e o horário
+  agendado vai para os jobs que comparam o cron de cada tenant. `/api/cron/*` (CRON_SECRET) continua para rodar à mão.
+- Testar no local: `npx wrangler dev --test-scheduled` e
+  `curl "localhost:8787/cdn-cgi/handler/scheduled?cron=0+9-11+*+*+*&time=<epoch em ms>"`.
+- **Limite de CPU**: no grátis cada invocação tem 10 ms de CPU, inclusive o cron; a retenção e a foto com a base
+  real não cabem nisso. Com o Workers Paid (até 15 min de CPU para cron) volta também a cadência curta do
+  disparo (a cada 5 min). O deploy da homologação com esta config registra 3 triggers na conta; a produção
+  precisaria de mais 3 (6 > 5 no grátis).
+
 ## Estado
 
 - **Fase 1** (19/10/2026): o `workers.dev` abre a tela de login e o `/api/health` responde 200.

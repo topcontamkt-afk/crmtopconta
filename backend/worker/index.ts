@@ -8,6 +8,7 @@ import { configureBackground } from "../src/config/background";
 import { configureMediaStore, r2MediaStore } from "../src/services/mediaStore";
 import { configureDatabase, prisma } from "../src/config/db";
 import { withCrossTenantAccess } from "../src/config/tenantGuard";
+import { runCronTrigger } from "../src/services/cronTriggers";
 import app from "../src/app";
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 
@@ -55,5 +56,11 @@ export default {
     if (pathname === "/api/health") return health(env);
     if (pathname.startsWith("/api/") || pathname.startsWith("/r/")) return express.fetch(request, env, ctx);
     return env.ASSETS.fetch(request);
+  },
+
+  // Cron Triggers do wrangler.jsonc. Aguarda os jobs até o fim (o runtime mantém a invocação viva enquanto a
+  // promessa não resolve); um job com erro não derruba os seguintes (ver runCronTrigger).
+  async scheduled(controller: { cron: string; scheduledTime: number }): Promise<void> {
+    await runCronTrigger(controller.cron, new Date(controller.scheduledTime));
   },
 };
