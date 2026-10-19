@@ -8,7 +8,7 @@ Na Fase 1 a API é só um esqueleto: `/api/health` (faz `SELECT 1` no D1) respon
 | Ambiente | Onde | Worker | D1 | R2 |
 |---|---|---|---|---|
 | Local | `wrangler dev` (Miniflare, nada na conta) | `crmtopconta-local` | simulado | simulado |
-| Homologação | `crmtopconta-hml.<subdomínio>.workers.dev` | `crmtopconta-hml` | `crmtopconta-hml` (ENAM, criado em 18/10/2026) | `crmtopconta-hml-media` (falta ativar o R2) |
+| Homologação | https://crmtopconta-hml.topcontamkt.workers.dev | `crmtopconta-hml` | `crmtopconta-hml` (ENAM, criado em 18/10/2026) | `crmtopconta-hml-media` (ENAM, 19/10/2026) |
 | Produção | domínio a definir | — | — | — |
 
 ## Comandos (`cd backend`)
@@ -22,10 +22,7 @@ npx tsc -p worker/tsconfig.json   # typecheck do Worker (fora do tsconfig do bac
 O deploy usa o token da conta compartilhada em `backend/.dev.cloudflare` (fora do git):
 `set -a; . ./.dev.cloudflare; set +a` antes do `wrangler`. Nunca commitar nem imprimir o token.
 
-## Antes do primeiro deploy da homologação (no painel da Cloudflare)
+## Estado
 
-1. Abrir **Workers & Pages** uma vez: isso cria o subdomínio `*.workers.dev` da conta.
-2. Ativar o **R2** (pede cartão mesmo no plano grátis) e depois criar o bucket `crmtopconta-hml-media`
-   e incluir o binding `MEDIA` em `env.hml`.
-
-Pronto (critério da Fase 1) quando o `workers.dev` abrir a tela de login e o `/api/health` responder 200.
+Fase 1 concluída em 19/10/2026: o `workers.dev` abre a tela de login e o `/api/health` responde 200 com
+`banco: ok` e `r2: true` (latência do D1 a partir do Worker ≈ 165 ms na primeira chamada).

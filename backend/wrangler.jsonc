@@ -34,8 +34,8 @@
       "vars": { "APP_ENV": "hml" },
       "d1_databases": [
         { "binding": "DB", "database_name": "crmtopconta-hml", "database_id": "9945cc44-3f12-404f-8505-96d68bd21a6e" }
-      ]
-      // R2 `crmtopconta-hml-media` entra aqui quando o R2 for ativado na conta.
+      ],
+      "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "crmtopconta-hml-media" }]
     }
   }
 }
