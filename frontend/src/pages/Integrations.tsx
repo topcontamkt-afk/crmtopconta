@@ -96,10 +96,15 @@ export default function Integrations() {
   async function syncNow() {
     setStatus("Sincronizando...");
     try {
-      const resp = await api<{ addedCount: number; updatedCount: number; errorCount: number }>(
+      const resp = await api<{ enfileirado?: boolean; addedCount: number; updatedCount: number; errorCount: number }>(
         "/imports/google-sheets",
         { method: "POST", body: { sheetId: extractSheetId(sheetId), range: sheetRange } }
       );
+      // No servidor da Cloudflare a planilha é importada em partes, em segundo plano.
+      if (resp.enfileirado) {
+        setStatus("Sincronização iniciada: a planilha é importada em partes, em segundo plano. Acompanhe em Importações.");
+        return;
+      }
       setStatus(`Sincronizado: ${resp.addedCount} novos, ${resp.updatedCount} atualizados, ${resp.errorCount} erros.`);
     } catch (e) {
       setStatus(e instanceof Error ? e.message : "Erro na sincronização");
@@ -129,7 +134,8 @@ export default function Integrations() {
             <p style={{ fontSize: 13, marginBottom: 0 }}>
               A sincronização com Google Sheets ainda não foi habilitada no servidor — falta configurar a
               variável <code>GOOGLE_SERVICE_ACCOUNT_JSON</code> (credencial de uma Service Account do Google
-              Cloud com a API do Google Sheets ativada) no projeto do back-end na Vercel. Até lá,
+              Cloud com a API do Google Sheets ativada) como segredo do Worker do back-end
+              (<code>wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON</code>). Até lá,
               "Sincronizar agora" vai retornar erro.
             </p>
           </div>

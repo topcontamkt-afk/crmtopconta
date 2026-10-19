@@ -1,6 +1,6 @@
 import { prisma } from "../config/db";
-import { runImport } from "./importService";
-import { DEFAULT_COLUMN_MAPPING, fetchSheetRows } from "./googleSheets";
+import { DEFAULT_COLUMN_MAPPING } from "./googleSheets";
+import { iniciarSyncPlanilha } from "./sheetSync";
 import { notify } from "./notifications";
 import { buildSegmentWhere } from "./segments";
 import { evaluateAutomationRules } from "./automationEngine";
@@ -34,11 +34,16 @@ export async function runSheetSyncJob(now: Date = new Date()) {
     // resto do trabalho roda com o contexto de tenant setado (não mais o desvio cross-tenant
     // acima), pela mesma conexão restrita (app_runtime) usada por qualquer request normal.
     try {
-      await runWithTenantContextAsync(conn.tenantId, async () => {
-        const rows = await fetchSheetRows(conn.sheetId, conn.sheetRange, (conn.columnMapping as any) || DEFAULT_COLUMN_MAPPING);
-        await runImport(prisma, conn.tenantId, rows, "scheduler", "google_sheets", conn.sheetId);
-        await prisma.sheetConnection.update({ where: { id: conn.id }, data: { lastSyncAt: now } });
-      });
+      // No Worker a planilha vai em páginas pela fila (services/sheetSync.ts); `lastSyncAt` é gravado na última.
+      await runWithTenantContextAsync(conn.tenantId, () =>
+        iniciarSyncPlanilha({
+          tenantId: conn.tenantId,
+          sheetId: conn.sheetId,
+          range: conn.sheetRange,
+          mapping: (conn.columnMapping as any) || DEFAULT_COLUMN_MAPPING,
+          triggeredBy: "scheduler",
+        })
+      );
       synced++;
     } catch (e: any) {
       console.error(`[scheduler] Falha ao sincronizar SheetConnection ${conn.id}:`, e);

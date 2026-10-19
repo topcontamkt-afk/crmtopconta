@@ -105,6 +105,8 @@ export interface ImportOptions {
   camposPresentes?: string[];
   loteId?: string;
   nomeArquivo?: string;
+  /** linha da planilha da 1ª linha de `rows` (padrão 2: linha 1 = cabeçalho); o sync em páginas passa a da página */
+  primeiraLinha?: number;
 }
 
 /** Campos que, quando o arquivo não os traz, NÃO podem ser zerados em clientes que já existem. */
@@ -174,7 +176,7 @@ export async function runImport(
 
   for (let i = 0; i < rows.length; i++) {
     const raw = rows[i];
-    const rowNumber = i + 2; // considerando linha 1 = cabeçalho da planilha
+    const rowNumber = i + (opts.primeiraLinha ?? 2); // linha 1 = cabeçalho da planilha
     const err = validateRow(raw, rowNumber);
     if (err) {
       errors.push(err);

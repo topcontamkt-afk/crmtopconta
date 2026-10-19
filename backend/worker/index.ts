@@ -9,12 +9,14 @@ import { configureMediaStore, r2MediaStore } from "../src/services/mediaStore";
 import { configureDatabase, prisma } from "../src/config/db";
 import { withCrossTenantAccess } from "../src/config/tenantGuard";
 import { runCronTrigger } from "../src/services/cronTriggers";
+import { configureSyncQueue, PaginaSync, tratarMensagemSync } from "../src/services/sheetSync";
 import app from "../src/app";
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 
 interface Env {
   DB: D1Database;
   MEDIA?: R2Bucket;
+  SYNC_QUEUE?: { send(body: PaginaSync): Promise<void> };
   ASSETS: { fetch(request: Request): Promise<Response> };
   APP_ENV: string;
 }
@@ -24,6 +26,10 @@ configureDatabase(() => new PrismaD1((env as any).DB));
 configureBackground(waitUntil);
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 configureMediaStore(r2MediaStore((env as any).MEDIA));
+// Sync da planilha em páginas (services/sheetSync.ts). Sem o binding, roda inteiro numa invocação.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const syncQueue = (env as any).SYNC_QUEUE as Env["SYNC_QUEUE"];
+configureSyncQueue(syncQueue ? { send: (msg) => syncQueue.send(msg) } : null);
 
 // O Express escuta numa porta "virtual" do workerd; o handler entrega cada Request a ela.
 const PORT = 3000;
@@ -62,5 +68,15 @@ export default {
   // promessa não resolve); um job com erro não derruba os seguintes (ver runCronTrigger).
   async scheduled(controller: { cron: string; scheduledTime: number }): Promise<void> {
     await runCronTrigger(controller.cron, new Date(controller.scheduledTime));
+  },
+
+  // Consumidor da fila do sync da planilha (max_batch_size 1: uma página por invocação, cada uma com o próprio teto
+  // de CPU e de consultas ao D1).
+  async queue(batch: { messages: readonly { body: unknown; attempts: number; ack(): void; retry(): void }[] }): Promise<void> {
+    for (const m of batch.messages) {
+      const r = await tratarMensagemSync(m.body as PaginaSync, m.attempts);
+      if (r === "ok") m.ack();
+      else m.retry();
+    }
   },
 };

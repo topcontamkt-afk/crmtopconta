@@ -18,11 +18,26 @@ import {
  * | `0 6 * * *`   | sync da planilha (06:00), foto do dashboard (06:30, depende do sync)  |
  * | `0 9-11 * * *`| 9h disparo, 10h automações, 11h segmentos dinâmicos (um por hora)     |
  *
+ * No Workers Paid (250 triggers por conta) voltam as cadências do servidor local (src/index.ts), em 4 triggers:
+ *
+ * | Trigger       | Jobs                                                                   |
+ * |---------------|------------------------------------------------------------------------|
+ * | `* * * * *`   | disparo, sync da planilha, segmentos dinâmicos (os dois últimos só     |
+ * |               | fazem algo no minuto do cron de cada tenant)                           |
+ * | `*\/5 * * * *` | automações                                                           |
+ * | `0 3 * * *`   | retenção, BI (o mesmo do grátis)                                       |
+ * | `30 6 * * *`  | foto do dashboard                                                      |
+ *
+ * O código entende os dois conjuntos; trocar de plano é só trocar `triggers.crons` no wrangler.jsonc
+ * (cronTriggers.test.ts confere que cada ambiente usa um deles por inteiro).
+ *
  * Os mesmos jobs seguem disponíveis em `/api/cron/*` (CRON_SECRET) para rodar à mão.
  */
 export type CronJob = "retention" | "bi-export" | "sheet-sync" | "snapshot" | "dispatch" | "automations" | "segments-refresh";
 
 export const CRON_TRIGGERS = ["0 3 * * *", "0 6 * * *", "0 9-11 * * *"] as const;
+/** Triggers para o Workers Paid (ver a tabela acima). */
+export const CRON_TRIGGERS_PAGO = ["* * * * *", "*/5 * * * *", "0 3 * * *", "30 6 * * *"] as const;
 
 const RUN: Record<CronJob, (now: Date) => Promise<unknown>> = {
   retention: () => runRetentionJob(),
@@ -47,6 +62,12 @@ export function jobsDoTrigger(cron: string, agendado: Date): CronJob[] {
       const job = POR_HORA[agendado.getUTCHours()];
       return job ? [job] : [];
     }
+    case "* * * * *":
+      return ["dispatch", "sheet-sync", "segments-refresh"];
+    case "*/5 * * * *":
+      return ["automations"];
+    case "30 6 * * *":
+      return ["snapshot"];
     default:
       return [];
   }

@@ -3,12 +3,18 @@
 Um só Worker serve a SPA (`frontend/dist`, assets com fallback de SPA) e a API (`/api/*` e `/r/*` passam
 primeiro pelo Worker). Configuração em `backend/wrangler.jsonc`, entrada em `backend/worker/index.ts`, que
 monta o mesmo Express do Node (`src/app.ts`) com `httpServerHandler` (`cloudflare:node`). `/api/health`
-responde direto, sem passar pelo Express. A homologação ainda roda a versão da Fase 2 (só o health).
+responde direto, sem passar pelo Express. A homologação roda a API inteira desde 19/10/2026 (Fase 5).
 
 | Ambiente | Onde | Worker | D1 | R2 |
 |---|---|---|---|---|
 | Local | `wrangler dev` (Miniflare, nada na conta) | `crmtopconta-local` | simulado | simulado |
 | Homologação | https://crmtopconta-hml.topcontamkt.workers.dev | `crmtopconta-hml` | `crmtopconta-hml` (ENAM, criado em 18/10/2026) | `crmtopconta-hml-media` (ENAM, 19/10/2026) |
+
+Homologação também tem a fila `crmtopconta-hml-sync` (sync da planilha) e 3 Cron Triggers. Segredos do Worker
+(`JWT_SECRET`, `CREDENTIALS_ENCRYPTION_KEY`, `CRON_SECRET`) foram gerados para ela e estão em
+`backend/.dev.vars.hml` (fora do git, só na máquina de quem fez o deploy), junto com a senha dos usuários do seed;
+para trocar: editar o arquivo e `npx wrangler secret bulk --env hml` com o JSON dos valores. Falta
+`GOOGLE_SERVICE_ACCOUNT_JSON` (`npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON --env hml`).
 | Produção | domínio a definir | — | — | — |
 
 ## Comandos (`cd backend`)
@@ -147,12 +153,65 @@ O deploy usa o token da conta compartilhada em `backend/.dev.cloudflare` (fora d
   campanha por planilha e desfazer importação; provados com 150 clientes em `src/routes/listasLongas.int.test.ts`.
 - **Testes com os limites**: os testes de integração e o seed usam `d1LikeAdapter` (`src/config/d1Like.ts`):
   o better-sqlite3 não tem esses limites, então antes os testes passavam e o Worker quebrava.
-- **Ainda não cabe no grátis**: o sync da planilha do Google importa a planilha inteira numa invocação (~1
-  consulta por linha: 5 mil linhas = ~5 mil consultas) e a CPU de 10 ms por invocação não comporta nem um lote.
-  Com o Workers Paid o lote cabe; o sync grande vai para uma Queue (Fase 5, precisa de OK para criar).
+- **Sync da planilha**: importar a planilha inteira numa invocação não cabe (~1 consulta por linha); vai em
+  páginas pela fila (ver "Fila do sync da planilha" abaixo).
 - **Linhas lidas/gravadas por dia** (grátis, cobrado desde 01/09/2026 para a conta toda): 5 milhões lidas e
   100 mil gravadas. Uma importação de 5 mil clientes grava ~4 linhas por cliente (cliente, histórico de saldo,
   desfazer, movimento) mais índices.
+
+## Fila do sync da planilha (Fase 5)
+
+`src/services/sheetSync.ts`. Queues valem no grátis desde 02/2026 (10 mil operações/dia, retenção de 24 h): cada
+página de 200 linhas custa ~3 operações (gravar, ler, apagar), ~3.300 páginas/dia.
+
+- "Sincronizar agora" (`POST /api/imports/google-sheets`) e o cron das 06:00 só põem a 1ª página na fila
+  (resposta 202 `{ enfileirado, loteId }`). O consumidor (`queue()` em `worker/index.ts`, `max_batch_size` 1)
+  confere que a planilha continua cadastrada no tenant, lê do Google só o cabeçalho e a página (`values:batchGet`,
+  `fetchSheetPage`), importa com o mesmo `loteId` e o número de linha da planilha, e põe a próxima se a página
+  veio cheia. Na última: `lastSyncAt`, ciclo das cidades e o AuditLog `IMPORT_GOOGLE_SHEETS` com os totais.
+- A mensagem leva só a posição (tenant, planilha, range, mapeamento, linha inicial) e contagens: nenhum dado da
+  planilha (CPF, telefone) fica na fila.
+- Erro: a fila tenta de novo (`max_retries` 3; reimportar a página é seguro, a última atualização ganha). Na 4ª
+  falha, notificação `IMPORT_FAILED` para o tenant e a mensagem sai. Teto de 250 páginas (50 mil linhas) por sync.
+- Diferença do sync de uma vez: "coluna ausente não zera" é decidido por página.
+- Sem fila (Node, testes) roda tudo numa vez, como antes. Testado na homologação em 19/10/2026: 202 em 1,25 s, 4
+  tentativas e a notificação (ainda sem a credencial do Google). Ficou cadastrada a planilha de mentira
+  `TESTE_FILA_HML` no tenant demo (cron `0 0 1 1 *`); trocar pela real em Integrações.
+
+## Onde o Worker roda (latência do D1)
+
+Cada consulta do Worker ao D1 da homologação levava **~170 ms** (`latenciaBancoMs`): o D1 fica no leste dos EUA
+(ENAM; não há região na América do Sul) e o Worker rodava no ponto da Cloudflare mais perto de quem acessa (Brasil).
+Na homologação o Worker agora roda perto do banco (`"placement": { "region": "aws:us-east-1" }`, vale em todos os
+planos; o cabeçalho `cf-placement: remote-IAD` confirma). Medido em 19/10/2026:
+
+| | Sem placement | Com placement |
+|---|---|---|
+| Consulta ao D1 (health) | 173 ms | 51 ms |
+| Importação de 100 linhas (cartões) | 5,5–6,2 s | 2,2–2,9 s |
+| Telas leves (login, listas) | — | 0,2–0,5 s mais lentas (ida e volta Brasil → EUA) |
+| Dashboard (overview) | — | um pouco mais rápido |
+
+O Smart Placement (`"mode": "smart"`) não serve: decide pelo tráfego e precisa de volume constante. Para a produção
+é decisão do Filipe (o mesmo trade-off; telas que fazem muitas consultas ganham, telas leves perdem um pouco).
+
+## Quando passar ao Workers Paid (US$ 5/mês)
+
+Hoje tudo roda no grátis. O plano é da conta (compartilhada): vale para todos os Workers dela. Na troca:
+
+1. **Crons**: trocar `triggers.crons` de cada ambiente no `wrangler.jsonc` por `CRON_TRIGGERS_PAGO`
+   (`src/services/cronTriggers.ts`: disparo, sync e segmentos a cada minuto, automações a cada 5 min, retenção/BI às
+   03:00, foto às 06:30). O código já entende os dois conjuntos; o teste confere que cada ambiente usa um inteiro.
+   No grátis só cabem 5 triggers na conta, por isso a produção ainda não tem os seus.
+2. **CPU**: acrescentar `"limits": { "cpu_ms": 60000 }` em cada ambiente (configuração só do plano pago). No grátis o
+   teto nominal é 10 ms; na homologação o p50 foi 14,5 ms e o p99 526 ms sem corte (a Cloudflare tolera picos), mas
+   importações grandes e a retenção com a base real podem ser cortadas.
+3. **Consultas por invocação**: 10.000 em vez de 1.000. O lote de importação (400 linhas, ~530 consultas) já cabe
+   nos dois; páginas maiores no sync (`SYNC_CHUNK`) passam a ser possíveis.
+4. **D1**: 25 bilhões de linhas lidas e 50 milhões gravadas por mês incluídas (o grátis dá 5 milhões lidas e 100 mil
+   gravadas por dia).
+5. **Produção**: criar Worker/D1/R2/fila `crmtopconta-prod*` (precisa de OK), decidir o placement e o domínio
+   (DNS só com OK).
 
 ## Estado
 
@@ -165,12 +224,7 @@ O deploy usa o token da conta compartilhada em `backend/.dev.cloudflare` (fora d
 - **Fase 4** (19/10/2026, só local, sem deploy): SQL cru no dialeto do SQLite; dashboard, oportunidades, uso no
   período, comércio e ciclos respondem no `wrangler dev`. 982 testes passando. Migrations `0002`, `0003` e `0004`
   aplicadas só no D1 local; na homologação, aplicar (`--remote`) antes do próximo deploy.
-
-## Decisão pendente para a Fase 3: onde o Worker roda (latência do D1)
-
-Cada consulta do Worker ao D1 da homologação leva **~150 ms** (`latenciaBancoMs` do health): o D1 fica nos EUA
-(ENAM; não há região na América do Sul) e o Worker roda no ponto da Cloudflare mais perto de quem acessa
-(Brasil). Uma tela que faz 5 consultas em sequência gastaria ~0,75 s só de ida e volta. A alternativa é o
-**Smart Placement** (`"placement": { "mode": "smart" }` no `wrangler.jsonc`): a Cloudflare passa a rodar o
-Worker perto do banco, e o custo vira uma ida e volta só (navegador → Worker, ~150 ms) por requisição.
-Medir na Fase 3, com a API real, as duas formas no login e no dashboard antes de decidir.
+- **Fase 5** (19/10/2026, homologação no ar, plano grátis): migrations `0002`–`0004` aplicadas no remoto, seed
+  (1 tenant, 3 usuários, 40 clientes), crons, limites do D1 no código, placement e fila do sync. Smoke na
+  homologação: login, dashboard, clientes, campanhas, cadeia do AuditLog válida, importação de 100 linhas, crons
+  por `/api/cron/*`, cabeçalho de template no R2 e a fila do sync. 1.020 testes passando.

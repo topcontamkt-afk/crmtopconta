@@ -122,10 +122,12 @@ export async function fetchSheetRows(
 
   const values = resp.values || [];
   if (values.length === 0) return [];
+  return mapearLinhas(values[0], values.slice(1), mapping);
+}
 
-  const header = values[0].map((h) => String(h).trim());
-  const dataRows = values.slice(1);
-
+/** Cabeçalho da planilha + linhas de dados → RawSheetRow[] pelo mapeamento (nome da coluna ou letra). */
+function mapearLinhas(cabecalho: unknown[], dataRows: unknown[][], mapping: ColumnMapping): RawSheetRow[] {
+  const header = cabecalho.map((h) => String(h).trim());
   const fieldByHeaderIndex: Record<number, string> = {};
   for (const [field, columnHeaderOrLetter] of Object.entries(mapping)) {
     let idx = header.indexOf(columnHeaderOrLetter);
@@ -143,6 +145,48 @@ export async function fetchSheetRows(
     });
     return row;
   });
+}
+
+/**
+ * Um range A1 da conexão (`A1:Z`, `Aba!A1:Z`, `'Minha aba'!B2:K500`) em dois: a linha de cabeçalho e uma página de
+ * `quantidade` linhas de dados a partir da `inicio`-ésima (0 = primeira linha depois do cabeçalho). Se o range tem
+ * linha final, a página não passa dela (devolve null quando já passou). Ver services/sheetSync.ts.
+ */
+export function paginaDoRange(range: string, inicio: number, quantidade: number): { cabecalho: string; pagina: string; primeiraLinha: number } | null {
+  const m = /^(?:(.+)!)?([A-Za-z]+)(\d+)?(?::([A-Za-z]+)(\d+)?)?$/.exec(range.trim());
+  if (!m) throw new Error(`Range da planilha inválido: ${range}`);
+  const aba = m[1] ? `${m[1]}!` : "";
+  const colIni = m[2].toUpperCase();
+  const linhaCab = m[3] ? Number(m[3]) : 1;
+  const colFim = (m[4] ?? m[2]).toUpperCase();
+  const linhaMax = m[5] ? Number(m[5]) : null;
+  const primeiraLinha = linhaCab + 1 + inicio;
+  if (linhaMax !== null && primeiraLinha > linhaMax) return null;
+  const ultima = Math.min(primeiraLinha + quantidade - 1, linhaMax ?? Number.MAX_SAFE_INTEGER);
+  return { cabecalho: `${aba}${colIni}${linhaCab}:${colFim}${linhaCab}`, pagina: `${aba}${colIni}${primeiraLinha}:${colFim}${ultima}`, primeiraLinha };
+}
+
+/**
+ * Uma página da planilha (cabeçalho + até `quantidade` linhas) numa chamada só (`values:batchGet`), para o sync em
+ * partes: cada invocação do Worker lê e importa só a sua página. `linhas` vazio = acabou.
+ */
+export async function fetchSheetPage(
+  sheetId: string,
+  range: string,
+  mapping: ColumnMapping,
+  inicio: number,
+  quantidade: number
+): Promise<{ linhas: RawSheetRow[]; primeiraLinha: number }> {
+  await assertPlanilhaExclusiva(prisma, sheetId);
+  const p = paginaDoRange(range, inicio, quantidade);
+  if (!p) return { linhas: [], primeiraLinha: 0 };
+  const qs = [p.cabecalho, p.pagina].map((r) => `ranges=${encodeURIComponent(r)}`).join("&");
+  const resp = await googleFetch<{ valueRanges?: { values?: unknown[][] }[] }>(SCOPE_LEITURA, `${planilha(sheetId)}/values:batchGet?${qs}`);
+  const [cab, pag] = resp.valueRanges ?? [];
+  const cabecalho = cab?.values?.[0];
+  const dados = pag?.values ?? [];
+  if (!cabecalho || dados.length === 0) return { linhas: [], primeiraLinha: p.primeiraLinha };
+  return { linhas: mapearLinhas(cabecalho, dados, mapping), primeiraLinha: p.primeiraLinha };
 }
 
 /**

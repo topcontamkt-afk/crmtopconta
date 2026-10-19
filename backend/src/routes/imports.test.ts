@@ -2,7 +2,7 @@ import express from "express";
 import request from "supertest";
 
 const importJobFindMany = jest.fn();
-jest.mock("../config/db", () => ({ prisma: { importJob: { findMany: (...a: any[]) => importJobFindMany(...a), findFirst: jest.fn(async () => null) }, importChange: { count: jest.fn(async () => 0) }, client: { count: jest.fn(async () => 0) } } }));
+jest.mock("../config/db", () => ({ prisma: { importJob: { findMany: (...a: any[]) => importJobFindMany(...a), findFirst: jest.fn(async () => null) }, importChange: { count: jest.fn(async () => 0) }, client: { count: jest.fn(async () => 0) }, sheetConnection: { updateMany: jest.fn(async () => ({ count: 1 })) } } }));
 jest.mock("../middleware/auth", () => ({
   requireAuth: (req: any, _res: any, next: any) => {
     req.user = { id: "u1", tenantId: "t1", role: (req.headers["x-role"] as string) || "OPERATOR" };
@@ -42,7 +42,8 @@ import router from "./imports";
 import { runCardAccountImport } from "../services/cardAccountImport";
 import { fetchSheetRows, resolveTenantSheet, SheetAccessError } from "../services/googleSheets";
 import { runImport } from "../services/importService";
-import { logTentativaAcesso } from "../middleware/audit";
+import { logAudit, logTentativaAcesso } from "../middleware/audit";
+import { configureSyncQueue } from "../services/sheetSync";
 
 const app = express();
 app.use(express.json());
@@ -124,6 +125,23 @@ describe("POST /imports/google-sheets (LGPD 06-02)", () => {
     expect(fetchSheetRows).toHaveBeenCalledWith("PLAN_A", "Base!A1:Z", { nome: "Nome" });
     expect((runImport as jest.Mock).mock.calls[0][1]).toBe("t1");
     expect(r.body.serviceAccountEmail).toBe("crm@projeto.iam.gserviceaccount.com");
+  });
+
+  it("com a fila do Worker: 202 com o lote, sem ler a planilha na request", async () => {
+    (resolveTenantSheet as jest.Mock).mockResolvedValue({ id: "c1", tenantId: "t1", sheetId: "PLAN_A", sheetRange: "Base!A1:Z", columnMapping: { nome: "Nome" } });
+    const enviadas: any[] = [];
+    configureSyncQueue({ send: async (m) => void enviadas.push(m) });
+    try {
+      const r = await request(app).post("/imports/google-sheets").send({});
+      expect(r.status).toBe(202);
+      expect(r.body).toMatchObject({ enfileirado: true, loteId: enviadas[0].loteId, serviceAccountEmail: "crm@projeto.iam.gserviceaccount.com" });
+      expect(enviadas[0]).toMatchObject({ tenantId: "t1", sheetId: "PLAN_A", range: "Base!A1:Z", inicio: 0, userId: "u1" });
+      expect(fetchSheetRows).not.toHaveBeenCalled();
+      expect(runImport).not.toHaveBeenCalled();
+      expect((logAudit as jest.Mock).mock.calls[0][0]).toMatchObject({ action: "IMPORT_GOOGLE_SHEETS_ENFILEIRADO", targetId: enviadas[0].loteId });
+    } finally {
+      configureSyncQueue(null);
+    }
   });
 
   it("VIEWER/ANALYST continuam sem poder importar", async () => {

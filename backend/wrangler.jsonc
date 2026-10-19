@@ -27,6 +27,12 @@
     { "binding": "DB", "database_name": "crmtopconta-local", "database_id": "00000000-0000-0000-0000-000000000000" }
   ],
   "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "crmtopconta-local-media" }],
+  // Sync da planilha Google em páginas de 200 linhas, uma por invocação (src/services/sheetSync.ts). Queues valem no
+  // plano grátis (10 mil operações/dia, ~3 por página). max_retries 3 = SYNC_MAX_TENTATIVAS - 1.
+  "queues": {
+    "producers": [{ "binding": "SYNC_QUEUE", "queue": "crmtopconta-local-sync" }],
+    "consumers": [{ "queue": "crmtopconta-local-sync", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
+  },
   // Os 7 jobs diários em 3 triggers (o plano grátis dá 5 para a conta toda): ver src/services/cronTriggers.ts.
   // No local: `wrangler dev --test-scheduled` e GET /__scheduled?cron=0+3+*+*+*
   "triggers": { "crons": ["0 3 * * *", "0 6 * * *", "0 9-11 * * *"] },
@@ -34,6 +40,10 @@
     "hml": {
       "name": "crmtopconta-hml",
       "workers_dev": true,
+      // Roda o Worker perto do D1 (ENAM, leste dos EUA) e não perto de quem acessa (Brasil): cada consulta ao
+      // banco deixa de pagar ~150 ms de ida e volta. Vale em todos os planos. Os assets da SPA continuam saindo
+      // do ponto mais próximo do navegador. O Smart Placement não serve aqui: precisa de tráfego constante.
+      "placement": { "region": "aws:us-east-1" },
       "preview_urls": false,
       "assets": {
         "directory": "../frontend/dist",
@@ -52,6 +62,10 @@
         { "binding": "DB", "database_name": "crmtopconta-hml", "database_id": "9945cc44-3f12-404f-8505-96d68bd21a6e" }
       ],
       "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "crmtopconta-hml-media" }],
+      "queues": {
+        "producers": [{ "binding": "SYNC_QUEUE", "queue": "crmtopconta-hml-sync" }],
+        "consumers": [{ "queue": "crmtopconta-hml-sync", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 3 }]
+      },
       "triggers": { "crons": ["0 3 * * *", "0 6 * * *", "0 9-11 * * *"] }
     }
   }

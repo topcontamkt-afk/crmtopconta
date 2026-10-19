@@ -16,6 +16,7 @@ jest.mock("./googleApi", () => ({
   googleFetch: jest.fn(async (scope: string, url: string, init: { method?: string; body?: unknown } = {}) => {
     const method = init.method ?? "GET";
     chamadas.push({ scope, method, url, body: init.body });
+    if (url.includes("values:batchGet")) return respostas.batch ?? { valueRanges: [] };
     if (url.includes("/values/") && method === "GET") return respostas.values ?? { values: [["nome"], ["Maria"]] };
     if (url.includes("?fields=")) return respostas.meta ?? { sheets: [{ properties: { title: "CRM_Export" } }] };
     return {};
@@ -26,7 +27,9 @@ import { prisma } from "../config/db";
 import {
   assertPlanilhaExclusiva,
   extractSheetId,
+  fetchSheetPage,
   fetchSheetRows,
+  paginaDoRange,
   resolveTenantSheet,
   SCOPE_ESCRITA,
   SCOPE_LEITURA,
@@ -139,5 +142,54 @@ describe("serviceAccountEmail / extractSheetId", () => {
   it("extrai o id do link", () => {
     expect(extractSheetId(" https://docs.google.com/spreadsheets/d/abc-_12/edit ")).toBe("abc-_12");
     expect(extractSheetId("abc")).toBe("abc");
+  });
+});
+
+describe("paginaDoRange (sync em páginas)", () => {
+  it("range padrão: cabeçalho na linha 1, páginas a partir da 2", () => {
+    expect(paginaDoRange("A1:Z", 0, 200)).toEqual({ cabecalho: "A1:Z1", pagina: "A2:Z201", primeiraLinha: 2 });
+    expect(paginaDoRange("A1:Z", 200, 200)).toEqual({ cabecalho: "A1:Z1", pagina: "A202:Z401", primeiraLinha: 202 });
+  });
+
+  it("mantém a aba (com aspas e espaço) e o cabeçalho fora da linha 1", () => {
+    expect(paginaDoRange("'Minha aba'!B3:K", 0, 10)).toEqual({ cabecalho: "'Minha aba'!B3:K3", pagina: "'Minha aba'!B4:K13", primeiraLinha: 4 });
+    expect(paginaDoRange("Base!a1:z", 0, 5)!.pagina).toBe("Base!A2:Z6");
+  });
+
+  it("respeita a linha final do range e devolve null depois dela", () => {
+    expect(paginaDoRange("A1:Z250", 200, 200)!.pagina).toBe("A202:Z250");
+    expect(paginaDoRange("A1:Z250", 400, 200)).toBeNull();
+  });
+
+  it("range de uma coluna só e range inválido", () => {
+    expect(paginaDoRange("A1", 0, 3)).toEqual({ cabecalho: "A1:A1", pagina: "A2:A4", primeiraLinha: 2 });
+    expect(() => paginaDoRange("Aba!", 0, 3)).toThrow(/inválido/);
+  });
+});
+
+describe("fetchSheetPage", () => {
+  beforeEach(() => {
+    chamadas.length = 0;
+    sheetFindMany.mockResolvedValue([conn("t1")]);
+  });
+
+  it("cabeçalho e página numa chamada só (batchGet, escopo de leitura) e mapeia pelo cabeçalho", async () => {
+    respostas.batch = { valueRanges: [{ values: [["telefone", "nome"]] }, { values: [["8499", "Ana"], ["8498", "Bia"]] }] };
+    const r = await fetchSheetPage("PLAN_A", "Base!A1:Z", { nome: "nome", telefone: "telefone" } as any, 200, 200);
+    expect(r).toEqual({ linhas: [{ telefone: "8499", nome: "Ana" }, { telefone: "8498", nome: "Bia" }], primeiraLinha: 202 });
+    expect(chamadas).toHaveLength(1);
+    expect(chamadas[0].scope).toBe(SCOPE_LEITURA);
+    expect(decodeURIComponent(chamadas[0].url)).toContain("values:batchGet?ranges=Base!A1:Z1&ranges=Base!A202:Z401");
+  });
+
+  it("página sem linhas = acabou", async () => {
+    respostas.batch = { valueRanges: [{ values: [["nome"]] }, {}] };
+    await expect(fetchSheetPage("PLAN_A", "A1:Z", { nome: "nome" } as any, 400, 200)).resolves.toEqual({ linhas: [], primeiraLinha: 402 });
+  });
+
+  it("planilha cadastrada em dois tenants: recusa antes de ler", async () => {
+    sheetFindMany.mockResolvedValue([conn("t1"), conn("t2")]);
+    await expect(fetchSheetPage("PLAN_A", "A1:Z", { nome: "nome" } as any, 0, 200)).rejects.toBeInstanceOf(SheetAccessError);
+    expect(chamadas).toHaveLength(0);
   });
 });

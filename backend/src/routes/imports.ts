@@ -8,7 +8,8 @@ import { runImport, RawSheetRow } from "../services/importService";
 import { runCardAccountImport, previewCardAccountImport, CardAccountRow, FieldPresence } from "../services/cardAccountImport";
 import { formatMismatch, FORMAT_LABEL, ImportFormat } from "../services/importFormat";
 import { assertUndoable, groupLotes, undoLoteBatch, UndoError } from "../services/importUndo";
-import { DEFAULT_COLUMN_MAPPING, fetchSheetRows, resolveTenantSheet, serviceAccountEmail, SheetAccessError } from "../services/googleSheets";
+import { DEFAULT_COLUMN_MAPPING, resolveTenantSheet, serviceAccountEmail, SheetAccessError } from "../services/googleSheets";
+import { iniciarSyncPlanilha } from "../services/sheetSync";
 import { notify } from "../services/notifications";
 import { importLimiter } from "../middleware/rateLimit";
 
@@ -195,11 +196,15 @@ router.post("/google-sheets", importLimiter, requireRole("ADMIN", "OPERATOR"), a
   const columnMapping = parsed.data.columnMapping || (conn.columnMapping as Record<string, string> | null) || DEFAULT_COLUMN_MAPPING;
 
   try {
-    const rows = await fetchSheetRows(sheetId, range, columnMapping);
-    const { importJobId, result } = await runImport(prisma, tenantId, rows, userId, "google_sheets", sheetId);
-    await logAudit({ tenantId, userId, action: "IMPORT_GOOGLE_SHEETS", target: "ImportJob", targetId: importJobId, details: result });
-    await refreshCiclos(tenantId);
+    const sync = await iniciarSyncPlanilha({ tenantId, sheetId, range, mapping: columnMapping, triggeredBy: userId, userId });
     // LGPD 06-02: devolve com qual Service Account a planilha precisa estar compartilhada (só leitura basta para importar).
+    if (sync.enfileirado) {
+      // Worker: a planilha vai em páginas pela fila; o AuditLog do resultado é gravado na última página (sheetSync.ts).
+      await logAudit({ tenantId, userId, action: "IMPORT_GOOGLE_SHEETS_ENFILEIRADO", target: "ImportLote", targetId: sync.loteId });
+      return res.status(202).json({ enfileirado: true, loteId: sync.loteId, serviceAccountEmail: contaServico });
+    }
+    const { importJobId, result } = sync;
+    await logAudit({ tenantId, userId, action: "IMPORT_GOOGLE_SHEETS", target: "ImportJob", targetId: importJobId, details: result });
     res.json({ importJobId, ...result, serviceAccountEmail: contaServico });
   } catch (e: any) {
     // Detalhe completo do erro só vai para o log do servidor e para a notificação interna do
