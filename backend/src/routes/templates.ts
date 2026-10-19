@@ -248,7 +248,7 @@ router.post("/:id/submit", requireRole("ADMIN", "OPERATOR"), async (req, res) =>
       headerHandle = await uploadTemplateExample(ctx.account.appId, ctx.token, Buffer.from(media.data), media.mime, media.filename);
       await prisma.messageTemplate.update({ where: { id: template.id }, data: { headerHandle } });
     }
-    const payload = buildCreatePayload({ ...template, quickReplies: (template.quickReplies as string[] | null) ?? [], buttons: (template.buttons as CtaButton[] | null) ?? [], category: template.category, headerHandle, linkBase: linkBase() });
+    const payload = buildCreatePayload({ ...template, quickReplies: (template.quickReplies as string[] | null) ?? [], buttons: (template.buttons as CtaButton[] | null) ?? [], category: template.category, headerHandle, linkBase: linkBase() ?? undefined });
     const created = await createMetaTemplate(ctx.wabaId!, ctx.token, payload);
     const updated = await prisma.messageTemplate.update({
       where: { id: template.id },

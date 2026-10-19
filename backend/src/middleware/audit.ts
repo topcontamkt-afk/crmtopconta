@@ -1,5 +1,5 @@
 import { prisma } from "../config/db";
-import { computeAuditHash, nextCreatedAt, prepareTenantChain } from "../services/auditIntegrity";
+import { computeAuditHash, ehConflitoDeElo, genesisHash, nextCreatedAt, prepareTenantChain } from "../services/auditIntegrity";
 
 type AuditParams = {
   tenantId: string;
@@ -11,29 +11,31 @@ type AuditParams = {
 };
 
 /**
- * LGPD 05-08: fila por tenant dentro do processo. Ler o topo da cadeia e gravar são duas operações; duas gravações
- * simultâneas do mesmo tenant liam o mesmo topo e bifurcavam a cadeia. Na Vercel uma instância atende requisições
- * em paralelo, então isso cobre o caso comum; entre instâncias diferentes a bifurcação ainda pode ocorrer e o
- * verificador a reconhece (verifyAuditChain, `bifurcacoes`).
+ * LGPD 05-08: quantas vezes reler o topo da cadeia quando outra gravação do mesmo tenant se prendeu ao mesmo elo
+ * (UNIQUE(tenantId, prevHash), ver services/auditIntegrity.ts). Cada conflito significa que alguém avançou a
+ * cadeia, então esgotar as tentativas só acontece com muitas gravações simultâneas do mesmo tenant.
  */
-const filaPorTenant = new Map<string, Promise<unknown>>();
+const MAX_TENTATIVAS = 8;
+
+const pausa = () => new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
 
 /** Registra uma ação no log de auditoria (LGPD/compliance): quem, o quê, quando, em qual registro. */
-export function logAudit(params: AuditParams): Promise<void> {
-  const anterior = filaPorTenant.get(params.tenantId) ?? Promise.resolve();
-  const atual = anterior.catch(() => undefined).then(() => gravarAudit(params));
-  filaPorTenant.set(params.tenantId, atual);
-  void atual.finally(() => {
-    if (filaPorTenant.get(params.tenantId) === atual) filaPorTenant.delete(params.tenantId);
-  }).catch(() => undefined);
-  return atual;
+export async function logAudit(params: AuditParams): Promise<void> {
+  for (let tentativa = 1; ; tentativa++) {
+    try {
+      return await gravarAudit(params);
+    } catch (e) {
+      if (!ehConflitoDeElo(e) || tentativa >= MAX_TENTATIVAS) throw e;
+      await pausa();
+    }
+  }
 }
 
 async function gravarAudit(params: AuditParams) {
   // LGPD 08-08: encadeia com a última entrada DO MESMO tenant (grava a âncora da cadeia por
   // tenant na primeira vez). Ver services/auditIntegrity.ts.
   const tip = await prepareTenantChain(params.tenantId);
-  const prevHash = tip.hash;
+  const prevHash = tip.hash ?? genesisHash(params.tenantId);
   // Cadeia de hash (achado #11, tamper-evidence): createdAt é gerado aqui em vez de deixar o
   // @default(now()) do schema preencher, para que o valor usado no hash seja exatamente o valor
   // persistido (e sempre posterior ao elo anterior, para a ordenação seguir a cadeia).

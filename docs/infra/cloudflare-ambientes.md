@@ -1,9 +1,9 @@
 # Cloudflare: ambientes, banco e deploy
 
 Um só Worker serve a SPA (`frontend/dist`, assets com fallback de SPA) e a API (`/api/*` e `/r/*` passam
-primeiro pelo Worker). Configuração em `backend/wrangler.jsonc`, entrada em `backend/worker/index.ts`.
-Até a Fase 3 a API é só um esqueleto: `/api/health` (consulta o D1 pelo Prisma) responde e o resto devolve
-`503 EM_MIGRACAO`.
+primeiro pelo Worker). Configuração em `backend/wrangler.jsonc`, entrada em `backend/worker/index.ts`, que
+monta o mesmo Express do Node (`src/app.ts`) com `httpServerHandler` (`cloudflare:node`). `/api/health`
+responde direto, sem passar pelo Express. A homologação ainda roda a versão da Fase 2 (só o health).
 
 | Ambiente | Onde | Worker | D1 | R2 |
 |---|---|---|---|---|
@@ -53,12 +53,37 @@ O deploy usa o token da conta compartilhada em `backend/.dev.cloudflare` (fora d
   `jest.config.js` (moduleNameMapper) e `test/prismaNode.cjs` (para `ts-node -r`) apontam para versões que o
   Node carrega. O `better-sqlite3` é nativo: depois de `npm install`, se faltar o binário, `npm rebuild better-sqlite3`.
 
+## Runtime (Fase 3)
+
+- **Nada no escopo global** que use timer, sorteio ou I/O (o workerd recusa): os limitadores do
+  `express-rate-limit` são criados na primeira requisição (`rateLimit` em `middleware/rateLimit.ts`) e o
+  `node-cron` só existe no servidor Node (`src/index.ts`).
+- **IP de quem chama**: só `CF-Connecting-IP` (`ipDoCliente` em `middleware/audit.ts`); `X-Forwarded-For` o
+  cliente forja.
+- **Trabalho depois da resposta**: `background(rotulo, promessa)` (`src/config/background.ts`); o Worker
+  registra o `waitUntil`, senão a promessa é cancelada quando a resposta sai.
+- **Cadeia da auditoria sem fila em memória**: `UNIQUE(tenantId, prevHash)` no `AuditLog` (migration `0002`);
+  duas gravações que leem o mesmo topo não bifurcam, a segunda falha e `logAudit` relê e tenta de novo (até 8
+  vezes). A 1ª entrada do tenant aponta para `GENESIS:{tenantId}`. Provado em `middleware/audit.int.test.ts`
+  (20 gravações simultâneas) e no `wrangler dev` (15 edições em paralelo: cadeia válida, 0 bifurcações). O
+  Prisma registra cada conflito no log como `Error in performIO ... UNIQUE constraint failed`: é esperado.
+- **URLs públicas** só de `PUBLIC_BACKEND_URL` (vars do wrangler por ambiente) e `LINK_BASE_URL`
+  (`src/config/publicUrl.ts`); sem elas as telas avisam em vez de gerar endereço da Vercel. A assinatura do
+  Twilio é conferida contra `PUBLIC_BACKEND_URL` + caminho.
+- **Envio simulado** só com `MESSAGING_MODE=mock` (local e homologação, no `wrangler.jsonc`), no lugar do
+  antigo "NODE_ENV diferente de production".
+- **QR code do 2FA** em SVG (o PNG dependia de canvas/zlib do Node).
+
 ## Estado
 
 - **Fase 1** (19/10/2026): o `workers.dev` abre a tela de login e o `/api/health` responde 200.
 - **Fase 2** (19/10/2026): schema no D1 (local e homologação, `0001_init`, 29 tabelas), Prisma 7 + guard no
   Worker, seed local, 946 testes passando. Na homologação: bundle de 1,25 MB compactado (limite do grátis:
   3 MB), inicialização de 20 ms, sem erro de CPU no plano grátis.
+- **Fase 3, em andamento** (só local, sem deploy): a API inteira roda no `wrangler dev` (login, 2FA, clientes,
+  etiquetas, segmentos, usuários, relatório do titular, auditoria). Ainda falham com 500 as telas que usam SQL
+  cru do Postgres (dashboard, oportunidades, uso no período, comércio, ciclos), que é a Fase 4. Migration
+  `0002_auditoria_elo_unico` aplicada só no D1 local; na homologação, aplicar antes do próximo deploy.
 
 ## Decisão pendente para a Fase 3: onde o Worker roda (latência do D1)
 

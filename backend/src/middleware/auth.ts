@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
+import { background } from "../config/background";
 import { env } from "../config/env";
 import { runWithTenantContext } from "../config/tenantGuard";
 import { logAcessoNegado } from "./audit";
@@ -35,7 +36,7 @@ export function requireRole(...roles: Array<"ADMIN" | "OPERATOR" | "ANALYST" | "
   return (req: Request, res: Response, next: NextFunction) => {
     if (!req.user || !roles.includes(req.user.role)) {
       // LGPD 05-03: tentativa de ação acima do papel fica consultável na auditoria (não derruba a resposta)
-      void logAcessoNegado(req.user, req.method, req.originalUrl, roles);
+      background("auditoria de acesso negado", logAcessoNegado(req.user, req.method, req.originalUrl, roles));
       return res.status(403).json({ error: "Permissão insuficiente para esta ação" });
     }
     next();

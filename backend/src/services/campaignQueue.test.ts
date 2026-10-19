@@ -265,7 +265,7 @@ describe("buildAudience — público exclui bloqueio e supressão (LGPD 02-03)",
 describe("provedores do tenant (LGPD 06-01)", () => {
   const OLD = { ...process.env };
   beforeEach(() => {
-    process.env.NODE_ENV = "production";
+    delete process.env.MESSAGING_MODE;
     process.env.TWILIO_ACCOUNT_SID = "AC_GLOBAL";
     process.env.TWILIO_AUTH_TOKEN = "tok";
     process.env.TWILIO_FROM_NUMBER = "+15550000000";
@@ -278,7 +278,7 @@ describe("provedores do tenant (LGPD 06-01)", () => {
     process.env = OLD;
   });
 
-  it("em produção, tenant sem canal próprio: disparo bloqueado com aviso claro, fila intacta, nada pela conta global", async () => {
+  it("sem MESSAGING_MODE=mock, tenant sem canal próprio: disparo bloqueado com aviso claro, fila intacta, nada pela conta global", async () => {
     const fetchSpy = jest.spyOn(global, "fetch" as any).mockImplementation(async () => {
       throw new Error("não deveria chamar a rede");
     });
@@ -313,8 +313,8 @@ describe("provedores do tenant (LGPD 06-01)", () => {
     expect(await hasRealWhatsApp(prisma, "tB")).toBe(true);
   });
 
-  it("fora de produção, sem nada configurado, cai no mock (só simula)", async () => {
-    process.env.NODE_ENV = "test";
+  it("MESSAGING_MODE=mock, sem nada configurado, cai no mock (só simula)", async () => {
+    process.env.MESSAGING_MODE = "mock";
     const { prisma, statusDe } = fakeEnvio([{ id: "e1", clientId: "c1", client: liberado(), recipient: null, variant: "A" }]);
     await processQueueBatch(prisma, "camp1");
     expect(statusDe("e1")).toMatchObject({ status: "ENVIADO", provider: "mock" });

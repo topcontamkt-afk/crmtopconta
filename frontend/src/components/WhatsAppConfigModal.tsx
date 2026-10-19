@@ -17,7 +17,7 @@ export interface WhatsAppConfig {
     lastCheckOk: boolean | null;
     lastCheckMessage: string | null;
   } | null;
-  webhookUrl: string;
+  webhookUrl: string | null;
   apiVersion: string;
 }
 
@@ -173,7 +173,7 @@ export default function WhatsAppConfigModal({ onClose, onChanged }: { onClose: (
             <div className="seg-field">
               <label>URL de Callback</label>
               <span className="seg-hint" style={{ margin: "0 0 6px" }}>Cole em WhatsApp → Configuração → Webhook</span>
-              {cfg ? <Copiavel valor={cfg.webhookUrl} /> : "…"}
+              {!cfg ? "…" : cfg.webhookUrl ? <Copiavel valor={cfg.webhookUrl} /> : <span className="seg-hint">Endereço público do sistema não configurado (PUBLIC_BACKEND_URL).</span>}
             </div>
             <div className="seg-field">
               <label>Token de Verificação</label>

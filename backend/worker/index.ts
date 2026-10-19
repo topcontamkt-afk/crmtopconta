@@ -1,9 +1,10 @@
 // Entrada do Worker. A SPA sai direto dos assets; aqui só chega /api/* e /r/* (run_worker_first),
 // que vão para o mesmo Express de sempre (src/app.ts) via `httpServerHandler` (nodejs_compat).
 // O banco é o Prisma 7 + D1 com o isolamento por tenant (src/config/db.ts).
-import { env } from "cloudflare:workers";
+import { env, waitUntil } from "cloudflare:workers";
 import { httpServerHandler } from "cloudflare:node";
 import { PrismaD1 } from "@prisma/adapter-d1";
+import { configureBackground } from "../src/config/background";
 import { configureDatabase, prisma } from "../src/config/db";
 import { withCrossTenantAccess } from "../src/config/tenantGuard";
 import app from "../src/app";
@@ -18,6 +19,7 @@ interface Env {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 configureDatabase(() => new PrismaD1((env as any).DB));
+configureBackground(waitUntil);
 
 // O Express escuta numa porta "virtual" do workerd; o handler entrega cada Request a ela.
 const PORT = 3000;

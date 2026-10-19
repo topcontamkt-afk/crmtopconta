@@ -533,6 +533,10 @@ model AuditLog {
   hash      String?
 
   @@index([tenantId, createdAt])
+  // Um elo só tem um filho: duas gravações que leram o mesmo topo da cadeia não bifurcam, a segunda
+  // falha e tenta de novo (middleware/audit.ts). A 1ª entrada do tenant aponta para GENESIS:{tenantId},
+  // porque NULL não conta como repetido no índice único.
+  @@unique([tenantId, prevHash])
 }
 
 model SheetConnection {

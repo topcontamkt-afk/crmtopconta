@@ -22,6 +22,7 @@ import { getOrCacheMessageMedia } from "../services/whatsappMedia";
 import { storeInboundMessage } from "../services/whatsappInbox";
 import { maybeAutoReply } from "../services/whatsappAutoReply";
 import { verifyTwilioSignature, verifyWhatsAppSignature } from "../services/webhookAuth";
+import { publicBackendUrl, publicUrlOfRequest } from "../config/publicUrl";
 import { webhookLimiter } from "../middleware/rateLimit";
 
 const router = Router();
@@ -112,7 +113,8 @@ router.get("/channels", async (req, res) => {
 /** LGPD 05-05: URL que o provedor de SMS deve chamar (status e respostas do titular); o segredo autentica o canal. */
 function smsWebhookUrl(c: { id: string; channel: string; provider: string; webhookSecret: string | null }): string | null {
   if (c.channel !== "SMS" || !c.webhookSecret) return null;
-  return `${publicBackend().replace(/\/+$/, "")}/api/integrations/webhooks/sms/${encodeURIComponent(c.provider)}/${c.id}/${c.webhookSecret}`;
+  const base = publicBackendUrl();
+  return base ? `${base}/api/integrations/webhooks/sms/${encodeURIComponent(c.provider)}/${c.id}/${c.webhookSecret}` : null;
 }
 
 const channelSchema = z.object({
@@ -164,8 +166,6 @@ router.delete("/channels/:id", requireRole("ADMIN"), async (req, res) => {
 // Credenciais cifradas por conta (WhatsAppAccount); nada disso volta para a tela além das "dicas" (4 últimos
 // caracteres). O token de verificação do webhook é gerado aqui e mostrado para colar na Meta.
 
-const publicBackend = () => process.env.PUBLIC_BACKEND_URL || "https://crmtopconta-backend.vercel.app";
-
 function presentWhatsApp(account: any) {
   return {
     account: account
@@ -185,7 +185,7 @@ function presentWhatsApp(account: any) {
           lastCheckMessage: account.lastCheckMessage,
         }
       : null,
-    webhookUrl: `${publicBackend()}/api/integrations/webhooks/whatsapp`,
+    webhookUrl: publicBackendUrl() ? `${publicBackendUrl()}/api/integrations/webhooks/whatsapp` : null,
     apiVersion: WHATSAPP_API_VERSION,
   };
 }
@@ -481,18 +481,9 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
  */
 const smsParsers = [webhookLimiter, express.urlencoded({ extended: false })];
 
-/** URL pública exatamente como a Twilio a assinou (atrás do proxy da Vercel: X-Forwarded-*). */
-function publicUrlOf(req: express.Request): string {
-  const forwardedProto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0];
-  const forwardedHost = req.headers["x-forwarded-host"] as string | undefined;
-  const proto = forwardedProto || req.protocol;
-  const host = forwardedHost || req.get("host") || "";
-  return `${proto}://${host}${req.originalUrl}`;
-}
-
 function twilioSignatureOk(req: express.Request, authToken: string | undefined): boolean {
   if (!authToken) return false;
-  return verifyTwilioSignature(publicUrlOf(req), req.body as Record<string, string>, req.headers["x-twilio-signature"] as string | undefined, authToken);
+  return verifyTwilioSignature(publicUrlOfRequest(req), req.body as Record<string, string>, req.headers["x-twilio-signature"] as string | undefined, authToken);
 }
 
 /** Aplica os eventos já autenticados. `tenantId` nulo = rota antiga sem tenant definido (só status, como antes). */

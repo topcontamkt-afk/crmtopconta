@@ -1,4 +1,4 @@
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -8,9 +8,10 @@ import bcrypt from "bcryptjs";
 import { PrismaClient } from "../src/generated/prisma/client";
 import { hashCPF, maskCPF, normalizePhone } from "../src/services/masking";
 import { computeUsage } from "../src/services/usage";
+import { migrationsSql } from "../src/config/d1Migrations";
 
 /**
- * Seed para o D1: monta os dados de demonstração com o Prisma num SQLite temporário (mesma migration
+ * Seed para o D1: monta os dados de demonstração com o Prisma num SQLite temporário (mesmas migrations
  * do D1) e grava `prisma/seed.sql` com os INSERTs, que o wrangler aplica (`npm run prisma:seed`).
  *
  * Usa o client sem a extensão de tenant (criar o próprio Tenant não tem contexto de tenant).
@@ -22,7 +23,7 @@ const dbFile = join(tmpdir(), `crm-seed-${randomUUID()}.sqlite`);
 
 async function main() {
   const sqlite = new Database(dbFile);
-  sqlite.exec(readFileSync(join(__dirname, "../migrations/0001_init.sql"), "utf8"));
+  sqlite.exec(migrationsSql());
   sqlite.close();
 
   const prisma = new PrismaClient({ adapter: new PrismaBetterSqlite3({ url: `file:${dbFile}` }) });

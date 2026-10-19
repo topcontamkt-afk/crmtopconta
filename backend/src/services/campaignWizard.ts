@@ -138,7 +138,9 @@ export async function validateWizard(
   }
 
   if (template && !zapi && trackedButtons(template).length > 0) {
-    add({ id: "link", nivel: "ok", titulo: "Link rastreado no botão", detalhe: `Cada cliente recebe um link único (${linkBase()}/r/…); o clique aparece no relatório.` });
+    const base = linkBase();
+    if (base) add({ id: "link", nivel: "ok", titulo: "Link rastreado no botão", detalhe: `Cada cliente recebe um link único (${base}/r/…); o clique aparece no relatório.` });
+    else add({ id: "link", nivel: "erro", titulo: "Link rastreado no botão", detalhe: "Falta o domínio dos links (LINK_BASE_URL ou PUBLIC_BACKEND_URL): o botão não teria para onde levar." });
   }
 
   // 2) conexão

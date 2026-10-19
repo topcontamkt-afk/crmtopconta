@@ -31,12 +31,14 @@ import { prisma } from "../config/db";
  *  tenant. Linhas gravadas por uma instância antiga durante o deploy, depois da âncora, aparecem
  *  como quebra.
  *
- * Sem lock no banco na leitura do último hash. LGPD 05-08: logAudit() serializa as gravações de cada tenant
- * dentro do processo (fila em middleware/audit.ts); entre instâncias diferentes duas gravações ainda podem ler o
- * mesmo prevHash e gerar uma bifurcação. verifyAuditChain() a reconhece: a linha cujo prevHash é o hash de uma
- * linha ANTERIOR já conferida (e não da imediatamente anterior) conta em `bifurcacoes` e a verificação continua,
- * para que uma bifurcação provocada por logins errados em paralelo não esconda uma alteração posterior. Apagar uma
- * linha do meio continua quebrando o elo (o filho aponta para um hash que não existe).
+ * Gravações simultâneas (LGPD 05-08): ler o topo e gravar são duas idas ao banco, e duas gravações do mesmo
+ * tenant podem ler o mesmo topo. Na Cloudflare não há fila em memória que sirva (cada requisição tem seu
+ * contexto de I/O e há várias instâncias), então quem impede a bifurcação é o banco: UNIQUE(tenantId, prevHash)
+ * no AuditLog. A segunda gravação falha (ehConflitoDeElo) e logAudit() relê o topo e tenta de novo. A primeira
+ * entrada do tenant aponta para GENESIS:{tenantId} (genesisHash) em vez de NULL, que o índice único não barra.
+ * verifyAuditChain() continua reconhecendo bifurcações antigas (`bifurcacoes`): a linha cujo prevHash é o hash de
+ * uma linha ANTERIOR já conferida conta ali e a verificação continua. Apagar uma linha do meio continua quebrando o
+ * elo (o filho aponta para um hash que não existe).
  *
  * LGPD 04-01 (cadeia x retenção): a anonimização precisa tirar PII de `details` de linhas antigas,
  * e reescrever `details` muda o hash de conteúdo daquela linha. Escolha: a redação é um EVENTO
@@ -57,6 +59,17 @@ export const ACAO_REDACAO_AUDITORIA = "AUDIT_REDACAO_LGPD";
 
 /** LGPD 08-08: ação da entrada-âncora que inicia a cadeia por tenant. */
 export const ANCORA_CADEIA_TENANT = "AUDIT_CADEIA_POR_TENANT";
+
+/** prevHash da primeira entrada da cadeia de um tenant (o índice único não barra NULL repetido). */
+export function genesisHash(tenantId: string): string {
+  return `GENESIS:${tenantId}`;
+}
+
+/** Outra gravação já se prendeu a este elo (UNIQUE(tenantId, prevHash)): reler o topo e tentar de novo. */
+export function ehConflitoDeElo(e: unknown): boolean {
+  const err = e as { code?: unknown; message?: unknown } | null;
+  return err?.code === "P2002" || /UNIQUE constraint failed/i.test(String(err?.message ?? ""));
+}
 
 export type AuditEntryForHash = {
   tenantId: string;
@@ -176,8 +189,16 @@ export async function prepareTenantChain(tenantId: string): Promise<ChainTip> {
         details: { legadoTotal, legadoUltimoHash: tip.hash },
         createdAt: nextCreatedAt(tip.createdAt),
       };
-      const hash = computeAuditHash(entry, tip.hash);
-      await prisma.auditLog.create({ data: { ...entry, details: entry.details as any, prevHash: tip.hash, hash } });
+      const prevHash = tip.hash ?? genesisHash(tenantId);
+      const hash = computeAuditHash(entry, prevHash);
+      try {
+        await prisma.auditLog.create({ data: { ...entry, details: entry.details as any, prevHash, hash } });
+      } catch (e) {
+        // outra requisição gravou a âncora (ou outra entrada) neste meio-tempo: segue a partir dela
+        if (!ehConflitoDeElo(e)) throw e;
+        tenantsComAncora.add(tenantId);
+        return lastTenantEntry(tenantId);
+      }
       tenantsComAncora.add(tenantId);
       return { hash, createdAt: entry.createdAt };
     }
@@ -268,7 +289,8 @@ export async function verifyAuditChain(tenantId: string): Promise<AuditChainVeri
       if (row.prevHash !== anterior) lacunasLegado++;
     } else if (i === ancoraIdx) {
       const d = (row.details ?? {}) as { legadoTotal?: unknown; legadoUltimoHash?: unknown };
-      if (row.prevHash !== anterior || d.legadoTotal !== fimLegado || (d.legadoUltimoHash ?? null) !== anterior) {
+      const prendeNoInicio = anterior === null && row.prevHash === genesisHash(tenantId);
+      if ((row.prevHash !== anterior && !prendeNoInicio) || d.legadoTotal !== fimLegado || (d.legadoUltimoHash ?? null) !== anterior) {
         return quebra(row, "ANCORA");
       }
     } else if (row.prevHash !== anterior) {

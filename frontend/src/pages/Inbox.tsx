@@ -6,7 +6,7 @@ import { useAuth } from "../context/AuthContext";
 interface Status {
   provider?: "META" | "ZAPI";
   account: { phoneNumberId: string; wabaId: string | null; displayName: string | null; displayPhone: string | null; active: boolean } | null;
-  webhookUrl: string;
+  webhookUrl: string | null;
   config: { appSecret: boolean; verifyToken: boolean; accessToken: boolean };
 }
 interface Conversa {

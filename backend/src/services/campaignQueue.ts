@@ -127,8 +127,9 @@ async function resolveProviders(
       if (sid && authToken && from) return [{ name: "twilio", adapter: new TwilioSMSAdapter(sid, authToken, from) }];
     }
   }
-  // Mock (só simula) fora de produção; em produção, sem provedor do tenant não há envio.
-  if (process.env.NODE_ENV === "production") return [];
+  // Mock (só simula) só com MESSAGING_MODE=mock (local/homologação); sem isso, sem provedor do tenant não há envio.
+  // Antes era "fora de produção" pelo NODE_ENV, que no Worker não diz em qual ambiente se está.
+  if (process.env.MESSAGING_MODE !== "mock") return [];
   return [{ name: "mock", adapter: channel === "WHATSAPP" ? new MockWhatsAppAdapter() : new MockSMSAdapter() }];
 }
 

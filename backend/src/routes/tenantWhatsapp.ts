@@ -6,6 +6,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { withCrossTenantAccess } from "../config/tenantGuard";
 import { credentialsOf, generateVerifyToken, hint } from "../services/whatsappAccount";
+import { publicBackendUrl } from "../config/publicUrl";
 import {
   encryptZapiCredentials,
   instanceIdOf,
@@ -26,8 +27,10 @@ import {
 const router = Router();
 router.use(requireAuth, requireRole("ADMIN"));
 
-const publicBackend = () => (process.env.PUBLIC_BACKEND_URL || "https://crmtopconta-backend.vercel.app").replace(/\/+$/, "");
-const webhookUrlOf = (secret: string | null) => (secret ? `${publicBackend()}/api/integrations/webhooks/zapi/${secret}` : null);
+const webhookUrlOf = (secret: string | null) => {
+  const base = publicBackendUrl();
+  return secret && base ? `${base}/api/integrations/webhooks/zapi/${secret}` : null;
+};
 
 const metaAccount = (tenantId: string) => prisma.whatsAppAccount.findFirst({ where: { tenantId, provider: "META" }, orderBy: { createdAt: "asc" } });
 const zapiAccount = (tenantId: string) => prisma.whatsAppAccount.findFirst({ where: { tenantId, provider: "ZAPI" }, orderBy: { createdAt: "asc" } });
@@ -176,6 +179,7 @@ router.post("/zapi/webhooks", async (req, res) => {
   const ctx = await credsOr409(tenantId, res);
   if (!ctx) return;
   const url = webhookUrlOf(ctx.account.verifyToken);
+  if (!publicBackendUrl()) return res.status(409).json({ error: "Endereço público do sistema não configurado (PUBLIC_BACKEND_URL)." });
   if (!url) return res.status(409).json({ error: "Salve a instância de novo para gerar o endereço do webhook." });
   try {
     await zapiSetWebhooks(ctx.creds, url);

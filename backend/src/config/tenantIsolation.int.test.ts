@@ -1,14 +1,15 @@
-import { readFileSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
 import { configureDatabase, prisma, tenantRaw } from "./db";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "./tenantGuard";
+import { migrationStatements } from "./d1Migrations";
 
 /**
- * Isolamento por tenant contra um SQLite de verdade, com a mesma migration do D1
- * (migrations/0001_init.sql) e o mesmo client do Prisma 7. Dois tenants com os mesmos tipos de dado;
+ * Isolamento por tenant contra um SQLite de verdade, com as mesmas migrations do D1
+ * (migrations/) e o mesmo client do Prisma 7. Dois tenants com os mesmos tipos de dado;
  * toda operação roda no contexto do tenant A e nunca pode ler, mudar ou apagar o que é do B.
  */
 
@@ -21,9 +22,8 @@ const asA = <T>(fn: () => Promise<T>) => runWithTenantContextAsync(tA, fn);
 
 beforeAll(async () => {
   configureDatabase(() => new PrismaBetterSqlite3({ url: `file:${dbFile}` }));
-  const sql = readFileSync(join(__dirname, "../../migrations/0001_init.sql"), "utf8");
   await withCrossTenantAccess(async () => {
-    for (const stmt of sql.split(/;\s*\n/).map((s) => s.trim()).filter(Boolean)) {
+    for (const stmt of migrationStatements()) {
       await prisma.$executeRawUnsafe(stmt);
     }
     const [a, b] = [await prisma.tenant.create({ data: { name: "A" } }), await prisma.tenant.create({ data: { name: "B" } })];

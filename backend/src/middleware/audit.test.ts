@@ -33,13 +33,13 @@ describe("logAudit — hash-chain por tenant", () => {
     mockPrisma.auditLog.findMany.mockResolvedValue([]);
   });
 
-  it("primeira entrada de um tenant novo: grava a âncora (prevHash null) e encadeia a entrada nela", async () => {
+  it("primeira entrada de um tenant novo: grava a âncora (prevHash GENESIS) e encadeia a entrada nela", async () => {
     mockPrisma.auditLog.findFirst.mockResolvedValue(null);
 
     await logAudit({ tenantId: "t1", userId: "u1", action: "TEST", target: "X", targetId: "x1", details: { a: 1 } });
 
     const [ancora, entrada] = mockPrisma.auditLog.create.mock.calls.map((c) => c[0].data);
-    expect(ancora).toMatchObject({ action: ANCORA_CADEIA_TENANT, prevHash: null, details: { legadoTotal: 0, legadoUltimoHash: null } });
+    expect(ancora).toMatchObject({ action: ANCORA_CADEIA_TENANT, prevHash: "GENESIS:t1", details: { legadoTotal: 0, legadoUltimoHash: null } });
     expect(entrada.action).toBe("TEST");
     expect(entrada.prevHash).toBe(ancora.hash);
     expect(typeof entrada.hash).toBe("string");
@@ -118,8 +118,8 @@ describe("logAudit — gravações simultâneas do mesmo tenant (LGPD 05-08)", (
     resetAnchorCache();
   });
 
-  it("enfileira por tenant: cada gravação encadeia na anterior em vez de bifurcar", async () => {
-    // banco falso: o topo é a última linha gravada; leitura e gravação demoram (como duas idas ao banco)
+  it("conflito no elo (UNIQUE tenantId+prevHash): relê o topo e tenta de novo, sem bifurcar", async () => {
+    // banco falso com o índice único: o topo é a última linha gravada; leitura e gravação demoram (duas idas ao banco)
     const linhas: any[] = [{ hash: "topo-0", createdAt: new Date("2026-01-01T00:00:00Z") }];
     const espera = () => new Promise((r) => setTimeout(r, 5));
     mockPrisma.auditLog.findFirst.mockImplementation(async ({ where }: any) => {
@@ -128,6 +128,7 @@ describe("logAudit — gravações simultâneas do mesmo tenant (LGPD 05-08)", (
     });
     mockPrisma.auditLog.create.mockImplementation(async ({ data }: any) => {
       await espera();
+      if (linhas.some((l) => l.prevHash === data.prevHash)) throw Object.assign(new Error("Unique constraint failed"), { code: "P2002" });
       linhas.push(data);
       return data;
     });
@@ -139,7 +140,14 @@ describe("logAudit — gravações simultâneas do mesmo tenant (LGPD 05-08)", (
     gravadas.forEach((l, i) => expect(l.prevHash).toBe(i === 0 ? "topo-0" : gravadas[i - 1].hash));
   });
 
-  it("uma gravação que falha não trava a fila do tenant", async () => {
+  it("outro erro do banco não é repetido", async () => {
+    tenantComAncora("h");
+    mockPrisma.auditLog.create.mockRejectedValue(new Error("db fora"));
+    await expect(logAudit({ tenantId: "t1", action: "X" })).rejects.toThrow("db fora");
+    expect(mockPrisma.auditLog.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("uma gravação que falha não impede a próxima", async () => {
     tenantComAncora("h0");
     mockPrisma.auditLog.create.mockRejectedValueOnce(new Error("banco fora")).mockImplementation(async ({ data }: any) => data);
     await expect(logAudit({ tenantId: "t1", action: "A" })).rejects.toThrow("banco fora");
