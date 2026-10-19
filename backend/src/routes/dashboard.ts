@@ -10,6 +10,7 @@ import { limiteRange, isPerfilRenda, LIMITE_MAXIMO, LIMITE_TETO, PERFIL_LABELS, 
 import { Router } from "express";
 import { z } from "zod";
 import { prisma, tenantRaw } from "../config/db";
+import { contarEmPartes } from "../config/d1Partes";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { maskPhone } from "../services/masking";
@@ -1238,7 +1239,7 @@ router.get("/audiencia", async (req, res) => {
 
   const ids = await opportunityAudience(prisma, tenantId, filters, tipo);
   const autorizados = ids.length
-    ? await prisma.client.count({ where: { tenantId, id: { in: ids }, autorizacaoComunicacao: true, optOutAt: null, ...ENVIAVEL_WHERE } })
+    ? await contarEmPartes({ tenantId, id: { in: ids }, autorizacaoComunicacao: true, optOutAt: null, ...ENVIAVEL_WHERE }, (where) => prisma.client.count({ where }))
     : 0;
   res.json({ tipo, total: ids.length, autorizados, clientIds: ids, mensagem: suggestedMessage(tipo) ?? null });
 });

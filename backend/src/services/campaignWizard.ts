@@ -1,5 +1,6 @@
 import { AppPrismaClient } from "../config/db";
 import { tenantRaw } from "../config/db";
+import { buscarEmPartes, contarEmPartes } from "../config/d1Partes";
 import { hasRealWhatsApp } from "./campaignQueue";
 import { avaliarFrescor, mensagemFrescor } from "./dataFreshness";
 import { ManualRowInput, prepareManual } from "./manualCampaign";
@@ -192,7 +193,10 @@ export async function validateWizard(
     } else {
       const where = buildSegmentWhere(tenantId, filters);
       const eligible = { ...where, ...CONTATO_LIBERADO_WHERE, statusConta: { not: "BLOQUEADO" as const }, ...ENVIAVEL_WHERE };
-      [total, contatos] = await Promise.all([prisma.client.count({ where }), prisma.client.count({ where: eligible })]);
+      [total, contatos] = await Promise.all([
+        contarEmPartes(where, (w) => prisma.client.count({ where: w })),
+        contarEmPartes(eligible, (w) => prisma.client.count({ where: w })),
+      ]);
       add({ id: "publico", nivel: contatos > 0 ? "ok" : "erro", titulo: `${contatos} clientes elegíveis` });
       if (total > contatos) {
         add({ id: "excluidos", nivel: "ok", titulo: `${total - contatos} ficam de fora`, detalhe: "Opt-out, conta bloqueada, tratamento suspenso a pedido do titular ou sem limite (comércio credenciado) são excluídos automaticamente." });
@@ -201,16 +205,13 @@ export async function validateWizard(
       // dedupe: quem já recebeu este mesmo texto na janela
       if (template && contatos > 0) {
         const cutoff = new Date(now.getTime() - DEDUPE_HORAS_PADRAO * 3600_000);
-        const ids = (await prisma.client.findMany({ where: eligible, select: { id: true }, take: 100_000 })).map((c) => c.id);
-        let repetidos = 0;
-        for (let i = 0; i < ids.length; i += 5000) {
-          const rec = await prisma.messageEvent.findMany({
-            where: { clientId: { in: ids.slice(i, i + 5000) }, queuedAt: { gte: cutoff }, status: { not: "CONTROLE" }, campaign: { tenantId, messageTemplate: template.body } },
-            select: { clientId: true },
-            distinct: ["clientId"],
-          });
-          repetidos += rec.length;
-        }
+        const ids = (await buscarEmPartes(eligible, (w) => prisma.client.findMany({ where: w, select: { id: true }, take: 100_000 }))).map((c) => c.id);
+        // `not` ao lado do `in`: o Prisma não divide, então vai em pedaços que cabem no D1
+        const repetidos = await contarEmPartes(
+          { clientId: { in: ids }, queuedAt: { gte: cutoff }, status: { not: "CONTROLE" as const }, campaign: { tenantId, messageTemplate: template.body } },
+          async (w) => (await prisma.messageEvent.findMany({ where: w, select: { clientId: true }, distinct: ["clientId"] })).length,
+          "clientId"
+        );
         if (repetidos > 0) add({ id: "dedupe", nivel: "aviso", titulo: `${repetidos} já receberam este texto nas últimas ${DEDUPE_HORAS_PADRAO}h`, detalhe: "Eles são pulados no envio para não repetir a mensagem." });
       }
     }

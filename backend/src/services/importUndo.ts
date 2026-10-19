@@ -1,4 +1,5 @@
 import { AppPrismaClient } from "../config/db";
+import { contarEmPartes, partes } from "../config/d1Partes";
 
 /**
  * Desfazer um lote de importação de clientes. Cada cliente que a importação alterou ou criou deixou um
@@ -60,11 +61,12 @@ export async function assertUndoable(prisma: AppPrismaClient, tenantId: string, 
   const fim = new Date(Math.max(...jobs.map((j) => j.startedAt.getTime())));
   // Só a última: desfazer uma importação antiga passaria por cima do que as seguintes gravaram.
   const posterior = await prisma.importJob.findFirst({
-    where: { tenantId, formato: { in: UNDOABLE_FORMATS }, desfeitaEm: null, startedAt: { gt: fim }, id: { notIn: ids } },
+    // os jobs deste arquivo começaram até `fim`, então `gt` já os exclui (sem `notIn`, que não cabe no D1 com muitos jobs)
+    where: { tenantId, formato: { in: UNDOABLE_FORMATS }, desfeitaEm: null, startedAt: { gt: fim } },
     select: { id: true },
   });
   if (posterior) throw new UndoError(409, "Só dá para desfazer a última importação de clientes. Desfaça primeiro as mais recentes.", "NAO_E_A_ULTIMA");
-  const restantes = await prisma.importChange.count({ where: { tenantId, importJobId: { in: ids } } });
+  const restantes = await contarEmPartes({ tenantId, importJobId: { in: ids } }, (where) => prisma.importChange.count({ where }), "importJobId");
   if (restantes === 0) throw new UndoError(409, "Não há mais o estado anterior desta importação (guardamos por 30 dias).", "EXPIRADA");
   return { jobs, ids, inicio, restantes };
 }
@@ -72,7 +74,12 @@ export async function assertUndoable(prisma: AppPrismaClient, tenantId: string, 
 export async function undoLoteBatch(prisma: AppPrismaClient, tenantId: string, userId: string, loteId: string, limit = UNDO_BATCH): Promise<UndoResult> {
   const { ids, inicio } = await assertUndoable(prisma, tenantId, loteId);
 
-  const changes = await prisma.importChange.findMany({ where: { tenantId, importJobId: { in: ids } }, take: limit, orderBy: { id: "asc" } });
+  // `orderBy` não deixa o Prisma dividir a lista de jobs (arquivo grande): um pedaço de jobs por vez até `limit`
+  const changes: Awaited<ReturnType<typeof prisma.importChange.findMany>> = [];
+  for (const parte of partes(ids)) {
+    if (changes.length >= limit) break;
+    changes.push(...(await prisma.importChange.findMany({ where: { tenantId, importJobId: { in: parte } }, take: limit - changes.length, orderBy: { id: "asc" } })));
+  }
 
   // LGPD 04-04: desfazer nunca reidentifica. Quem foi anonimizado (ou bloqueado a pedido) depois da importação,
   // ou cujo documento de antes está suprimido por eliminação, não recebe o estado anterior de volta.
@@ -124,7 +131,7 @@ export async function undoLoteBatch(prisma: AppPrismaClient, tenantId: string, u
     await prisma.movement.deleteMany({ where: { clientId: { in: restoredClientIds }, tipo: "renovacao_limite", createdAt: { gte: inicio } } });
   }
 
-  const restantes = await prisma.importChange.count({ where: { tenantId, importJobId: { in: ids } } });
+  const restantes = await contarEmPartes({ tenantId, importJobId: { in: ids } }, (where) => prisma.importChange.count({ where }), "importJobId");
   const concluido = restantes === 0;
   if (concluido) {
     await prisma.accountSnapshot.deleteMany({ where: { tenantId, importJobId: { in: ids } } });

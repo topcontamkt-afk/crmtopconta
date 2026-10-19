@@ -1,4 +1,5 @@
 import { AppPrismaClient } from "../config/db";
+import { buscarEmPartes } from "../config/d1Partes";
 import { ChannelAdapter, SendResult } from "./channels/types";
 import { MockSMSAdapter, TwilioSMSAdapter, ZenviaSMSAdapter } from "./channels/sms";
 import { MockWhatsAppAdapter, WhatsAppCloudAdapter } from "./channels/whatsapp";
@@ -223,15 +224,17 @@ export async function buildAudience(prisma: AppPrismaClient, tenantId: string, c
     (campaign.segment?.filters as any) || (campaign.adHocFilters as any) || {};
   const where = buildSegmentWhere(tenantId, filters);
 
-  const clientes = await prisma.client.findMany({
-    where: {
+  // lista de clientes (dashboard, comércio, ciclo, automação) pode ter milhares de ids: em pedaços para o D1
+  const clientes = await buscarEmPartes(
+    {
       ...where,
       ...CONTATO_LIBERADO_WHERE,
-      statusConta: { not: "BLOQUEADO" },
+      statusConta: { not: "BLOQUEADO" as const },
       // sem limite = comércio credenciado, nunca é público de disparo de cartão
       ...ENVIAVEL_WHERE,
     },
-  });
+    (w) => prisma.client.findMany({ where: w })
+  );
   // LGPD 02-03: o pedido para parar vale pelo TELEFONE (outro cadastro com o mesmo número, contato de lista)
   return semSuprimidos(prisma, tenantId, clientes);
 }

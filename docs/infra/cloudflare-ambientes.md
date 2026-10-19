@@ -127,6 +127,33 @@ O deploy usa o token da conta compartilhada em `backend/.dev.cloudflare` (fora d
   disparo (a cada 5 min). O deploy da homologação com esta config registra 3 triggers na conta; a produção
   precisaria de mais 3 (6 > 5 no grátis).
 
+## Limites do D1 no código (Fase 5)
+
+- **Consultas por invocação**: cada consulta é uma subrequisição a serviço interno, até **1.000** por invocação
+  no grátis e 10.000 no pago (documentação de 10/2026; o "50 no grátis" do plano estava desatualizado). Um lote
+  de importação de 400 linhas fazia 2.027 (cartões), 1.628 (cartões, atualizando) e 1.215 (genérico); agora
+  faz 529, 560 e 479, e compras 89 (`src/routes/importQueries.int.test.ts` mede e falha acima de 1.000).
+  O que mudou: upsert nativo do Prisma nos cartões (`tenantId` escalar; `tenant: { connect }` é escrita aninhada
+  e vira ler + gravar + ler por linha), clientes existentes lidos em lote na importação genérica
+  (`clientesExistentes` em `dedupe.ts`) e o guard do tenant mantendo a chave `tenantId_x` sem `tenantId` solto.
+- **Parâmetros por consulta**: o D1 aceita ~100 e o adapter informa 98 ao Prisma. O Prisma 7.10 só divide
+  sozinho um `in` longo em `findMany`/`findFirst`/`updateMany`/`deleteMany` com UM `in`, sem `orderBy` e sem
+  `not`/`notIn`; `count`, `groupBy`, `aggregate`, `orderBy`, `not`, `notIn`, dois `in` ou OR montado a partir de
+  uma lista dão **P2029** a partir de ~98 valores (medido). Nesses casos: `src/config/d1Partes.ts`
+  (`dividirIn`/`buscarEmPartes`/`contarEmPartes` partem um `where` com `id: { in }` longo em pedaços de 90;
+  `partes` para laços), ordenar em JS ou trocar o OR por um `in` por coluna. SQL cru: lista como um parâmetro
+  JSON (`emLista`). Já corrigidos (auditoria dos 82 `in` do código): público por lista de clientes (campanha,
+  estimativa, assistente e dedupe, automação), "autorizados" do dashboard e do comércio, relatório da campanha,
+  campanha por planilha e desfazer importação; provados com 150 clientes em `src/routes/listasLongas.int.test.ts`.
+- **Testes com os limites**: os testes de integração e o seed usam `d1LikeAdapter` (`src/config/d1Like.ts`):
+  o better-sqlite3 não tem esses limites, então antes os testes passavam e o Worker quebrava.
+- **Ainda não cabe no grátis**: o sync da planilha do Google importa a planilha inteira numa invocação (~1
+  consulta por linha: 5 mil linhas = ~5 mil consultas) e a CPU de 10 ms por invocação não comporta nem um lote.
+  Com o Workers Paid o lote cabe; o sync grande vai para uma Queue (Fase 5, precisa de OK para criar).
+- **Linhas lidas/gravadas por dia** (grátis, cobrado desde 01/09/2026 para a conta toda): 5 milhões lidas e
+  100 mil gravadas. Uma importação de 5 mil clientes grava ~4 linhas por cliente (cliente, histórico de saldo,
+  desfazer, movimento) mais índices.
+
 ## Estado
 
 - **Fase 1** (19/10/2026): o `workers.dev` abre a tela de login e o `/api/health` responde 200.

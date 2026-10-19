@@ -1,4 +1,5 @@
 import { AppPrismaClient } from "../config/db";
+import { partes } from "../config/d1Partes";
 import { hashDocument, isValidDocument, maskDocument, normalizePhone } from "./masking";
 import { normalizeDocumentDigits, parseMoney } from "./purchaseParsing";
 import { phoneCandidates } from "./whatsappPayload";
@@ -106,13 +107,15 @@ export async function matchManualAudience(prisma: AppPrismaClient, tenantId: str
   const hashes = rows.map((r) => r.cpfHash).filter((h): h is string => !!h);
   const phoneVariants = [...new Set(rows.flatMap((r) => phoneCandidates(r.telefone)))];
 
-  for (let i = 0; i < hashes.length; i += 2000) {
-    const found = await prisma.client.findMany({ where: { tenantId, cpfHash: { in: hashes.slice(i, i + 2000) } }, select });
+  for (const parte of partes(hashes)) {
+    const found = await prisma.client.findMany({ where: { tenantId, cpfHash: { in: parte } }, select });
     for (const c of found) byCpf.set(c.cpfHash, c as C);
   }
-  for (let i = 0; i < phoneVariants.length; i += 2000) {
+  // `orderBy` impede o Prisma de dividir a lista no limite do D1: pedaços de 90 (cada telefone cai num só pedaço,
+  // então o mais recente por telefone continua certo)
+  for (const parte of partes(phoneVariants)) {
     const found = await prisma.client.findMany({
-      where: { tenantId, telefone: { in: phoneVariants.slice(i, i + 2000) } },
+      where: { tenantId, telefone: { in: parte } },
       select,
       orderBy: { updatedAt: "desc" },
     });
