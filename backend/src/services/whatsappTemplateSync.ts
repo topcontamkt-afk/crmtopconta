@@ -1,7 +1,7 @@
 import { AppPrismaClient } from "../config/db";
 import { explainTemplateIssue, listMetaTemplates, mapMetaStatus, MetaTemplate, TEMPLATE_CATEGORIES } from "./whatsappTemplates";
 import { TemplateEvent } from "./whatsappPayload";
-import { importMetaTemplate } from "./templateImport";
+import { importMetaTemplate, parseMetaDate } from "./templateImport";
 import { saveTemplateMedia } from "./mediaStore";
 
 /**
@@ -13,6 +13,7 @@ interface MetaState {
   reason?: string | null;
   category?: string;
   quality?: string;
+  updatedAt?: Date | null;
 }
 
 async function findLocal(prisma: AppPrismaClient, tenantId: string, ref: { id: string | null; name: string | null; language: string | null }) {
@@ -32,6 +33,7 @@ async function applyState(prisma: AppPrismaClient, template: { id: string; categ
     data.rejectionReason = s.status === "APPROVED" ? null : explainTemplateIssue(s.status, s.reason);
   }
   if (s.quality) data.qualityScore = s.quality;
+  if (s.updatedAt) data.metaUpdatedAt = s.updatedAt;
   // A Meta pode reclassificar (ex.: utilidade -> marketing). Categorias que não usamos (AUTHENTICATION) são ignoradas.
   if (s.category && (TEMPLATE_CATEGORIES as readonly string[]).includes(s.category) && s.category !== template.category) data.category = s.category;
   if (Object.keys(data).length === 0) return false;
@@ -97,7 +99,8 @@ async function importOne(prisma: AppPrismaClient, tenantId: string, m: MetaTempl
       metaName: m.name,
       metaStatus: m.status,
       qualityScore: m.quality_score?.score ?? null,
-      submittedAt: new Date(),
+      submittedAt: parseMetaDate(m.last_updated_time) ?? new Date(),
+      metaUpdatedAt: parseMetaDate(m.last_updated_time),
       rejectionReason: m.status === "APPROVED" ? null : explainTemplateIssue(m.status, m.rejected_reason),
     },
   });
@@ -143,6 +146,7 @@ export async function syncTemplatesFromMeta(
       reason: m.rejected_reason,
       category: m.category,
       quality: m.quality_score?.score,
+      updatedAt: parseMetaDate(m.last_updated_time),
     });
     if (changed) atualizados++;
   }

@@ -23,7 +23,7 @@ import {
   validateTemplate,
   variableOrder,
 } from "../services/whatsappTemplates";
-import { applyVariableMap, positionsIn, unmappedPositions, validateVariableMap } from "../services/templateImport";
+import { applyVariableMap, dataEnvioMeta, positionsIn, unmappedPositions, validateVariableMap } from "../services/templateImport";
 import { OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
 import { linkBase } from "../services/trackedLinks";
 import { deleteTemplateMedia, loadTemplateMedia, saveTemplateMedia } from "../services/mediaStore";
@@ -77,10 +77,12 @@ router.get("/", async (req, res) => {
       channel: channel ? (String(channel) as any) : undefined,
       status: status ? (String(status) as any) : undefined,
     },
-    orderBy: { updatedAt: "desc" },
     include: { media: { select: { mime: true, size: true, filename: true } } },
   });
-  res.json(templates.map(present));
+  // Mais recente primeiro, pela data em que foi para a Meta (empate: o nome, para a ordem não pular).
+  const comData = templates.map((t) => ({ t, em: dataEnvioMeta(t) }));
+  comData.sort((a, b) => b.em.getTime() - a.em.getTime() || a.t.name.localeCompare(b.t.name));
+  res.json(comData.map(({ t, em }) => ({ ...present(t), enviadoMetaEm: em.toISOString() })));
 });
 
 const ctaSchema = z.object({

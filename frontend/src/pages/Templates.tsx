@@ -6,7 +6,9 @@ import VariableMapEditor from "../components/campaign/VariableMapEditor";
 import { WaTemplate } from "../components/campaign/types";
 
 type Status = "RASCUNHO" | "PENDENTE_APROVACAO" | "APROVADO" | "REJEITADO";
-type Template = WaTemplate & { channel: "WHATSAPP" | "SMS"; status: Status; updatedAt: string };
+type Template = WaTemplate & { channel: "WHATSAPP" | "SMS"; status: Status; updatedAt: string; enviadoMetaEm?: string };
+
+const TAMANHOS_PAGINA = [10, 25, 50] as const;
 
 interface MetaStatus {
   configurado: boolean;
@@ -31,6 +33,12 @@ function textoDoErro(e: any): string {
   }
 }
 
+function dataCurta(iso?: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" }) + " " + d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+}
+
 function lerBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -52,6 +60,8 @@ export default function Templates() {
   const [categoria, setCategoria] = useState<"" | "MARKETING" | "UTILITY">("");
   const [status, setStatus] = useState<"" | Status>("APROVADO");
   const [busca, setBusca] = useState("");
+  const [pagina, setPagina] = useState(1);
+  const [porPagina, setPorPagina] = useState<number>(10);
   const [previa, setPrevia] = useState<Template | null>(null);
   const [mapaAberto, setMapaAberto] = useState<string | null>(null);
   const [smsAberto, setSmsAberto] = useState(false);
@@ -74,6 +84,12 @@ export default function Templates() {
     const q = busca.trim().toLowerCase();
     return templates.filter((t) => (!categoria || t.category === categoria) && (!status || t.status === status) && (!q || t.name.toLowerCase().includes(q) || t.body.toLowerCase().includes(q)));
   }, [templates, categoria, status, busca]);
+
+  const totalPaginas = Math.max(1, Math.ceil(lista.length / porPagina));
+  const paginaAtual = Math.min(pagina, totalPaginas);
+  const visiveis = useMemo(() => lista.slice((paginaAtual - 1) * porPagina, paginaAtual * porPagina), [lista, paginaAtual, porPagina]);
+  // filtro, busca ou tamanho novo voltam para a primeira página
+  useEffect(() => setPagina(1), [categoria, status, busca, porPagina]);
 
   async function acao(fn: () => Promise<unknown>, ok: string) {
     setBusy(true);
@@ -172,10 +188,10 @@ export default function Templates() {
       <div className="card" style={{ overflowX: "auto" }}>
         <table>
           <thead>
-            <tr><th>Nome</th><th>Status</th><th>Categoria</th><th>Conteúdo</th><th>Atualizado</th><th>Ações</th></tr>
+            <tr><th>Nome</th><th>Status</th><th>Categoria</th><th>Conteúdo</th><th>Enviado à Meta</th><th>Ações</th></tr>
           </thead>
           <tbody>
-            {lista.map((t) => (
+            {visiveis.map((t) => (
               <React.Fragment key={t.id}>
                 <tr>
                   <td>
@@ -200,7 +216,7 @@ export default function Templates() {
                   </td>
                   <td>{t.channel === "WHATSAPP" ? <span className="badge">{t.category === "UTILITY" ? "UTILIDADE" : "MARKETING"}</span> : "—"}</td>
                   <td><div className="tpl-content">{t.body}</div></td>
-                  <td style={{ whiteSpace: "nowrap", color: "var(--text-muted)", fontSize: 12 }}>{t.updatedAt ? new Date(t.updatedAt).toLocaleDateString("pt-BR") : ""}</td>
+                  <td style={{ whiteSpace: "nowrap", color: "var(--text-muted)", fontSize: 12 }}>{dataCurta(t.enviadoMetaEm ?? t.updatedAt)}</td>
                   <td style={{ whiteSpace: "nowrap" }}>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                       {t.channel === "WHATSAPP" && <button className="btn secondary" onClick={() => setPrevia(t)}>Pré-visualizar</button>}
@@ -237,6 +253,24 @@ export default function Templates() {
             )}
           </tbody>
         </table>
+        {lista.length > 0 && (
+          <div style={{ display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", padding: "10px 4px 2px" }}>
+            <span className="pd-hint">
+              {(paginaAtual - 1) * porPagina + 1}–{Math.min(paginaAtual * porPagina, lista.length)} de {lista.length} · mais recentes primeiro (data de envio à Meta)
+            </span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <label className="pd-hint">
+                Por página{" "}
+                <select value={porPagina} onChange={(e) => setPorPagina(Number(e.target.value))}>
+                  {TAMANHOS_PAGINA.map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
+              <button type="button" className="btn secondary" disabled={paginaAtual <= 1} onClick={() => setPagina(paginaAtual - 1)}>‹ Anterior</button>
+              <span className="pd-hint">Página {paginaAtual} de {totalPaginas}</span>
+              <button type="button" className="btn secondary" disabled={paginaAtual >= totalPaginas} onClick={() => setPagina(paginaAtual + 1)}>Próxima ›</button>
+            </div>
+          </div>
+        )}
       </div>
 
       {previa && (
