@@ -1,4 +1,4 @@
-import { applyVariableMap, guessVariable, importMetaTemplate, positionsIn, unmappedPositions, validateVariableMap } from "./templateImport";
+import { applyVariableMap, dataEnvioMeta, guessVariable, importMetaTemplate, parseMetaDate, positionsIn, unmappedPositions, validateVariableMap } from "./templateImport";
 import { templateParams, templatePreview, buildCreatePayload } from "./whatsappTemplates";
 import { costConfigFrom, DEFAULT_COSTS, estimateCost } from "./messageCost";
 
@@ -105,5 +105,21 @@ describe("custo estimado", () => {
   it("usa o que foi configurado", () => {
     const cfg = costConfigFrom({ custoMarketingUsd: 0.05, cambioUsdBrl: 5 });
     expect(estimateCost("MARKETING", cfg, 2).brl).toBe(0.25);
+  });
+});
+
+describe("data de envio à Meta", () => {
+  it("lê ISO e segundos desde 1970; vazio ou inválido vira null", () => {
+    expect(parseMetaDate("2026-10-18T12:00:00+0000")?.toISOString()).toBe("2026-10-18T12:00:00.000Z");
+    expect(parseMetaDate(1792324800)?.toISOString()).toBe("2026-10-18T12:00:00.000Z");
+    expect(parseMetaDate("1792324800")?.toISOString()).toBe("2026-10-18T12:00:00.000Z");
+    expect(parseMetaDate(undefined)).toBeNull();
+    expect(parseMetaDate("lixo")).toBeNull();
+  });
+  it("template nosso vale o envio; importado vale a data da Meta; sem elas, o cadastro", () => {
+    const criado = new Date("2026-10-21T10:00:00Z");
+    expect(dataEnvioMeta({ origin: "LOCAL", submittedAt: new Date("2026-10-05T00:00:00Z"), metaUpdatedAt: new Date("2026-10-06T00:00:00Z"), createdAt: criado }).toISOString()).toBe("2026-10-05T00:00:00.000Z");
+    expect(dataEnvioMeta({ origin: "META", submittedAt: criado, metaUpdatedAt: new Date("2026-09-01T00:00:00Z"), createdAt: criado }).toISOString()).toBe("2026-09-01T00:00:00.000Z");
+    expect(dataEnvioMeta({ origin: "LOCAL", createdAt: criado }).toISOString()).toBe(criado.toISOString());
   });
 });

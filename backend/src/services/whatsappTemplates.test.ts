@@ -169,6 +169,16 @@ describe("Graph API de templates", () => {
     expect(r.map((t) => t.id)).toEqual(["1", "2"]);
     expect(f).toHaveBeenCalledTimes(2);
   });
+  it("pede a data de cada template e, se a Meta recusar o campo, lista sem ele", async () => {
+    const f = jest
+      .fn()
+      .mockResolvedValueOnce(fail(400, { error: { code: 100, message: "Tried accessing nonexisting field (last_updated_time)" } }))
+      .mockResolvedValueOnce(ok({ data: [{ id: "1", name: "a", status: "APPROVED" }] }));
+    const r = await listMetaTemplates("W", "T", f as any);
+    expect(r.map((t) => t.id)).toEqual(["1"]);
+    expect((f.mock.calls[0] as any)[0]).toContain("last_updated_time");
+    expect((f.mock.calls[1] as any)[0]).not.toContain("last_updated_time");
+  });
   it("envia template com idioma e parâmetros do corpo", async () => {
     const f = jest.fn(async (_u: string, _i?: any) => ok({ messages: [{ id: "wamid.T" }] }));
     const id = await sendTemplateMessage("1055", "T", "5584999998888", "oferta_v1", "pt_BR", ["Maria", "R$ 1.000"], f as any);

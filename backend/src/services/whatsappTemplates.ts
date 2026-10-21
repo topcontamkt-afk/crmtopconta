@@ -287,6 +287,8 @@ export interface MetaTemplate {
   rejected_reason?: string;
   quality_score?: { score?: string };
   parameter_format?: string;
+  /** Data da última atualização na Meta (ISO ou segundos desde 1970), quando a Graph API devolve. */
+  last_updated_time?: string | number;
   components?: any[];
 }
 
@@ -298,14 +300,23 @@ export async function createMetaTemplate(wabaId: string, token: string | undefin
 
 /** Lista todos os templates da conta (segue a paginação, com teto de segurança). */
 export async function listMetaTemplates(wabaId: string, token: string | undefined, fetchImpl: FetchLike = fetch as any): Promise<MetaTemplate[]> {
-  const out: MetaTemplate[] = [];
-  let url: string | null = `${root(wabaId)}/message_templates?fields=id,name,status,category,language,rejected_reason,quality_score,parameter_format,components&limit=100`;
-  for (let page = 0; url && page < 10; page++) {
-    const j: any = await call(url, token, { method: "GET" }, fetchImpl);
-    out.push(...(j?.data ?? []));
-    url = j?.paging?.next ?? null;
+  const campos = "id,name,status,category,language,rejected_reason,quality_score,parameter_format,components";
+  // `last_updated_time` dá a data de cada template; se a Meta recusar o campo, lista sem ele (sem data, nada quebra).
+  for (const fields of [`${campos},last_updated_time`, campos]) {
+    const out: MetaTemplate[] = [];
+    try {
+      let url: string | null = `${root(wabaId)}/message_templates?fields=${fields}&limit=100`;
+      for (let page = 0; url && page < 10; page++) {
+        const j: any = await call(url, token, { method: "GET" }, fetchImpl);
+        out.push(...(j?.data ?? []));
+        url = j?.paging?.next ?? null;
+      }
+      return out;
+    } catch (e) {
+      if (fields === campos) throw e;
+    }
   }
-  return out;
+  return [];
 }
 
 export async function deleteMetaTemplate(wabaId: string, token: string | undefined, name: string, fetchImpl: FetchLike = fetch as any): Promise<void> {

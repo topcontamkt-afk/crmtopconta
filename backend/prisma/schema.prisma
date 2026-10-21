@@ -602,6 +602,8 @@ model MessageTemplate {
   metaStatus         String? // APPROVED | PENDING | REJECTED | PAUSED | DISABLED ...
   qualityScore       String? // GREEN | YELLOW | RED | UNKNOWN
   submittedAt        DateTime?
+  // Última atualização do template informada pela Meta (`last_updated_time`); data de referência dos importados.
+  metaUpdatedAt      DateTime?
   // Cabeçalho com imagem (único formato de cabeçalho que sabemos enviar). A imagem fica em TemplateMedia.
   headerFormat       String? // IMAGE
   headerHandle       String? // handle da Meta (upload resumível) usado como exemplo ao criar o template

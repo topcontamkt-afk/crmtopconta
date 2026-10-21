@@ -127,3 +127,27 @@ export function importMetaTemplate(m: MetaTemplate): ImportedTemplate {
     sendIssue: issues.length ? issues.join(" ") : null,
   };
 }
+
+/** Data da Meta (ISO ou segundos desde 1970) como Date; inválida ou ausente = null. */
+export function parseMetaDate(v: unknown): Date | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = typeof v === "number" ? v : /^\d+$/.test(String(v)) ? Number(v) : NaN;
+  const d = Number.isNaN(n) ? new Date(String(v)) : new Date(n < 1e11 ? n * 1000 : n);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+type DatasTemplate = { origin?: string | null; metaUpdatedAt?: Date | string | null; submittedAt?: Date | string | null; createdAt: Date | string };
+
+/**
+ * Data em que o template foi para a Meta, usada para ordenar a lista: o nosso vale o envio para aprovação
+ * (`submittedAt`); o importado vale a data que a Meta informou (`metaUpdatedAt`). Sem elas, o cadastro aqui.
+ */
+export function dataEnvioMeta(t: DatasTemplate): Date {
+  const ordem = t.origin === "META" ? [t.metaUpdatedAt, t.submittedAt, t.createdAt] : [t.submittedAt, t.metaUpdatedAt, t.createdAt];
+  for (const v of ordem) {
+    if (!v) continue;
+    const d = new Date(v);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  return new Date(t.createdAt);
+}
