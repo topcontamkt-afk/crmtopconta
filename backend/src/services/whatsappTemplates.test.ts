@@ -12,7 +12,6 @@ import {
   toMetaBody,
   validateTemplate,
   variableOrder,
-  ERRO_SEM_OPT_OUT,
   templateTemOptOut,
 } from "./whatsappTemplates";
 
@@ -78,13 +77,10 @@ describe("validateTemplate", () => {
     expect(normalizeButtonPhone("+55 84 99999-8888")).toBe("+5584999998888");
     expect(normalizeButtonPhone("0800")).toBeNull();
   });
-  it("LGPD 02-05: marketing sem rodapé de saída nem botão SAIR é recusado; utilidade não exige", () => {
+  it("marketing sem rodapé de saída nem botão SAIR é aceito (só o assistente de campanha avisa)", () => {
     const semSaida = { body: base.body, category: "MARKETING" };
-    expect(validateTemplate(semSaida)).toContain(ERRO_SEM_OPT_OUT);
-    expect(validateTemplate({ ...semSaida, footer: "TopConta, cartão de benefícios" })).toContain(ERRO_SEM_OPT_OUT);
-    expect(validateTemplate({ ...semSaida, quickReplies: ["Quero usar", "SAIR"] })).toEqual([]);
-    expect(validateTemplate({ ...semSaida, footer: "Para parar de receber, responda PARAR" })).toEqual([]);
-    expect(validateTemplate({ ...semSaida, category: "UTILITY" })).toEqual([]);
+    expect(validateTemplate(semSaida)).toEqual([]);
+    expect(validateTemplate({ ...semSaida, footer: "TopConta, cartão de benefícios" })).toEqual([]);
     expect(templateTemOptOut({ footer: null, quickReplies: ["Sim", "Não quero"] })).toBe(false);
     expect(templateTemOptOut({ footer: null, quickReplies: ["Sair da lista"] })).toBe(true);
   });
