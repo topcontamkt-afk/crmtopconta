@@ -83,9 +83,6 @@ export function templateTemOptOut(t: { footer?: string | null; quickReplies?: un
   return mencionaOptOut(t.footer) || botoes.some((b) => mencionaOptOut(b));
 }
 
-export const ERRO_SEM_OPT_OUT =
-  "Template de marketing precisa ensinar a parar de receber: inclua o rodapé \"Responda SAIR para não receber mais mensagens\" ou um botão de resposta rápida SAIR.";
-
 /** Valida um template criado ou editado por nós (os importados da Meta não passam por aqui: só leitura). */
 export function validateTemplate(t: TemplateDraft): string[] {
   const erros: string[] = [];
@@ -140,8 +137,7 @@ export function validateTemplate(t: TemplateDraft): string[] {
   if (new Set(textos).size !== textos.length) erros.push("Há botões com o mesmo texto.");
 
   if (!t.category || !(TEMPLATE_CATEGORIES as readonly string[]).includes(t.category)) erros.push("Escolha a categoria: Marketing ou Utilidade.");
-  // LGPD 02-05: marketing (legítimo interesse) leva o descadastro na própria mensagem
-  if (t.category === "MARKETING" && !templateTemOptOut(t)) erros.push(ERRO_SEM_OPT_OUT);
+  // Rodapé/botão de saída não é mais exigido ao salvar; o assistente de campanha só avisa (ver campaignWizard).
   return erros;
 }
 
