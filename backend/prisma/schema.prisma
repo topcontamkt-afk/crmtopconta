@@ -776,6 +776,9 @@ model WhatsAppAccount {
   // Texto nulo = usa o padrão de services/whatsappAutoReply.ts.
   autoReplyEnabled Boolean   @default(true)
   autoReplyText    String?
+  // Quantas respostas automáticas por conversa dentro da janela em horas (padrão 3 por 24 h).
+  autoReplyMax         Int       @default(3)
+  autoReplyJanelaHoras Int       @default(24)
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 

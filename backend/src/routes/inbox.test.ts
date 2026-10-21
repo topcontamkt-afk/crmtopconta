@@ -102,4 +102,17 @@ describe("LGPD 02-08: resposta automática mostra o texto do controlador deste t
     await request(app).put("/inbox/auto-reply").send({ ativa: true, texto: g.body.padrao });
     expect((db.whatsAppAccount.update.mock.calls as any[])[0][0].data).toEqual({ autoReplyEnabled: true, autoReplyText: null });
   });
+
+  it("PUT grava máximo e janela e recusa valores fora da faixa", async () => {
+    const ok = await request(app).put("/inbox/auto-reply").send({ ativa: true, texto: "Oi", maximo: 5, janelaHoras: 12 });
+    expect(ok.status).toBe(200);
+    expect((db.whatsAppAccount.update.mock.calls as any[]).at(-1)[0].data).toMatchObject({ autoReplyMax: 5, autoReplyJanelaHoras: 12 });
+    expect((await request(app).put("/inbox/auto-reply").send({ ativa: true, texto: "Oi", maximo: 0 })).status).toBe(400);
+    expect((await request(app).put("/inbox/auto-reply").send({ ativa: true, texto: "Oi", janelaHoras: 100 })).status).toBe(400);
+  });
+
+  it("GET devolve o padrão 3 por 24 h quando a conta não configurou", async () => {
+    const r = await request(app).get("/inbox/auto-reply");
+    expect(r.body).toMatchObject({ maximo: 3, janelaHoras: 24 });
+  });
 });

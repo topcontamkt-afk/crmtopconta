@@ -6,8 +6,8 @@ import { INSTRUCAO_OPT_OUT, mencionaOptOut } from "./templateVariables";
 /**
  * Resposta automática do número de avisos: quem escreve aqui recebe uma mensagem dizendo que o canal não é
  * acompanhado, com o contato do controlador (quando configurado) e como parar de receber. Só vai dentro da janela de 24h que a própria mensagem do cliente acabou de abrir (texto
- * livre) e responde a TODA mensagem do cliente, mas no máximo `AUTO_REPLY_MAX` vezes por conversa em
- * `AUTO_REPLY_JANELA_MS` (24 h corridas; depois disso o cliente é ignorado até a janela andar) e nunca
+ * livre) e responde a TODA mensagem do cliente, mas no máximo `autoReplyMax` vezes por conversa em
+ * `autoReplyJanelaHoras` (padrão 3 por 24 h corridas, configurável na conta; depois disso o cliente é ignorado até a janela andar) e nunca
  * para quem pediu descadastro (PARAR/SAIR). O limite conta as respostas automáticas já gravadas.
  */
 /**
@@ -46,9 +46,23 @@ export function autoReplyPadraoDo(t: ControladorAutoReply | null | undefined): s
 }
 
 export const AUTO_REPLY_MAX = 3;
-export const AUTO_REPLY_JANELA_MS = 24 * 3600_000;
+export const AUTO_REPLY_JANELA_HORAS = 24;
+export const AUTO_REPLY_JANELA_MS = AUTO_REPLY_JANELA_HORAS * 3600_000;
+/** Tetos aceitos na configuração (evita transformar o canal de avisos em robô de conversa). */
+export const AUTO_REPLY_MAX_LIMITE = 10;
+export const AUTO_REPLY_JANELA_HORAS_LIMITE = 72;
 
-type AccountLike = { autoReplyEnabled?: boolean | null; autoReplyText?: string | null };
+type AccountLike = { autoReplyEnabled?: boolean | null; autoReplyText?: string | null; autoReplyMax?: number | null; autoReplyJanelaHoras?: number | null };
+
+/** Limites da conta; coluna vazia ou fora da faixa cai no padrão (3 por 24 h). */
+export function autoReplyLimitesOf(account: AccountLike): { max: number; janelaHoras: number; janelaMs: number } {
+  const max = Number.isInteger(account.autoReplyMax) && account.autoReplyMax! >= 1 && account.autoReplyMax! <= AUTO_REPLY_MAX_LIMITE ? account.autoReplyMax! : AUTO_REPLY_MAX;
+  const janelaHoras =
+    Number.isInteger(account.autoReplyJanelaHoras) && account.autoReplyJanelaHoras! >= 1 && account.autoReplyJanelaHoras! <= AUTO_REPLY_JANELA_HORAS_LIMITE
+      ? account.autoReplyJanelaHoras!
+      : AUTO_REPLY_JANELA_HORAS;
+  return { max, janelaHoras, janelaMs: janelaHoras * 3600_000 };
+}
 
 /**
  * Texto que será enviado: o da conta, ou o padrão do controlador (`controlador`) quando está vazio. LGPD 02-08: o
@@ -86,10 +100,11 @@ export async function maybeAutoReply(
   if (!shouldAutoReply(account, inbound)) return false;
   const now = deps.now ?? new Date();
   try {
+    const limites = autoReplyLimitesOf(account);
     const enviadas = await prisma.waMessage.count({
-      where: { tenantId, conversationId: inbound.conversationId, direction: "SAIDA", automatic: true, timestamp: { gte: new Date(now.getTime() - AUTO_REPLY_JANELA_MS) } },
+      where: { tenantId, conversationId: inbound.conversationId, direction: "SAIDA", automatic: true, timestamp: { gte: new Date(now.getTime() - limites.janelaMs) } },
     });
-    if (enviadas >= AUTO_REPLY_MAX) return false;
+    if (enviadas >= limites.max) return false;
 
     const conversation = await prisma.conversation.findFirst({ where: { id: inbound.conversationId, tenantId }, select: { id: true, waId: true } });
     if (!conversation) return false;

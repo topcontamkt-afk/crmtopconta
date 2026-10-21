@@ -297,19 +297,21 @@ function Composer({ conversaId, janelaAberta, podeEnviar, semAnexo, semTemplate,
   );
 }
 
-interface AutoReplyCfg { ativa: boolean; texto: string; padrao: string; personalizado: boolean; maximo: number; janelaHoras: number }
+interface AutoReplyCfg { ativa: boolean; texto: string; padrao: string; personalizado: boolean; maximo: number; janelaHoras: number; maximoLimite: number; janelaHorasLimite: number }
 
 /** Resposta automática: o que o cliente recebe ao escrever neste número (canal só de avisos). */
 function AutoReplyPanel({ podeEditar, onFechar }: { podeEditar: boolean; onFechar: () => void }) {
   const [cfg, setCfg] = useState<AutoReplyCfg | null>(null);
   const [ativa, setAtiva] = useState(true);
   const [texto, setTexto] = useState("");
+  const [maximo, setMaximo] = useState(3);
+  const [janelaHoras, setJanelaHoras] = useState(24);
   const [msg, setMsg] = useState<{ tipo: "ok" | "erro"; texto: string } | null>(null);
   const [salvando, setSalvando] = useState(false);
 
   useEffect(() => {
     api<AutoReplyCfg>("/inbox/auto-reply")
-      .then((c) => { setCfg(c); setAtiva(c.ativa); setTexto(c.texto); })
+      .then((c) => { setCfg(c); setAtiva(c.ativa); setTexto(c.texto); setMaximo(c.maximo); setJanelaHoras(c.janelaHoras); })
       .catch((e) => setMsg({ tipo: "erro", texto: textoDoErro(e) }));
   }, []);
 
@@ -317,7 +319,7 @@ function AutoReplyPanel({ podeEditar, onFechar }: { podeEditar: boolean; onFecha
     setSalvando(true);
     setMsg(null);
     try {
-      await api("/inbox/auto-reply", { method: "PUT", body: { ativa, texto } });
+      await api("/inbox/auto-reply", { method: "PUT", body: { ativa, texto, maximo, janelaHoras } });
       setMsg({ tipo: "ok", texto: "Salvo." });
     } catch (e) {
       setMsg({ tipo: "erro", texto: textoDoErro(e) });
@@ -333,12 +335,26 @@ function AutoReplyPanel({ podeEditar, onFechar }: { podeEditar: boolean; onFecha
         <button type="button" className="btn secondary" style={{ padding: "2px 10px" }} onClick={onFechar}>Fechar</button>
       </div>
       <p className="seg-hint" style={{ marginTop: 4 }}>
-        Quando um cliente escreve para o número da Meta, ele recebe esta mensagem a cada mensagem dele{cfg ? `, até ${cfg.maximo} vezes a cada ${cfg.janelaHoras} horas por conversa` : ""}. Quem pede para parar (PARAR/SAIR) não recebe.
+        Quando um cliente escreve para o número da Meta, ele recebe esta mensagem a cada mensagem dele, até o limite abaixo por conversa. Quem pede para parar (PARAR/SAIR) não recebe.
       </p>
       <label style={{ display: "flex", gap: 8, alignItems: "center", margin: "8px 0" }}>
         <input type="checkbox" checked={ativa} disabled={!podeEditar || !cfg} onChange={(e) => setAtiva(e.target.checked)} />
         Responder automaticamente
       </label>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", margin: "0 0 8px" }}>
+        <label>
+          Responder no máximo{" "}
+          <input type="number" min={1} max={cfg?.maximoLimite ?? 10} value={maximo} disabled={!podeEditar || !cfg} style={{ width: 64 }}
+            onChange={(e) => setMaximo(Math.max(1, Math.min(cfg?.maximoLimite ?? 10, Math.trunc(Number(e.target.value)) || 1)))} />{" "}
+          vezes
+        </label>
+        <label>
+          a cada{" "}
+          <input type="number" min={1} max={cfg?.janelaHorasLimite ?? 72} value={janelaHoras} disabled={!podeEditar || !cfg} style={{ width: 64 }}
+            onChange={(e) => setJanelaHoras(Math.max(1, Math.min(cfg?.janelaHorasLimite ?? 72, Math.trunc(Number(e.target.value)) || 1)))} />{" "}
+          horas, por conversa
+        </label>
+      </div>
       <textarea rows={6} style={{ width: "100%", resize: "vertical" }} value={texto} maxLength={4096} disabled={!podeEditar || !cfg} onChange={(e) => setTexto(e.target.value)} />
       <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
         {podeEditar ? (

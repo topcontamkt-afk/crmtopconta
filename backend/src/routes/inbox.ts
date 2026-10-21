@@ -10,7 +10,7 @@ import { isSendableTemplate, previewTemplateFor, sendReply, sendTemplateReply } 
 import { SendError, OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
 import { accessTokenFor, credentialsOf } from "../services/whatsappAccount";
 import { janelaAte } from "../services/whatsappPayload";
-import { AUTO_REPLY_JANELA_MS, AUTO_REPLY_MAX, autoReplyPadraoDo, autoReplyTextOf } from "../services/whatsappAutoReply";
+import { AUTO_REPLY_JANELA_HORAS_LIMITE, AUTO_REPLY_MAX_LIMITE, autoReplyLimitesOf, autoReplyPadraoDo, autoReplyTextOf } from "../services/whatsappAutoReply";
 import { textoBusca } from "../config/derivedColumns";
 
 /**
@@ -68,20 +68,28 @@ router.get("/auto-reply", async (req, res) => {
   const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: "META" }, orderBy: { createdAt: "asc" } });
   if (!account) return res.status(404).json({ error: "WhatsApp não conectado" });
   const controlador = await controladorDo(tenantId);
+  const limites = autoReplyLimitesOf(account);
   res.json({
     ativa: account.autoReplyEnabled,
     // LGPD 02-08: mostra o que de fato sai (padrão do controlador deste tenant, ou o texto próprio com a instrução de SAIR)
     texto: autoReplyTextOf(account, controlador),
     padrao: autoReplyPadraoDo(controlador),
     personalizado: !!account.autoReplyText?.trim(),
-    maximo: AUTO_REPLY_MAX,
-    janelaHoras: AUTO_REPLY_JANELA_MS / 3600_000,
+    maximo: limites.max,
+    janelaHoras: limites.janelaHoras,
+    maximoLimite: AUTO_REPLY_MAX_LIMITE,
+    janelaHorasLimite: AUTO_REPLY_JANELA_HORAS_LIMITE,
   });
 });
 
-const autoReplySchema = z.object({ ativa: z.boolean(), texto: z.string().max(4096) });
+const autoReplySchema = z.object({
+  ativa: z.boolean(),
+  texto: z.string().max(4096),
+  maximo: z.number().int().min(1).max(AUTO_REPLY_MAX_LIMITE).optional(),
+  janelaHoras: z.number().int().min(1).max(AUTO_REPLY_JANELA_HORAS_LIMITE).optional(),
+});
 
-/** PUT /api/inbox/auto-reply (ADMIN) — liga/desliga e troca o texto; texto igual ao padrão ou vazio volta ao padrão. */
+/** PUT /api/inbox/auto-reply (ADMIN) — liga/desliga, troca o texto e os limites (máximo por conversa e janela em horas); texto igual ao padrão ou vazio volta ao padrão. */
 router.put("/auto-reply", requireRole("ADMIN"), async (req, res) => {
   const parsed = autoReplySchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Dados inválidos" });
@@ -92,9 +100,12 @@ router.put("/auto-reply", requireRole("ADMIN"), async (req, res) => {
   if (parsed.data.ativa && !texto) return res.status(400).json({ error: "Escreva a mensagem da resposta automática." });
   await prisma.whatsAppAccount.update({
     where: { id: account.id },
-    data: { autoReplyEnabled: parsed.data.ativa, autoReplyText: !texto || texto === autoReplyPadraoDo(await controladorDo(tenantId)) ? null : texto },
+    data: { autoReplyEnabled: parsed.data.ativa, autoReplyText: !texto || texto === autoReplyPadraoDo(await controladorDo(tenantId)) ? null : texto,
+      ...(parsed.data.maximo !== undefined ? { autoReplyMax: parsed.data.maximo } : {}),
+      ...(parsed.data.janelaHoras !== undefined ? { autoReplyJanelaHoras: parsed.data.janelaHoras } : {}),
+    },
   });
-  await logAudit({ tenantId, userId: req.user!.id, action: "WHATSAPP_AUTO_REPLY_UPDATE", target: "WhatsAppAccount", targetId: account.id, details: { ativa: parsed.data.ativa } });
+  await logAudit({ tenantId, userId: req.user!.id, action: "WHATSAPP_AUTO_REPLY_UPDATE", target: "WhatsAppAccount", targetId: account.id, details: { ativa: parsed.data.ativa, maximo: parsed.data.maximo, janelaHoras: parsed.data.janelaHoras } });
   res.json({ ok: true });
 });
 

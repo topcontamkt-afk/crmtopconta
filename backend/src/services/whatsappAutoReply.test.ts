@@ -1,4 +1,4 @@
-import { AUTO_REPLY_JANELA_MS, AUTO_REPLY_MAX, AUTO_REPLY_PADRAO, autoReplyPadraoDo, autoReplyTextOf, maybeAutoReply, shouldAutoReply } from "./whatsappAutoReply";
+import { AUTO_REPLY_JANELA_MS, AUTO_REPLY_MAX, AUTO_REPLY_PADRAO, autoReplyLimitesOf, autoReplyPadraoDo, autoReplyTextOf, maybeAutoReply, shouldAutoReply } from "./whatsappAutoReply";
 
 // LGPD 06-01: o token do ambiente (WHATSAPP_ACCESS_TOKEN) só vale como reserva com liberação explícita.
 process.env.ALLOW_GLOBAL_CHANNEL_CREDENTIALS = "true";
@@ -107,6 +107,28 @@ describe("maybeAutoReply", () => {
     } finally {
       delete process.env.WHATSAPP_ACCESS_TOKEN;
     }
+  });
+
+  it("usa o máximo e a janela configurados na conta", async () => {
+    process.env.WHATSAPP_ACCESS_TOKEN = "tok";
+    try {
+      const cfg = { ...conta, autoReplyMax: 1, autoReplyJanelaHoras: 6 };
+      for (const [ja, esperado] of [[0, true], [1, false]] as const) {
+        expect(await maybeAutoReply(fakePrisma({ jaEnviadas: ja }), "t1", cfg, inbound, { fetchImpl: ok() })).toBe(esperado);
+      }
+      const prisma = fakePrisma();
+      const now = new Date("2026-10-18T12:00:00Z");
+      await maybeAutoReply(prisma, "t1", cfg, inbound, { fetchImpl: ok(), now });
+      expect((prisma.waMessage.count as any).mock.calls[0][0].where.timestamp.gte).toEqual(new Date(now.getTime() - 6 * 3600_000));
+    } finally {
+      delete process.env.WHATSAPP_ACCESS_TOKEN;
+    }
+  });
+
+  it("limite vazio ou fora da faixa volta ao padrão 3 por 24 h", () => {
+    expect(autoReplyLimitesOf({})).toMatchObject({ max: 3, janelaHoras: 24 });
+    expect(autoReplyLimitesOf({ autoReplyMax: 0, autoReplyJanelaHoras: 999 })).toMatchObject({ max: 3, janelaHoras: 24 });
+    expect(autoReplyLimitesOf({ autoReplyMax: 10, autoReplyJanelaHoras: 72 })).toMatchObject({ max: 10, janelaHoras: 72 });
   });
 
   it("conta só respostas automáticas de saída da própria conversa na janela de 24 h", async () => {
