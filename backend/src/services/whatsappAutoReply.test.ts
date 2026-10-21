@@ -34,9 +34,9 @@ describe("texto da resposta automática (LGPD 02-08)", () => {
     // só o contato, sem nome: ainda dá o canal
     expect(autoReplyPadraoDo({ encarregadoContato: "(11) 4000-0000" })).toContain("(11) 4000-0000");
   });
-  it("usa o texto da conta quando existe; sem instrução de saída, ganha a instrução no fim", () => {
+  it("usa o texto da conta exatamente como configurado, sem acrescentar instrução de saída", () => {
     expect(autoReplyTextOf({ autoReplyText: " Fale com o suporte. Para sair, responda SAIR " })).toBe("Fale com o suporte. Para sair, responda SAIR");
-    expect(autoReplyTextOf({ autoReplyText: " Fale com o suporte " })).toBe("Fale com o suporte\n\nResponda SAIR para não receber mais mensagens.");
+    expect(autoReplyTextOf({ autoReplyText: " Fale com o suporte " })).toBe("Fale com o suporte");
   });
 });
 

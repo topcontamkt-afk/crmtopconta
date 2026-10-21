@@ -1,7 +1,6 @@
 import { AppPrismaClient } from "../config/db";
 import { credentialsOf } from "./whatsappAccount";
 import { SendError, sendText, TEXT_MAX_CHARS } from "./whatsappSend";
-import { INSTRUCAO_OPT_OUT, mencionaOptOut } from "./templateVariables";
 
 /**
  * Resposta automática do número de avisos: quem escreve aqui recebe uma mensagem dizendo que o canal não é
@@ -65,15 +64,15 @@ export function autoReplyLimitesOf(account: AccountLike): { max: number; janelaH
 }
 
 /**
- * Texto que será enviado: o da conta, ou o padrão do controlador (`controlador`) quando está vazio. LGPD 02-08: o
- * texto próprio que não ensina a parar ganha a instrução de descadastro no fim.
+ * Texto que será enviado: o da conta, exatamente como foi configurado, ou o padrão do controlador (`controlador`)
+ * quando está vazio. O padrão ensina a parar (responda SAIR); o texto próprio é decisão da empresa e não leva
+ * instrução acrescentada.
  */
 export function autoReplyTextOf(account: AccountLike, controlador?: ControladorAutoReply | null): string {
   const t = account.autoReplyText?.trim();
   if (!t) return autoReplyPadraoDo(controlador);
-  if (mencionaOptOut(t)) return t.slice(0, TEXT_MAX_CHARS);
-  const sufixo = `\n\n${INSTRUCAO_OPT_OUT}`;
-  return t.slice(0, TEXT_MAX_CHARS - sufixo.length) + sufixo;
+  // Texto configurado pela empresa sai exatamente como foi escrito (sem acrescentar instrução de saída).
+  return t.slice(0, TEXT_MAX_CHARS);
 }
 
 /** Decisão pura: responde a esta mensagem? (a trava por conversa é feita no banco, de forma atômica) */
