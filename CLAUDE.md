@@ -239,15 +239,15 @@ tenta baixar o exemplo do cabeçalho na importação, senão envie uma em Templa
 ### Disparo sem duplicidade (incidente de 22/10/2026)
 
 12 chamadas simultâneas de `/dispatch` leram os mesmos itens da fila e cada pessoa recebeu até 10 cópias (467 envios para 53 pessoas, 147 entregues e cobradas). `services/dispatchGuard.ts` +
-`processQueueBatch` agora garantem: (1) **uma trava por campanha** (`Campaign.dispatchToken/dispatchUntil`, UPDATE condicional atômico, expira em 90 s): disparo concorrente recebe `409 DISPARO_EM_ANDAMENTO`
-e não envia nada; (2) **reserva dos itens** antes de enviar (`MessageEvent.claimToken/claimedAt`; reserva abandonada só vale de novo após 30 min, porque se a mensagem saiu e só o registro falhou reenviar duplicaria);
-(3) **trava por telefone**: mesmo telefone já enviado na campanha (ou repetido no lote) fica `BLOQUEADO`; (4) **lote de até 25** com **orçamento de tempo** (`DISPATCH_ORCAMENTO_MS`, padrão 20 s; sempre sai ao menos
+`processQueueBatch` agora garantem: (1) **uma trava por empresa** (`Tenant.dispatchToken/dispatchUntil/dispatchCampaignId`, UPDATE condicional atômico, expira em 90 s; por empresa e não por campanha porque duas campanhas iguais, de um lançamento clicado duas vezes,
+enviariam o mesmo telefone duas vezes): disparo concorrente recebe `409 DISPARO_EM_ANDAMENTO` e não envia nada; (2) **reserva dos itens** antes de enviar (`MessageEvent.claimToken/claimedAt`; reserva abandonada só vale de novo após 30 min, porque se a mensagem saiu e só o registro falhou reenviar duplicaria);
+(3) **trava por telefone**: mesmo telefone que já recebeu esta mesma mensagem, nesta ou em OUTRA campanha dentro de `dedupeWindowHrs` (72 h), ou repetido no lote, fica `BLOQUEADO`; (4) **lote de até 25** com **orçamento de tempo** (`DISPATCH_ORCAMENTO_MS`, padrão 20 s; sempre sai ao menos
 uma): o que sobra volta à fila (`parcial: "tempo"`); (5) **erro de infraestrutura** (`Too many subrequests`, `exceeded CPU`) não vira FALHA: o item volta à fila e o disparo para (`parcial: "limite da plataforma"`);
 se o envio saiu mas o registro falhou, o item NÃO volta (não reenvia). Campanha `PAUSADA`/`CANCELADA` não envia (`POST /:id/pause|resume`). O ciclo diário roda até 4 lotes por campanha.
 **Homologação** (`APP_ENV=hml`): só envia de verdade para `ENVIO_PERMITIDO_PARA` (`services/envioRestrito.ts`; vazio = nada sai) — a conta da Meta da hml tem credencial real e `MESSAGING_MODE=mock` só vale sem canal do tenant.
 **Tela** (`CampaignList.tsx`): "Disparar lote" pede confirmação, desabilita no clique, mostra "Enviando… X/Y" com barra, vira "Enviado ✓" desabilitado ao terminar e "Continuar envio (restam N)" se parou; `GET /campaigns`
-traz `contagem` (enviadas/fila/falhas/bloqueadas) e `emDisparo`. **Custo do relatório** soma só ENVIADO/ENTREGUE/LIDO/RESPONDIDO (falha não é cobrada). `disparoLote.int.test.ts` dispara 6 chamadas simultâneas e exige
-cada mensagem exatamente uma vez. SQL: `backend/prisma/sql/2026-10-disparo-sem-duplicidade.sql` (D1: `migrations/0007_disparo_sem_duplicidade.sql`; rodar antes do deploy).
+traz `contagem` (enviadas/fila/falhas/bloqueadas) e `emDisparo`. **Custo do relatório** soma só ENVIADO/ENTREGUE/LIDO/RESPONDIDO (falha não é cobrada). `disparoLote.int.test.ts` dispara chamadas simultâneas (inclusive duas campanhas iguais e um teste de caos com falhas aleatórias) e exige
+cada mensagem no máximo uma vez. SQL: `backend/prisma/sql/2026-10-disparo-sem-duplicidade.sql` (D1: `migrations/0007_disparo_sem_duplicidade.sql`; rodar antes do deploy; o ciclo automático e as automações enviam no máximo 25 por lote, 4 lotes por campanha por execução).
 
 ### Templates: lista, editor em 3 passos e botões (fase 1)
 

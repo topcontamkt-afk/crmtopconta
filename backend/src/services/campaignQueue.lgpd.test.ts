@@ -40,9 +40,8 @@ function fake(opts: { base?: string | null; provider?: "META" | "ZAPI"; channel?
     campaign: {
       findUniqueOrThrow: jest.fn(async () => ({ id: "camp1", tenantId: "t1", channel: opts.channel ?? "SMS", templateId: null, messageTemplate: "Olá {{nome}}, seu limite renovou.", messageTemplateB: null, throttlePerMin: 100, costPerMessage: 0, baseLegal: null, manual: false, segment: null, adHocFilters: null, dedupeWindowHrs: 72, ...opts.campanha })),
       update: jest.fn(async () => ({})),
-      updateMany: jest.fn(async () => ({ count: 1 })), // trava do disparo (dispatchGuard)
     },
-    tenant: { findUniqueOrThrow: jest.fn(async () => tenant), findUnique: jest.fn(async () => tenant) },
+    tenant: { updateMany: jest.fn(async () => ({ count: 1 })), /* trava do disparo (dispatchGuard) */ findUniqueOrThrow: jest.fn(async () => tenant), findUnique: jest.fn(async () => tenant) },
     channelConfig: { findMany: jest.fn(async () => []) },
     whatsAppAccount: { findFirst: jest.fn(async () => ({ id: "z1", provider: "ZAPI" })) },
     messageTemplate: { findFirst: jest.fn(async () => null) },

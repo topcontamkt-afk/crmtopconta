@@ -106,6 +106,10 @@ model Tenant {
   // LGPD: configuração do CONTROLADOR (cada tenant é um controlador distinto). Ver docs/lgpd/.
   // Base legal declarada para mensagens de marketing: LEGITIMO_INTERESSE | CONSENTIMENTO. Nulo = o controlador
   // ainda não declarou, e o envio de marketing fica bloqueado (02-01).
+  // Trava do disparo: só UM por empresa ao mesmo tempo (services/dispatchGuard.ts); expira sozinha.
+  dispatchToken      String?
+  dispatchUntil      DateTime?
+  dispatchCampaignId String?
   baseLegalMarketing        String?
   liaVersao                 String? // versão do teste de balanceamento (LIA) quando a base é legítimo interesse
   liaAprovadaEm             DateTime?
@@ -428,9 +432,6 @@ model Campaign {
   consentimentoEm     DateTime?
 
   scheduledAt         DateTime?
-  // Trava do disparo: só um por campanha ao mesmo tempo (services/dispatchGuard.ts); expira sozinha.
-  dispatchToken       String?
-  dispatchUntil       DateTime?
   throttlePerMin      Int       @default(60)
   dedupeWindowHrs     Int       @default(72) // janela mínima entre envios da mesma msg ao mesmo cliente
   attributionDays     Int       @default(7)

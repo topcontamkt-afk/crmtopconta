@@ -146,9 +146,9 @@ function fakeEnvio(eventos: any[], opts: { supressoes?: any[]; optOutPorTelefone
     campaign: {
       findUniqueOrThrow: jest.fn(async () => ({ id: "camp1", tenantId: "t1", channel: opts.channel ?? "SMS", templateId: null, messageTemplate: "Olá {{nome}}", messageTemplateB: null, throttlePerMin: 100, costPerMessage: 0 })),
       update: jest.fn(async () => ({})),
-      updateMany: jest.fn(async () => ({ count: 1 })), // trava do disparo (dispatchGuard)
     },
     tenant: {
+      updateMany: jest.fn(async () => ({ count: 1 })), // trava do disparo (dispatchGuard)
       findUniqueOrThrow: jest.fn(async () => ({ id: "t1", name: "TopConta", maxMsgsPerMinute: 1000, baseLegalMarketing: "LEGITIMO_INTERESSE" })),
       findUnique: jest.fn(async () => ({ cpfSalt: SALT, whatsappProvider: "META", baseLegalMarketing: "LEGITIMO_INTERESSE" })),
     },

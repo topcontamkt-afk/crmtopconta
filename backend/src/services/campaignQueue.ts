@@ -385,15 +385,16 @@ async function sentInLastMinute(prisma: AppPrismaClient, tenantId: string): Prom
  * global do tenant (Tenant.maxMsgsPerMinute), com failover entre provedores do canal.
  */
 export async function processQueueBatch(prisma: AppPrismaClient, campaignId: string, limit = DISPATCH_LOTE_MAX) {
-  // Um disparo por campanha de cada vez: chamadas simultâneas liam os mesmos itens e enviavam em duplicidade.
-  const lock = await acquireDispatchLock(prisma, campaignId);
+  // Um disparo por empresa de cada vez: chamadas simultâneas liam os mesmos itens e enviavam em duplicidade.
+  const { tenantId } = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId }, select: { tenantId: true } });
+  const lock = await acquireDispatchLock(prisma, tenantId, campaignId);
   if (!lock) {
     return { processed: 0, remaining: await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } }), results: [], throttled: false, emAndamento: true as const };
   }
   try {
     return await processQueueBatchLocked(prisma, campaignId, limit);
   } finally {
-    await releaseDispatchLock(prisma, campaignId, lock);
+    await releaseDispatchLock(prisma, tenantId, lock);
   }
 }
 
@@ -446,11 +447,19 @@ async function processQueueBatchLocked(prisma: AppPrismaClient, campaignId: stri
     include: { client: true, recipient: true },
   });
 
-  // Mesmo telefone já enviado nesta campanha (outra linha da planilha, outro disparo): não envia de novo.
+  // Mesmo telefone que já recebeu esta mesma mensagem (nesta ou em OUTRA campanha, dentro da janela de dedupe):
+  // não envia de novo. Cobre linha repetida da planilha e a campanha lançada duas vezes. O disparo é um por empresa
+  // (trava acima), então os envios anteriores já estão registrados quando esta consulta roda.
   const telefonesLote = pending.map((e) => e.recipient?.telefone ?? e.client?.telefone).filter((t): t is string => !!t);
+  const janelaDedupe = new Date(Date.now() - (Number(campaign.dedupeWindowHrs) || 72) * 3600_000);
   const jaEnviados = telefonesLote.length
     ? await prisma.messageEvent.findMany({
-        where: { campaignId, status: { in: [...STATUS_ENVIADOS] }, OR: [{ client: { telefone: { in: telefonesLote } } }, { recipient: { telefone: { in: telefonesLote } } }] },
+        where: {
+          campaign: { messageTemplate: campaign.messageTemplate },
+          status: { in: [...STATUS_ENVIADOS] },
+          sentAt: { gte: janelaDedupe },
+          OR: [{ client: { telefone: { in: telefonesLote } } }, { recipient: { telefone: { in: telefonesLote } } }],
+        },
         select: { client: { select: { telefone: true } }, recipient: { select: { telefone: true } } },
       })
     : [];
@@ -516,7 +525,7 @@ async function processQueueBatchLocked(prisma: AppPrismaClient, campaignId: stri
 
     const canon = canonicalPhone(telefoneEnvio);
     if (canon && telefonesVistos.has(canon)) {
-      await block("Telefone repetido: já enviado nesta campanha");
+      await block("Telefone repetido: já recebeu esta mensagem (nesta ou em outra campanha) na janela de dedupe");
       continue;
     }
     const foraDaLista = bloqueioPorRestricao(restricao, telefoneEnvio);

@@ -68,14 +68,10 @@ router.get("/", async (req, res) => {
     if (g.status !== "CONTROLE") c.total += n;
     contagens.set(g.campaignId, c);
   }
-  const agora = Date.now();
-  res.json(
-    campaigns.map(({ dispatchToken: _t, dispatchUntil, ...c }) => ({
-      ...c,
-      emDisparo: !!dispatchUntil && dispatchUntil.getTime() > agora,
-      contagem: contagens.get(c.id) ?? null,
-    }))
-  );
+  // o disparo é um por empresa: a campanha "em disparo" é a que segura a trava agora
+  const trava = await prisma.tenant.findUnique({ where: { id: req.user!.tenantId }, select: { dispatchUntil: true, dispatchCampaignId: true } });
+  const travaAtiva = !!trava?.dispatchUntil && trava.dispatchUntil.getTime() > Date.now();
+  res.json(campaigns.map((c) => ({ ...c, emDisparo: travaAtiva && trava!.dispatchCampaignId === c.id, contagem: contagens.get(c.id) ?? null })));
 });
 
 
@@ -488,7 +484,7 @@ router.post("/:id/dispatch", requireRole("ADMIN", "OPERATOR"), async (req, res) 
   const result: any = await processQueueBatch(prisma, campaign.id, Number(req.body?.limit) || undefined);
   // Já há um disparo desta campanha em andamento (outra aba, outro clique): não envia nada de novo.
   if (result.emAndamento) {
-    return res.status(409).json({ error: "Já existe um disparo em andamento para esta campanha. Aguarde terminar.", code: "DISPARO_EM_ANDAMENTO", remaining: result.remaining });
+    return res.status(409).json({ error: "Já existe um disparo em andamento. Aguarde terminar para enviar o próximo.", code: "DISPARO_EM_ANDAMENTO", remaining: result.remaining });
   }
   res.json(result);
 });

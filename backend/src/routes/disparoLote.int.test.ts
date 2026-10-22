@@ -34,10 +34,11 @@ let envio = jest.spyOn(MockWhatsAppAdapter.prototype, "send");
 const dispatch = (id: string, limit = 25) => request(app).post(`/api/campaigns/${id}/dispatch`).set("authorization", `Bearer ${token}`).send({ limit });
 
 /** Cria uma campanha com os `n` primeiros clientes na fila. */
-async function novaCampanha(n: number, nome = "limite") {
+/** `texto` igual em duas campanhas = a mesma mensagem (a trava de repetição vale por mensagem). Por padrão cada teste tem a sua. */
+async function novaCampanha(n: number, nome = "limite", texto = `Olá {{nome}}, seu limite {{limite_disponivel}}. [${nome}]`) {
   return runWithTenantContextAsync(tenantId, async () => {
     const campaign = await prisma.campaign.create({
-      data: { tenantId, name: nome, channel: "WHATSAPP", messageTemplate: "Olá {{nome}}, seu limite {{limite_disponivel}}.", status: "AGENDADA", audienceCount: n, baseLegal: "CONSENTIMENTO" },
+      data: { tenantId, name: nome, channel: "WHATSAPP", messageTemplate: texto, status: "AGENDADA", audienceCount: n, baseLegal: "CONSENTIMENTO" },
     });
     for (let i = 0; i < n; i++) await prisma.messageEvent.create({ data: { tenantId, campaignId: campaign.id, clientId: clientes[i], channel: "WHATSAPP", status: "FILA" } });
     return campaign.id;
@@ -117,13 +118,14 @@ it("disparos SIMULTÂNEOS: cada mensagem sai exatamente uma vez", async () => {
 
 it("segunda chamada com um disparo em andamento responde 409 e não envia nada", async () => {
   const id = await novaCampanha(5, "trava");
-  await runWithTenantContextAsync(tenantId, () => prisma.campaign.update({ where: { id }, data: { dispatchToken: "outro", dispatchUntil: new Date(Date.now() + 60_000) } }));
+  const travar = (ate: Date) => runWithTenantContextAsync(tenantId, () => prisma.tenant.update({ where: { id: tenantId }, data: { dispatchToken: "outro", dispatchUntil: ate, dispatchCampaignId: "qualquer" } }));
+  await travar(new Date(Date.now() + 60_000));
   const r = await dispatch(id);
   expect(r.status).toBe(409);
   expect(r.body.code).toBe("DISPARO_EM_ANDAMENTO");
   expect(enviados).toHaveLength(0);
   // trava vencida não prende a campanha para sempre
-  await runWithTenantContextAsync(tenantId, () => prisma.campaign.update({ where: { id }, data: { dispatchUntil: new Date(Date.now() - 1000) } }));
+  await runWithTenantContextAsync(tenantId, () => prisma.tenant.update({ where: { id: tenantId }, data: { dispatchUntil: new Date(Date.now() - 1000) } }));
   expect((await dispatch(id)).status).toBe(200);
   expect(enviados).toHaveLength(5);
 });
@@ -221,3 +223,62 @@ it("a lista de campanhas traz a contagem por status e se há disparo em andament
   expect(c.emDisparo).toBe(false);
   expect(c.dispatchToken).toBeUndefined();
 });
+
+/** Drena uma ou mais campanhas com vários disparadores ao mesmo tempo; devolve quando todas esvaziam. */
+async function drenarEmParalelo(ids: string[], paralelos: number, rodadas = 60) {
+  for (let rodada = 0; rodada < rodadas; rodada++) {
+    // a ordem gira a cada rodada: quem chega primeiro leva a trava, e nenhuma campanha fica sempre atrás
+    const alvos = Array.from({ length: paralelos }, (_, i) => ids[(i + rodada) % ids.length]);
+    await Promise.all(alvos.map((id) => dispatch(id)));
+    const filas = await Promise.all(ids.map(async (id) => (await contagem(id)).FILA ?? 0));
+    if (filas.every((f) => f === 0)) return;
+  }
+}
+
+it("DUAS campanhas iguais (lançamento clicado duas vezes) disparadas ao mesmo tempo: cada pessoa recebe uma vez", async () => {
+  const a = await novaCampanha(60, "dupla", "Oferta dupla {{nome}}");
+  const b = await novaCampanha(60, "dupla", "Oferta dupla {{nome}}"); // mesmo público, mesma mensagem
+  await drenarEmParalelo([a, b], 8);
+  expect(enviados).toHaveLength(60);
+  expect(new Set(enviados).size).toBe(60);
+  const ca = await contagem(a);
+  const cb = await contagem(b);
+  expect((ca.ENVIADO ?? 0) + (cb.ENVIADO ?? 0)).toBe(60);
+  expect((ca.BLOQUEADO ?? 0) + (cb.BLOQUEADO ?? 0)).toBe(60); // a metade repetida ficou bloqueada, não enviada
+});
+
+it("o disparo seguinte de uma campanha idêntica, depois de enviada, não reenvia a ninguém", async () => {
+  const a = await novaCampanha(20, "sequencial", "Oferta sequencial {{nome}}");
+  await drenarEmParalelo([a], 1);
+  expect(enviados).toHaveLength(20);
+  const b = await novaCampanha(20, "sequencial", "Oferta sequencial {{nome}}");
+  await drenarEmParalelo([b], 1);
+  expect(enviados).toHaveLength(20);
+  expect((await contagem(b)).BLOQUEADO).toBe(20);
+});
+
+it("CAOS: falhas aleatórias (limite do Worker, recusa da Meta, exceção) com 8 disparadores: ninguém recebe duas vezes", async () => {
+  const id = await novaCampanha(120, "caos");
+  let semente = Number(process.env.CAOS_SEMENTE) || 12345;
+  const aleatorio = () => ((semente = (semente * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  envio.mockImplementation(async (to: string) => {
+    const x = aleatorio();
+    if (x < 0.08) return { providerMessageId: "", status: "FAILED", error: "Too many subrequests by single Worker invocation" } as any; // volta à fila
+    if (x < 0.12) throw new Error("conexão caiu"); // exceção no meio do lote: a reserva fica parada
+    if (x < 0.2) return { providerMessageId: "", status: "FAILED", error: "131049 not delivered" } as any; // recusa definitiva
+    await new Promise((r) => setTimeout(r, aleatorio() * 4));
+    enviados.push(to);
+    return { providerMessageId: `m${enviados.length}`, status: "SENT", cost: 0.05 };
+  });
+  process.env.DISPATCH_ORCAMENTO_MS = "30";
+  await drenarEmParalelo([id], 8, 80);
+  // reservas deixadas por exceções só voltam a valer depois de 30 min: avança o relógio das reservas e continua
+  await runWithTenantContextAsync(tenantId, () => prisma.messageEvent.updateMany({ where: { campaignId: id, status: "FILA" }, data: { claimedAt: new Date(Date.now() - 31 * 60_000) } }));
+  await drenarEmParalelo([id], 8, 80);
+  await runWithTenantContextAsync(tenantId, () => prisma.messageEvent.updateMany({ where: { campaignId: id, status: "FILA" }, data: { claimedAt: new Date(Date.now() - 31 * 60_000) } }));
+  await drenarEmParalelo([id], 8, 80);
+  expect(new Set(enviados).size).toBe(enviados.length); // NINGUÉM recebeu duas vezes
+  const c = await contagem(id);
+  expect((c.ENVIADO ?? 0)).toBe(enviados.length); // o que foi enviado está registrado como enviado
+  expect((c.ENVIADO ?? 0) + (c.FALHA ?? 0) + (c.FILA ?? 0)).toBe(120); // nada perdido
+}, 120_000);
