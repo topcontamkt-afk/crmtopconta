@@ -114,8 +114,12 @@ export async function runCampaignDispatchJob() {
   const results = [];
   for (const c of pendingCampaigns) {
     try {
-      const batchResult = await runWithTenantContextAsync(c.tenantId, async () => await processQueueBatch(prisma, c.id, 100));
-      results.push({ campaignId: c.id, ...batchResult });
+      // até 4 lotes por campanha por execução; para antes se há outro disparo em andamento, bloqueio ou limite
+      for (let i = 0; i < 4; i++) {
+        const batchResult: any = await runWithTenantContextAsync(c.tenantId, async () => await processQueueBatch(prisma, c.id));
+        results.push({ campaignId: c.id, ...batchResult });
+        if (batchResult.emAndamento || batchResult.bloqueado || batchResult.throttled || batchResult.parcial || !(batchResult.remaining > 0) || batchResult.processed === 0) break;
+      }
     } catch (e) {
       console.error(`[scheduler] Falha ao processar fila da campanha ${c.id}:`, e);
     }

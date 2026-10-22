@@ -17,6 +17,8 @@ import { brl, recipientContext, renderTemplate, templateContext, usesLimiteDispo
 import { comRodape, montarRodape } from "./templateVariables";
 import { baseLegalVigente, motivoSemBaseLegal } from "./baseLegal";
 import { loadTemplateMedia } from "./mediaStore";
+import { acquireDispatchLock, claimEvents, DISPATCH_LOTE_MAX, erroDeInfra, orcamentoMs, releaseClaims, releaseDispatchLock, STATUS_ENVIADOS } from "./dispatchGuard";
+import { bloqueioPorRestricao, restricaoDeEnvio } from "./envioRestrito";
 export { recipientContext, renderTemplate, templateContext, usesLimiteDisponivel };
 
 /**
@@ -382,9 +384,26 @@ async function sentInLastMinute(prisma: AppPrismaClient, tenantId: string): Prom
  * Processa até `limit` mensagens em FILA respeitando o throttle da campanha E o rate limit
  * global do tenant (Tenant.maxMsgsPerMinute), com failover entre provedores do canal.
  */
-export async function processQueueBatch(prisma: AppPrismaClient, campaignId: string, limit = 50) {
+export async function processQueueBatch(prisma: AppPrismaClient, campaignId: string, limit = DISPATCH_LOTE_MAX) {
+  // Um disparo por campanha de cada vez: chamadas simultâneas liam os mesmos itens e enviavam em duplicidade.
+  const lock = await acquireDispatchLock(prisma, campaignId);
+  if (!lock) {
+    return { processed: 0, remaining: await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } }), results: [], throttled: false, emAndamento: true as const };
+  }
+  try {
+    return await processQueueBatchLocked(prisma, campaignId, limit);
+  } finally {
+    await releaseDispatchLock(prisma, campaignId, lock);
+  }
+}
+
+async function processQueueBatchLocked(prisma: AppPrismaClient, campaignId: string, limit: number) {
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
   const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: campaign.tenantId } });
+  if (campaign.status === "PAUSADA" || campaign.status === "CANCELADA") {
+    const motivo = campaign.status === "PAUSADA" ? "Campanha pausada: retome para continuar o envio." : "Campanha cancelada.";
+    return { processed: 0, remaining: await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } }), results: [], throttled: false, bloqueado: motivo };
+  }
   // LGPD 02-01: sem base legal declarada nada sai, e a fila fica intacta (sai quando o controlador declarar)
   const semBase = motivoSemBaseLegal(tenant);
   if (semBase) {
@@ -404,7 +423,7 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
   // Z-API é sessão do WhatsApp Web: lote pequeno (cada envio espera um intervalo) para não estourar o tempo
   // da função nem derrubar o número. O restante sai nas próximas chamadas (a tela repete até acabar).
   const teto = providers[0]?.name === "zapi" ? ZAPI_BATCH_MAX : Infinity;
-  const batchSize = Math.min(limit, campaign.throttlePerMin, tenantBudget, teto);
+  const batchSize = Math.min(limit, DISPATCH_LOTE_MAX, campaign.throttlePerMin, tenantBudget, teto);
 
   if (batchSize <= 0) {
     return { processed: 0, remaining: await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } }), results: [], throttled: true };
@@ -420,11 +439,31 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
     return { processed: 0, remaining: await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } }), results: [], throttled: false, bloqueado: header.bloqueado };
   }
 
+  // Reserva os itens ANTES de enviar: dois disparos nunca pegam o mesmo item (ver dispatchGuard.ts).
+  const claim = await claimEvents(prisma, campaignId, batchSize);
   const pending = await prisma.messageEvent.findMany({
-    where: { campaignId, status: "FILA" },
-    take: batchSize,
+    where: { campaignId, status: "FILA", claimToken: claim },
     include: { client: true, recipient: true },
   });
+
+  // Mesmo telefone já enviado nesta campanha (outra linha da planilha, outro disparo): não envia de novo.
+  const telefonesLote = pending.map((e) => e.recipient?.telefone ?? e.client?.telefone).filter((t): t is string => !!t);
+  const jaEnviados = telefonesLote.length
+    ? await prisma.messageEvent.findMany({
+        where: { campaignId, status: { in: [...STATUS_ENVIADOS] }, OR: [{ client: { telefone: { in: telefonesLote } } }, { recipient: { telefone: { in: telefonesLote } } }] },
+        select: { client: { select: { telefone: true } }, recipient: { select: { telefone: true } } },
+      })
+    : [];
+  const telefonesVistos = new Set<string>();
+  for (const e of jaEnviados) {
+    const c = canonicalPhone(e.recipient?.telefone ?? e.client?.telefone);
+    if (c) telefonesVistos.add(c);
+  }
+  const restricao = restricaoDeEnvio();
+  const inicio = Date.now();
+  const orcamento = orcamentoMs();
+  const naoRegistrados: string[] = [];
+  let parcial: string | null = null;
 
   // LGPD 02-03: supressão conferida no ENVIO, em lote (uma passada para todo o lote, não N consultas), para
   // todo evento — com cliente ou só destinatário de lista — pelo telefone (todas as formas do nono dígito) e
@@ -436,6 +475,11 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
 
   const results = [];
   for (const evt of pending) {
+    // sempre deixa ao menos uma mensagem sair por chamada, para a fila nunca ficar sem progresso
+    if (results.length > 0 && Date.now() - inicio > orcamento) {
+      parcial = "tempo";
+      break;
+    }
     const block = async (error: string) => {
       await prisma.messageEvent.update({ where: { id: evt.id }, data: { status: "BLOQUEADO", error } });
     };
@@ -470,6 +514,18 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
       continue;
     }
 
+    const canon = canonicalPhone(telefoneEnvio);
+    if (canon && telefonesVistos.has(canon)) {
+      await block("Telefone repetido: já enviado nesta campanha");
+      continue;
+    }
+    const foraDaLista = bloqueioPorRestricao(restricao, telefoneEnvio);
+    if (foraDaLista) {
+      await block(foraDaLista);
+      continue;
+    }
+    if (canon) telefonesVistos.add(canon);
+
     const ctx = evt.recipient ? recipientContext(evt.recipient, client) : templateContext(client!);
     const telefone = telefoneEnvio;
     const templateBody = evt.variant === "B" && campaign.messageTemplateB ? campaign.messageTemplateB : campaign.messageTemplate;
@@ -489,6 +545,12 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
       metaTemplate ? { name: metaTemplate.metaName, language: metaTemplate.language, params: tplParams!, headerImageId: header.imageId, buttonTokens: trackedButtons(metaTemplate).map((b) => ({ index: b.index, token: makeToken("e", evt.id, b.index) })) } : undefined
     );
 
+    // Limite da plataforma (Worker) não é culpa do contato: o item volta à fila em vez de virar FALHA definitiva.
+    if (sendResult.status !== "SENT" && erroDeInfra(sendResult.error)) {
+      parcial = "limite da plataforma";
+      break;
+    }
+
     // A conversa da inbox passa a mostrar o que foi enviado (quando o cliente responder, quem atende vê a oferta).
     if (metaTemplate && sendResult.status === "SENT" && sendResult.providerMessageId) {
       await recordOutboundTemplateMessage(
@@ -500,19 +562,30 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
       ).catch((e) => console.warn("[campaignQueue] não registrou na inbox:", e.message));
     }
 
-    await prisma.messageEvent.update({
-      where: { id: evt.id },
-      data: {
-        status: sendResult.status === "SENT" ? "ENVIADO" : "FALHA",
-        provider: sendResult.provider,
-        providerMsgId: sendResult.providerMessageId || undefined,
-        error: sendResult.error,
-        cost: sendResult.cost ?? campaign.costPerMessage,
-        sentAt: sendResult.status === "SENT" ? new Date() : undefined,
-      },
-    });
+    try {
+      await prisma.messageEvent.update({
+        where: { id: evt.id },
+        data: {
+          status: sendResult.status === "SENT" ? "ENVIADO" : "FALHA",
+          provider: sendResult.provider,
+          providerMsgId: sendResult.providerMessageId || undefined,
+          error: sendResult.error,
+          cost: sendResult.status === "SENT" ? (sendResult.cost ?? campaign.costPerMessage) : 0,
+          sentAt: sendResult.status === "SENT" ? new Date() : undefined,
+        },
+      });
+    } catch (e) {
+      // A mensagem pode já ter saído: o item NÃO volta à fila (não pode ser reenviado) e o disparo para aqui.
+      if (sendResult.status === "SENT") naoRegistrados.push(evt.id);
+      console.error(`[campaignQueue] não registrou o envio de ${evt.id}:`, e);
+      parcial = "erro ao registrar";
+      break;
+    }
     results.push({ clientId: evt.clientId, recipientId: evt.recipientId, status: sendResult.status, provider: sendResult.provider });
   }
+
+  // o que foi reservado e não processado (tempo, limite da plataforma) volta à fila
+  await releaseClaims(prisma, campaignId, claim, naoRegistrados);
 
   const remaining = await prisma.messageEvent.count({ where: { campaignId, status: "FILA" } });
   if (remaining === 0) {
@@ -521,7 +594,7 @@ export async function processQueueBatch(prisma: AppPrismaClient, campaignId: str
     await prisma.campaign.update({ where: { id: campaignId }, data: { status: "EM_EXECUCAO" } });
   }
 
-  return { processed: results.length, remaining, results, throttled: false };
+  return { processed: results.length, remaining, results, throttled: false, parcial };
 }
 
 /**
@@ -551,8 +624,14 @@ export async function sendTestMessages(
 
   // LGPD 02-03: o envio de teste também não fala com telefone que pediu para parar
   const lote = await suprimidosEmLote(prisma, tenantId, { telefones: phones });
+  const restricao = restricaoDeEnvio();
   const results = [];
   for (const phone of phones) {
+    const foraDaLista = bloqueioPorRestricao(restricao, phone);
+    if (foraDaLista) {
+      results.push({ phone, status: "FAILED" as const, provider: "none", error: foraDaLista });
+      continue;
+    }
     if (contatoSuprimido(lote, { telefone: phone })) {
       results.push({ phone, status: "FAILED" as const, provider: "none", error: textoSupressao(lote.motivos.get(canonicalPhone(phone) ?? "")) });
       continue;

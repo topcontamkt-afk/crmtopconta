@@ -45,13 +45,37 @@ async function baseLegalDoTenant(tenantId: string) {
 }
 const semBaseLegal = (res: any) => res.status(409).json({ error: SEM_BASE_LEGAL, code: "SEM_BASE_LEGAL" });
 
+const ENVIADOS = ["ENVIADO", "ENTREGUE", "LIDO", "RESPONDIDO"];
+
 router.get("/", async (req, res) => {
   const campaigns = await prisma.campaign.findMany({
     where: { tenantId: req.user!.tenantId },
     orderBy: { createdAt: "desc" },
     include: { segment: true, template: true },
   });
-  res.json(campaigns);
+  // Contagem por status das campanhas mais recentes (a tela mostra enviadas/na fila e bloqueia o botão de disparo
+  // de quem já foi enviado). Limitada para caber no limite de parâmetros do D1.
+  const recentes = campaigns.slice(0, 80).map((c) => c.id);
+  const grupos = recentes.length ? await prisma.messageEvent.groupBy({ by: ["campaignId", "status"], where: { campaignId: { in: recentes } }, _count: { _all: true } }) : [];
+  const contagens = new Map<string, { fila: number; enviadas: number; falhas: number; bloqueadas: number; total: number }>();
+  for (const g of grupos) {
+    const c = contagens.get(g.campaignId) ?? { fila: 0, enviadas: 0, falhas: 0, bloqueadas: 0, total: 0 };
+    const n = g._count._all;
+    if (g.status === "FILA") c.fila += n;
+    else if (ENVIADOS.includes(g.status)) c.enviadas += n;
+    else if (g.status === "FALHA") c.falhas += n;
+    else if (g.status === "BLOQUEADO") c.bloqueadas += n;
+    if (g.status !== "CONTROLE") c.total += n;
+    contagens.set(g.campaignId, c);
+  }
+  const agora = Date.now();
+  res.json(
+    campaigns.map(({ dispatchToken: _t, dispatchUntil, ...c }) => ({
+      ...c,
+      emDisparo: !!dispatchUntil && dispatchUntil.getTime() > agora,
+      contagem: contagens.get(c.id) ?? null,
+    }))
+  );
 });
 
 
@@ -461,8 +485,34 @@ router.post("/:id/schedule", requireRole("ADMIN", "OPERATOR"), async (req, res) 
 router.post("/:id/dispatch", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId: req.user!.tenantId } });
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
-  const result = await processQueueBatch(prisma, campaign.id, Number(req.body?.limit) || 50);
+  const result: any = await processQueueBatch(prisma, campaign.id, Number(req.body?.limit) || undefined);
+  // Já há um disparo desta campanha em andamento (outra aba, outro clique): não envia nada de novo.
+  if (result.emAndamento) {
+    return res.status(409).json({ error: "Já existe um disparo em andamento para esta campanha. Aguarde terminar.", code: "DISPARO_EM_ANDAMENTO", remaining: result.remaining });
+  }
   res.json(result);
+});
+
+/** POST /api/campaigns/:id/pause — freio de emergência: o que está na fila fica parado até retomar. */
+router.post("/:id/pause", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const { tenantId, id: userId } = req.user!;
+  const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
+  if (campaign.status !== "AGENDADA" && campaign.status !== "EM_EXECUCAO") return res.status(409).json({ error: "Só dá para pausar uma campanha agendada ou em execução." });
+  await prisma.campaign.update({ where: { id: campaign.id }, data: { status: "PAUSADA" } });
+  await logAudit({ tenantId, userId, action: "PAUSE_CAMPAIGN", target: "Campaign", targetId: campaign.id });
+  res.json({ ok: true, status: "PAUSADA" });
+});
+
+/** POST /api/campaigns/:id/resume — retoma uma campanha pausada. */
+router.post("/:id/resume", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const { tenantId, id: userId } = req.user!;
+  const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
+  if (campaign.status !== "PAUSADA") return res.status(409).json({ error: "A campanha não está pausada." });
+  await prisma.campaign.update({ where: { id: campaign.id }, data: { status: "EM_EXECUCAO" } });
+  await logAudit({ tenantId, userId, action: "RESUME_CAMPAIGN", target: "Campaign", targetId: campaign.id });
+  res.json({ ok: true, status: "EM_EXECUCAO" });
 });
 
 const testSendSchema = z.object({
@@ -505,7 +555,7 @@ router.get("/:id/report", async (req, res) => {
   if (campaign.manual) await linkRecipients(prisma, tenantId, campaign.id);
   const [grouped, costAgg, evals] = await Promise.all([
     prisma.messageEvent.groupBy({ by: ["status"], where: { campaignId: campaign.id }, _count: true }),
-    prisma.messageEvent.aggregate({ where: { campaignId: campaign.id }, _sum: { cost: true } }),
+    prisma.messageEvent.aggregate({ where: { campaignId: campaign.id, status: { in: ENVIADOS as any } }, _sum: { cost: true } }),
     loadCampaignEvaluations(prisma, tenantId, campaign.id),
   ]);
 

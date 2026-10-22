@@ -146,6 +146,7 @@ function fakeEnvio(eventos: any[], opts: { supressoes?: any[]; optOutPorTelefone
     campaign: {
       findUniqueOrThrow: jest.fn(async () => ({ id: "camp1", tenantId: "t1", channel: opts.channel ?? "SMS", templateId: null, messageTemplate: "Olá {{nome}}", messageTemplateB: null, throttlePerMin: 100, costPerMessage: 0 })),
       update: jest.fn(async () => ({})),
+      updateMany: jest.fn(async () => ({ count: 1 })), // trava do disparo (dispatchGuard)
     },
     tenant: {
       findUniqueOrThrow: jest.fn(async () => ({ id: "t1", name: "TopConta", maxMsgsPerMinute: 1000, baseLegalMarketing: "LEGITIMO_INTERESSE" })),
@@ -156,7 +157,9 @@ function fakeEnvio(eventos: any[], opts: { supressoes?: any[]; optOutPorTelefone
     messageTemplate: { findFirst: jest.fn(async () => null) },
     messageEvent: {
       count: jest.fn(async () => 0),
-      findMany: jest.fn(async () => eventos),
+      // `status` em forma de lista é a consulta "já enviados nesta campanha" (trava de telefone repetido): vazia aqui
+      findMany: jest.fn(async ({ where }: any) => (where?.status && typeof where.status === "object" ? [] : eventos)),
+      updateMany: jest.fn(async () => ({ count: eventos.length })), // reserva dos itens (dispatchGuard)
       update: jest.fn(async (a: any) => void updates.push(a)),
     },
     supressaoTitular: { findMany: jest.fn(async () => opts.supressoes ?? []) },

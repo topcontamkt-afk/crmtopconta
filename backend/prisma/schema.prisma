@@ -428,6 +428,9 @@ model Campaign {
   consentimentoEm     DateTime?
 
   scheduledAt         DateTime?
+  // Trava do disparo: só um por campanha ao mesmo tempo (services/dispatchGuard.ts); expira sozinha.
+  dispatchToken       String?
+  dispatchUntil       DateTime?
   throttlePerMin      Int       @default(60)
   dedupeWindowHrs     Int       @default(72) // janela mínima entre envios da mesma msg ao mesmo cliente
   attributionDays     Int       @default(7)
@@ -472,6 +475,9 @@ model MessageEvent {
   convertedValue Decimal? // valor da movimentação que gerou a conversão (ROI)
   clickedAt      DateTime? // 1º clique no botão de link rastreado (services/trackedLinks.ts, rota /r/:token)
   clickCount     Int                @default(0)
+  // Reserva do item por um disparo (services/dispatchGuard.ts): dois disparos nunca enviam o mesmo item.
+  claimToken     String?
+  claimedAt      DateTime?
 
   @@index([campaignId, status])
   @@index([clientId])

@@ -1,3 +1,4 @@
+import { restricaoDeEnvio } from "./envioRestrito";
 import { AppPrismaClient } from "../config/db";
 import { tenantRaw } from "../config/db";
 import { buscarEmPartes, contarEmPartes } from "../config/d1Partes";
@@ -233,6 +234,17 @@ export async function validateWizard(
       nivel: "aviso",
       titulo: "Envio agendado sai no ciclo diário",
       detalhe: `No plano atual da Vercel o envio automático roda uma vez por dia (por volta das ${CICLO_DIARIO_BRASILIA}, Brasília). A campanha só entra nesse ciclo depois do horário marcado; para enviar na hora, use "Imediato".`,
+    });
+  }
+
+  // 5b) homologação: só envia para números de teste
+  const restricao = restricaoDeEnvio();
+  if (restricao.ativa) {
+    add({
+      id: "homologacao",
+      nivel: "aviso",
+      titulo: "Homologação: envio só para números de teste",
+      detalhe: `Neste ambiente nada é enviado de verdade, exceto para ${restricao.permitidos.size} número(s) da lista de teste. Os demais ficam bloqueados.`,
     });
   }
 

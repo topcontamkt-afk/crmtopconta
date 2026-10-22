@@ -40,6 +40,7 @@ function fake(opts: { base?: string | null; provider?: "META" | "ZAPI"; channel?
     campaign: {
       findUniqueOrThrow: jest.fn(async () => ({ id: "camp1", tenantId: "t1", channel: opts.channel ?? "SMS", templateId: null, messageTemplate: "Olá {{nome}}, seu limite renovou.", messageTemplateB: null, throttlePerMin: 100, costPerMessage: 0, baseLegal: null, manual: false, segment: null, adHocFilters: null, dedupeWindowHrs: 72, ...opts.campanha })),
       update: jest.fn(async () => ({})),
+      updateMany: jest.fn(async () => ({ count: 1 })), // trava do disparo (dispatchGuard)
     },
     tenant: { findUniqueOrThrow: jest.fn(async () => tenant), findUnique: jest.fn(async () => tenant) },
     channelConfig: { findMany: jest.fn(async () => []) },
@@ -47,7 +48,9 @@ function fake(opts: { base?: string | null; provider?: "META" | "ZAPI"; channel?
     messageTemplate: { findFirst: jest.fn(async () => null) },
     messageEvent: {
       count: jest.fn(async () => 1),
-      findMany: jest.fn(async () => [{ id: "e1", clientId: "c1", client: cliente, recipient: null, variant: "A" }]),
+      // `status` em forma de lista é a consulta "já enviados nesta campanha" (trava de telefone repetido): vazia aqui
+      findMany: jest.fn(async ({ where }: any) => (where?.status && typeof where.status === "object" ? [] : [{ id: "e1", clientId: "c1", client: cliente, recipient: null, variant: "A" }])),
+      updateMany: jest.fn(async () => ({ count: 1 })), // reserva dos itens (dispatchGuard)
       findFirst: jest.fn(async () => null),
       create: jest.fn(async () => ({})),
       update: jest.fn(async (a: any) => void updates.push(a)),

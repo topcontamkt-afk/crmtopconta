@@ -88,11 +88,11 @@ describe("cabeçalho de imagem na criação", () => {
 });
 
 describe("custo estimado", () => {
-  it("o padrão reproduz R$ 0,41 por mensagem de marketing", () => {
+  it("o padrão é o da Meta no Brasil: US$ 0,0625 por mensagem de marketing (R$ 0,31)", () => {
     const cfg = costConfigFrom(null);
     const c = estimateCost("MARKETING", cfg, 4272);
-    expect(c.brl).toBeCloseTo(0.41, 2);
-    expect(c.total).toBeCloseTo(0.4102 * 4272, 0);
+    expect(c.brl).toBeCloseTo(0.3119, 3);
+    expect(c.total).toBeCloseTo(0.3119 * 4272, 0);
   });
 
   it("categoria sem preço informado não inventa valor", () => {

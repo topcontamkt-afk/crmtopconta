@@ -232,9 +232,22 @@ manual `enqueueManualCampaign`) → no "Imediato" o navegador chama `/dispatch` 
 o texto dele só muda na Meta. **Cabeçalho com imagem:** `TemplateMedia` (JPG/PNG até 3 MB), `PUT/DELETE/GET /api/templates/:id/header`; no envio a imagem sobe para a Meta uma vez
 por lote (`prepareHeaderImage` → `uploadHeaderImage`, id usado como `header` do template); para criar template nosso com imagem a Meta exige exemplo por upload resumível
 (`uploadTemplateExample`, precisa de `WhatsAppAccount.appId`, campo opcional em Integrações) — fluxo escrito pela documentação, ainda não testado contra a Meta. Imagem de importado:
-tenta baixar o exemplo do cabeçalho na importação, senão envie uma em Templates. **Custo:** `services/messageCost.ts` (US$ por categoria × câmbio; padrão marketing R$ 0,41 =
-0,0822 × 4,99; utilidade sem padrão), configurável em `GET/PUT /api/campaigns/custos` (ADMIN) e gravado em `Campaign.costPerMessage`. SQL: `backend/prisma/sql/2026-10-assistente-campanha.sql`
+tenta baixar o exemplo do cabeçalho na importação, senão envie uma em Templates. **Custo:** `services/messageCost.ts` (US$ por categoria × câmbio; padrão marketing
+0,0625 × 4,99 = R$ 0,31, o valor que a Meta cobra no Brasil, conferido no painel dela em 22/10/2026; utilidade sem padrão), configurável em `GET/PUT /api/campaigns/custos` (ADMIN) e gravado em `Campaign.costPerMessage`. SQL: `backend/prisma/sql/2026-10-assistente-campanha.sql`
 (rodar antes do deploy, depois de `2026-10-campanha-manual.sql`).
+
+### Disparo sem duplicidade (incidente de 22/10/2026)
+
+12 chamadas simultâneas de `/dispatch` leram os mesmos itens da fila e cada pessoa recebeu até 10 cópias (467 envios para 53 pessoas, 147 entregues e cobradas). `services/dispatchGuard.ts` +
+`processQueueBatch` agora garantem: (1) **uma trava por campanha** (`Campaign.dispatchToken/dispatchUntil`, UPDATE condicional atômico, expira em 90 s): disparo concorrente recebe `409 DISPARO_EM_ANDAMENTO`
+e não envia nada; (2) **reserva dos itens** antes de enviar (`MessageEvent.claimToken/claimedAt`; reserva abandonada só vale de novo após 30 min, porque se a mensagem saiu e só o registro falhou reenviar duplicaria);
+(3) **trava por telefone**: mesmo telefone já enviado na campanha (ou repetido no lote) fica `BLOQUEADO`; (4) **lote de até 25** com **orçamento de tempo** (`DISPATCH_ORCAMENTO_MS`, padrão 20 s; sempre sai ao menos
+uma): o que sobra volta à fila (`parcial: "tempo"`); (5) **erro de infraestrutura** (`Too many subrequests`, `exceeded CPU`) não vira FALHA: o item volta à fila e o disparo para (`parcial: "limite da plataforma"`);
+se o envio saiu mas o registro falhou, o item NÃO volta (não reenvia). Campanha `PAUSADA`/`CANCELADA` não envia (`POST /:id/pause|resume`). O ciclo diário roda até 4 lotes por campanha.
+**Homologação** (`APP_ENV=hml`): só envia de verdade para `ENVIO_PERMITIDO_PARA` (`services/envioRestrito.ts`; vazio = nada sai) — a conta da Meta da hml tem credencial real e `MESSAGING_MODE=mock` só vale sem canal do tenant.
+**Tela** (`CampaignList.tsx`): "Disparar lote" pede confirmação, desabilita no clique, mostra "Enviando… X/Y" com barra, vira "Enviado ✓" desabilitado ao terminar e "Continuar envio (restam N)" se parou; `GET /campaigns`
+traz `contagem` (enviadas/fila/falhas/bloqueadas) e `emDisparo`. **Custo do relatório** soma só ENVIADO/ENTREGUE/LIDO/RESPONDIDO (falha não é cobrada). `disparoLote.int.test.ts` dispara 6 chamadas simultâneas e exige
+cada mensagem exatamente uma vez. SQL: `backend/prisma/sql/2026-10-disparo-sem-duplicidade.sql` (D1: `migrations/0007_disparo_sem_duplicidade.sql`; rodar antes do deploy).
 
 ### Templates: lista, editor em 3 passos e botões (fase 1)
 

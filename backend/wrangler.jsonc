@@ -58,7 +58,10 @@
         "ALLOWED_ORIGINS": "https://crmtopconta-hml.topcontamkt.workers.dev",
         "PUBLIC_BACKEND_URL": "https://crmtopconta-hml.topcontamkt.workers.dev",
         // homologação não envia de verdade sem canal do tenant: o envio é simulado
-        "MESSAGING_MODE": "mock"
+        "MESSAGING_MODE": "mock",
+        // Números que podem receber envio REAL na homologação (vírgula ou ponto e vírgula). Vazio = nada sai de verdade:
+        // a conta da Meta da homologação tem credencial real e já atingiu clientes (incidente de 22/10/2026).
+        "ENVIO_PERMITIDO_PARA": ""
       },
       "d1_databases": [
         { "binding": "DB", "database_name": "crmtopconta-hml", "database_id": "9945cc44-3f12-404f-8505-96d68bd21a6e" }

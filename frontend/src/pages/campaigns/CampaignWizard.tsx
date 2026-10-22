@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { api } from "../../api/client";
+import { api, ApiError } from "../../api/client";
 import { useAuth } from "../../context/AuthContext";
 import CostsModal from "../../components/campaign/CostsModal";
 import FiltrosRapidos, { FILTROS_VAZIOS, Filtros, filtrosParaApi } from "../../components/campaign/FiltrosRapidos";
@@ -309,7 +309,18 @@ export default function CampaignWizard() {
       let enviados = 0;
       for (let guarda = 0; guarda < 2000 && !cancelar.current; guarda++) {
         setProgresso({ fase: "Enviando as mensagens…", enviados, total });
-        const r = await api<{ processed: number; remaining: number; throttled?: boolean; bloqueado?: string }>(`/campaigns/${id}/dispatch`, { method: "POST", body: { limit: 25 } });
+        let r: { processed: number; remaining: number; throttled?: boolean; bloqueado?: string };
+        try {
+          r = await api(`/campaigns/${id}/dispatch`, { method: "POST", body: { limit: 25 } });
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 409) {
+            // outro disparo desta campanha em andamento: espera, sem enviar nada
+            setProgresso({ fase: "Outro disparo em andamento… aguardando", enviados, total });
+            await sleep(4000);
+            continue;
+          }
+          throw e;
+        }
         if (r.bloqueado) {
           setProgresso({ fase: "Envio bloqueado", enviados, total, aviso: r.bloqueado });
           setBusy(false);

@@ -2,9 +2,9 @@
  * Custo estimado por mensagem do WhatsApp (tabela de preços da Meta, cobrada por mensagem de template
  * e por categoria). É uma ESTIMATIVA para o assistente de campanhas: os valores são configuráveis por
  * empresa (Tenant.custoMarketingUsd/custoUtilidadeUsd/cambioUsdBrl) porque a Meta reajusta a tabela.
- * O padrão de marketing e o câmbio vêm do valor que a operação já usa hoje (R$ 0,41 com câmbio 4,99).
+ * O padrão de marketing é o que a Meta cobra no Brasil (US$ 0,0625, conferido no painel da Meta em 22/10/2026) e o câmbio 4,99.
  */
-export const DEFAULT_COSTS = { marketingUsd: 0.0822, utilidadeUsd: null as number | null, cambioUsdBrl: 4.99 };
+export const DEFAULT_COSTS = { marketingUsd: 0.0625, utilidadeUsd: null as number | null, cambioUsdBrl: 4.99 };
 
 export interface CostConfig {
   marketingUsd: number | null;
