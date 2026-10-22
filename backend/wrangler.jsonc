@@ -45,6 +45,8 @@
       // do ponto mais próximo do navegador. O Smart Placement não serve aqui: precisa de tráfego constante.
       "placement": { "region": "aws:us-east-1" },
       "preview_urls": false,
+      // Guarda os logs e erros do Worker (Workers Logs): sem isto um 500 não deixa rastro para investigar.
+      "observability": { "enabled": true, "head_sampling_rate": 1 },
       "assets": {
         "directory": "../frontend/dist",
         "binding": "ASSETS",
