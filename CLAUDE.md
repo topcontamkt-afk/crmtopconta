@@ -43,6 +43,13 @@ npm run build       # tsc -b && vite build
 
 ## Architecture
 
+> **Branch `claude/cloudflare` (migração para Cloudflare Workers + D1 + R2, em andamento):** o banco deixou de
+> ser Postgres/Supabase. Schema SQLite com Prisma 7, client por adapter (`configureDatabase` em `config/db.ts`),
+> isolamento por tenant INJETADO pela extensão `config/tenantGuard.ts` (não há RLS), `tenantRaw` exige
+> `"tenantId" = $1`, migrations em `backend/migrations/` (wrangler). Onde o texto abaixo fala de RLS,
+> `DATABASE_URL`, `set_config` ou Vercel, vale o novo desenho: ver `docs/infra/cloudflare-ambientes.md`.
+
+
 ### Request flow / entry points
 
 `backend/src/app.ts` builds the Express app (middleware, all `/api/*` route
@@ -106,9 +113,48 @@ the import.
   without touching callers).
 - Opt-out is sticky: once a client opts out, re-import never silently
   re-authorizes them.
-- `services/retention.ts` runs a daily right-to-be-forgotten job anonymizing
-  clients inactive past `Tenant.retentionDays`.
+- `services/retention.ts` runs a daily job anonymizing clients inactive past
+  `Tenant.retentionDays` (plus closed accounts, Inbox, media and import history;
+  see "Adequação LGPD" below).
 - Every sensitive action goes through `middleware/audit.ts` into `AuditLog`.
+
+**Adequação LGPD (branch `claude/lgpd-adequacao`, 2026-10).** Fonte legal e relatórios em `docs/lgpd/` (corpus oficial,
+auditorias, plano de correções, rascunhos de artefatos); skills `/lgpd-audit` (varredura multi-agente) e `/lgpd-check`
+(só o diff). Regras que o código agora garante:
+- **Config por controlador (tenant)**: `GET/PUT /api/tenant/lgpd` (Configurações → LGPD): base legal de marketing
+  (`Tenant.baseLegalMarketing`, nulo = envio de marketing bloqueado em campanha, lista manual e automação; ver
+  `services/baseLegal.ts`), LIA, controlador/encarregado, aviso de privacidade, rodapé de opt-out e prazos de retenção
+  (30–1825 dias, fundamento obrigatório, prévia antes de reduzir).
+- **Supressão por titular** (`services/privacy.ts`, `SupressaoTitular`, só hashes HMAC com `cpfSalt`): opt-out (PARAR por
+  WhatsApp/Z-API, STOP por SMS, manual) vale pelo **telefone canônico** em todos os cadastros e listas; o envio consulta em
+  lote (`suprimidosEmLote`). ELIMINACAO bloqueia a reimportação só pelo documento (volta se a planilha mostrar conta
+  aberta depois do pedido, ou por liberação de ADMIN) e não barra número reaproveitado com outro CPF.
+- **Público de envio**: `ENVIAVEL_WHERE` (segments.ts) exclui sem limite, `bloqueadoLgpdAt`, `encerradoEm` e
+  `anonymizedAt`; `CONTATO_LIBERADO_WHERE` exige autorização, sem opt-out e sem bloqueio. Renda não é critério de público
+  (só estatística): segmento salvo ou regra de automação antiga com `perfilRenda`/`noTetoLimite` é recusado no assistente,
+  no `POST /campaigns`, ao enfileirar e no motor (`AVISO_RENDA_IGNORADA`), porque sem o filtro o público cresceria. Toda
+  mensagem de marketing em texto livre leva rodapé com controlador e "responda SAIR" (`montarRodape`); template próprio
+  MARKETING só é criado com rodapé ou botão de saída, e importado da Meta sem saída só gera aviso no assistente. Template
+  MARKETING pela Inbox também exige base legal declarada.
+- **Direitos do titular**: relatório completo (`GET /api/clients/:id/relatorio-titular`), correção que trava o campo contra
+  reimportação (`Client.camposCorrigidos`), bloqueio (`/bloqueio`), eliminação (`POST /api/clients/:id/anonymize`, anonimiza
+  cliente e dados ligados: Inbox, compras, snapshots, histórico de importação, destinatários) e registro de pedidos com prazo
+  de 15 dias (`/api/titular/pedidos`, tela `/clients/pedidos-titular`). Quem não é cliente da base (lista manual, Inbox) tem
+  relatório e eliminação pelo telefone no próprio pedido (`/relatorio-contato`, `/eliminar-contato`, `anonymizeContato`);
+  pedido de eliminação só fica "atendido" depois de eliminar, e atender revogação/oposição aplica o opt-out pelo número.
+- **Retenção** (job diário `/api/cron/retention`): inativos, contas encerradas (`retentionDaysAfterClosure`), Inbox
+  (`inboxRetentionDays`), mídias (`mediaRetentionDays`), `ImportChange` com mais de 30 dias. Redigir PII de `AuditLog` grava
+  o evento encadeado `AUDIT_REDACAO_LGPD`, então a verificação continua ok.
+- **Exposição**: listas e ficha com `select` explícito, VIEWER sem telefone completo; exports com telefone mascarado (completo
+  só ADMIN com motivo, auditado); buscas por nome/telefone vão no corpo (POST), nunca na URL; aviso de mensagem nova sem
+  conteúdo; leitura em volume auditada.
+- **Trilha**: cadeia de hash do `AuditLog` **por tenant** (âncora `AUDIT_CADEIA_POR_TENANT` na transição); login falho,
+  bloqueio, 2FA falho e 403 por papel ficam no AuditLog (e-mail mascarado).
+- **Canais**: credencial de canal do ambiente só vale para `PLATFORM_DEFAULT_TENANT_ID` (ou todos com
+  `ALLOW_GLOBAL_CHANNEL_CREDENTIALS=true`, dev); webhook SMS exige assinatura (Twilio) ou segredo por canal; planilha
+  Google só se cadastrada no próprio tenant e nunca em dois; Z-API segue a janela de 24h.
+- SQL: `backend/prisma/sql/2026-10-lgpd-adequacao.sql` (antes do deploy) e `2026-10-lgpd-minimizacao-dados.sql`
+  (destrutivo, depois). Pendências e decisões em `docs/lgpd/correcoes/pendencias-integracao.md`.
 
 ### Campaign send path
 
@@ -186,9 +232,25 @@ manual `enqueueManualCampaign`) → no "Imediato" o navegador chama `/dispatch` 
 o texto dele só muda na Meta. **Cabeçalho com imagem:** `TemplateMedia` (JPG/PNG até 3 MB), `PUT/DELETE/GET /api/templates/:id/header`; no envio a imagem sobe para a Meta uma vez
 por lote (`prepareHeaderImage` → `uploadHeaderImage`, id usado como `header` do template); para criar template nosso com imagem a Meta exige exemplo por upload resumível
 (`uploadTemplateExample`, precisa de `WhatsAppAccount.appId`, campo opcional em Integrações) — fluxo escrito pela documentação, ainda não testado contra a Meta. Imagem de importado:
-tenta baixar o exemplo do cabeçalho na importação, senão envie uma em Templates. **Custo:** `services/messageCost.ts` (US$ por categoria × câmbio; padrão marketing R$ 0,41 =
-0,0822 × 4,99; utilidade sem padrão), configurável em `GET/PUT /api/campaigns/custos` (ADMIN) e gravado em `Campaign.costPerMessage`. SQL: `backend/prisma/sql/2026-10-assistente-campanha.sql`
+tenta baixar o exemplo do cabeçalho na importação, senão envie uma em Templates. **Custo:** `services/messageCost.ts` (US$ por categoria × câmbio; padrão marketing
+0,0625 × 4,99 = R$ 0,31, o valor que a Meta cobra no Brasil, conferido no painel dela em 22/10/2026; utilidade sem padrão), configurável em `GET/PUT /api/campaigns/custos` (ADMIN) e gravado em `Campaign.costPerMessage`. SQL: `backend/prisma/sql/2026-10-assistente-campanha.sql`
 (rodar antes do deploy, depois de `2026-10-campanha-manual.sql`).
+
+### Disparo sem duplicidade (incidente de 22/10/2026)
+
+12 chamadas simultâneas de `/dispatch` leram os mesmos itens da fila e cada pessoa recebeu até 10 cópias (467 envios para 53 pessoas, 147 entregues e cobradas). `services/dispatchGuard.ts` +
+`processQueueBatch` agora garantem: (1) **uma trava por empresa** (`Tenant.dispatchToken/dispatchUntil/dispatchCampaignId`, UPDATE condicional atômico, expira em 90 s; por empresa e não por campanha porque duas campanhas iguais, de um lançamento clicado duas vezes,
+enviariam o mesmo telefone duas vezes): disparo concorrente recebe `409 DISPARO_EM_ANDAMENTO` e não envia nada; (2) **reserva dos itens** antes de enviar (`MessageEvent.claimToken/claimedAt`; reserva abandonada só vale de novo após 30 min, porque se a mensagem saiu e só o registro falhou reenviar duplicaria);
+(3) **trava por telefone**: mesmo telefone que já recebeu esta mesma mensagem, nesta ou em OUTRA campanha dentro de `dedupeWindowHrs` (72 h), ou repetido no lote, fica `BLOQUEADO`; (4) **lote de até 25** com **orçamento de tempo** (`DISPATCH_ORCAMENTO_MS`, padrão 20 s; sempre sai ao menos
+uma): o que sobra volta à fila (`parcial: "tempo"`); (5) **erro de infraestrutura** (`Too many subrequests`, `exceeded CPU`) não vira FALHA: o item volta à fila e o disparo para (`parcial: "limite da plataforma"`);
+se o envio saiu mas o registro falhou, o item NÃO volta (não reenvia). Campanha `PAUSADA`/`CANCELADA` não envia (`POST /:id/pause|resume`). O ciclo diário roda até 4 lotes por campanha.
+**Homologação** (`APP_ENV=hml`): só envia de verdade para `ENVIO_PERMITIDO_PARA` (`services/envioRestrito.ts`; vazio = nada sai) — a conta da Meta da hml tem credencial real e `MESSAGING_MODE=mock` só vale sem canal do tenant.
+**Tela:** "Disparar lote" (lista) e "Lançar" no modo Imediato (assistente) levam ao **relatório da campanha** com `?enviar=1`; é essa página que roda o envio (`utils/disparo.ts`: lotes de 25, um de cada vez, 409 = espera) e mostra o andamento
+ao vivo: barra "Enviando… X/Y", "Parar envio", últimas mensagens (telefone mascarado) e o **funil** (pessoas → enviadas → entregues → visualizaram → clicaram → usaram o limite, com % da etapa anterior e % das enviadas), atualizado a cada lote e a cada 2,5 s por
+`GET /api/campaigns/:id/funil` (leve; o `/report` completo também traz `funil`). O `?enviar=1` é limpo do endereço ao iniciar (recarregar não dispara de novo); se parar no meio, "Continuar envio (restam N)"; ao terminar, "Enviado ✓". Funil puro em
+`services/campaignFunil.ts`: quem clicou conta como entregue e visualizou mesmo sem recibo da Meta (nunca há mais cliques que visualizações). A lista (`CampaignList.tsx`) mostra enviadas/fila/falhas por campanha, "Pausar"/"Retomar" e "Enviado ✓" desabilitado; `GET /campaigns`
+traz `contagem` e `emDisparo`. **Custo do relatório** soma só ENVIADO/ENTREGUE/LIDO/RESPONDIDO (falha não é cobrada). `disparoLote.int.test.ts` dispara chamadas simultâneas (inclusive duas campanhas iguais e um teste de caos com falhas aleatórias) e exige
+cada mensagem no máximo uma vez. SQL: `backend/prisma/sql/2026-10-disparo-sem-duplicidade.sql` (D1: `migrations/0007_disparo_sem_duplicidade.sql`; rodar antes do deploy; o ciclo automático e as automações enviam no máximo 25 por lote, 4 lotes por campanha por execução).
 
 ### Templates: lista, editor em 3 passos e botões (fase 1)
 
@@ -228,11 +290,11 @@ podem usar as variáveis de `services/templateVariables.ts` (`nome`, `cidade`, `
 
 `services/rendaPerfil.ts` estima o salário pelo **limite total** (limite ÷ 0,40; nunca o saldo disponível) e
 classifica em PF1 (até R$ 4.000, inclui quem estaria abaixo do piso), PF2 (até 8.000), PF3 (até 12.000) e PF4
-(acima). Cálculo puro, sem coluna nova: `limiteRange` vira o filtro `perfilRenda` em `SegmentFilters` (e no
-assistente de campanha). O limite tem teto de R$ 2.000 (`noTetoLimite`), por isso PF3/PF4 aparecem quase vazios.
+(acima). Cálculo puro, sem coluna nova: `limiteRange` era o filtro `perfilRenda` de `SegmentFilters`; **desde a adequação LGPD
+(01-03) renda não filtra público** e segmento/regra com esse filtro é recusado (ver "Adequação LGPD"). O limite tem teto de R$ 2.000 (`noTetoLimite`), por isso PF3/PF4 aparecem quase vazios.
 **Limite zero/vazio = comércio credenciado**: `ENVIAVEL_WHERE` o exclui de todo público de campanha e o envio
-bloqueia o evento por garantia. `POST /api/segments/presets/perfis-renda` cria/atualiza os segmentos prontos
-(`PERFIL_RENDA_PRESETS`) e `GET /api/dashboard/perfis-renda` alimenta o card do dashboard.
+bloqueia o evento por garantia. `POST /api/segments/presets/perfis-renda` está desativado (os presets PF1–PF4 saíram) e
+`GET /api/dashboard/perfis-renda` alimenta o card do dashboard (só estatística).
 
 ### Etapa de uso real (recorrência e dias sem uso)
 
@@ -250,7 +312,7 @@ extrato. SQL em `backend/prisma/sql/2026-10-uso-real-cliente.sql` (rodar antes d
 `services/campaignPerfil.ts` quebra o resultado da campanha por PF1–PF4 (limite atual do cliente; controle comparado
 dentro do mesmo perfil) — `porPerfil` em `GET /api/campaigns/:id/report`. `services/dataFreshness.ts` avalia se o
 extrato de compras está em dia (limite 3 dias; `GET /api/dashboard/frescor`, aviso no dashboard e no assistente).
-O gatilho de automação `ETAPA_PERFIL` (condição `etapaUso`, `perfilRenda`, `comSaldo`) dispara por etapa/perfil e
+O gatilho de automação `ETAPA_PERFIL` (condição `etapaUso`, `comSaldo`; regra com `perfilRenda` não dispara) dispara por etapa e
 **não roda com extrato velho** ou ausente.
 
 ### Nota de saúde por uso real
@@ -275,6 +337,76 @@ telefones sempre mascarados. Tela `/inbox` (leitura, atualização por polling d
 `Conversation.lastInboundAt`. **Fase 2 (mídia):** `services/whatsappMedia.ts` busca o arquivo na Graph API em 2 passos (`GET /{media-id}` → URL temporária → bytes, com `WHATSAPP_ACCESS_TOKEN`) e guarda a cópia em `WaMediaBlob` (limite de 4 MB: a Vercel não devolve respostas maiores; o webhook já guarda ao receber e a tela tenta de novo se falhar). `GET /api/inbox/media/:messageId` serve o arquivo autenticado (só tipos seguros abrem inline, resto baixa; `nosniff` + CSP restritiva); o front busca com o token e mostra por URL local (imagem com zoom, áudio/vídeo com player, PDF abre/baixa). SQL: `backend/prisma/sql/2026-10-whatsapp-media.sql`. **Fase 3 (responder):** `POST /api/inbox/conversations/:id/messages` (ADMIN/OPERATOR) envia texto ou arquivo (base64 no JSON, até 3 MB; imagem JPG/PNG, PDF, áudio OGG/MP3/M4A/AAC/AMR, vídeo MP4) via `services/whatsappReply.ts` + `whatsappSend.ts`: confere a janela de 24h (`409 JANELA_FECHADA` fora dela), envia pela Meta (upload em `/{phone-number-id}/media` + `/messages`) e só então grava a `WaMessage` de saída (`sentByUserId`, status `sent`); a Meta recusando, nada é gravado. O webhook `statuses` atualiza o status (sent→delivered→read, nunca volta; failed guarda o motivo traduzido). SQL: `backend/prisma/sql/2026-10-whatsapp-reply.sql`. Fora da janela só template (Fase 4): hoje
 `WhatsAppCloudAdapter` só envia texto livre, que a Meta recusa fora da janela. SQL: `backend/prisma/sql/2026-10-whatsapp-inbox.sql`
 (inclui RLS e GRANT; rodar antes do deploy). Webhook e token da Meta: ver o roteiro da Fase 0.
+
+### Inbox: resposta automática, aviso de mensagem nova e tela cheia
+
+**Resposta automática** (`services/whatsappAutoReply.ts`): o número é canal só de avisos; quem escreve recebe o padrão do controlador (`autoReplyPadraoDo`: nome do controlador, contato do encarregado e "responda SAIR"; sem eles, o neutro `AUTO_REPLY_PADRAO`) ou o texto
+da conta (`WhatsAppAccount.autoReplyText`, nulo = padrão; `autoReplyEnabled`, ligada por padrão). O webhook chama `maybeAutoReply` depois de `storeInboundMessage`: responde a TODA mensagem NOVA do cliente (reenvio da Meta não conta), nunca a opt-out (PARAR/SAIR), mas no máximo
+`AUTO_REPLY_MAX` (3) vezes por conversa em 24 h corridas (conta os `WaMessage` SAIDA `automatic=true` da janela; sem coluna de controle; envio recusado pela Meta não grava, então não conta). Vai como texto livre dentro da janela de 24h que a mensagem do cliente acabou de abrir; grava `WaMessage.automatic=true` (a tela mostra "🤖 Resposta
+automática") e não zera o não lido. Nunca lança (o webhook não pode falhar por isso). `GET/PUT /api/inbox/auto-reply` (PUT só ADMIN, auditado) alimenta o painel "Resposta automática"
+na Inbox. **Aviso de mensagem nova:** `GET /api/inbox/resumo` (leve: não lidas + última) é consultado a cada 15 s por `components/InboxAlerts.tsx` em QUALQUER tela: balão no canto
+(some em 9 s, abre a conversa), bipe, "(N)" no título da aba e, com a aba em segundo plano, notificação do navegador (botão "Ativar avisos no navegador" na Inbox pede a permissão). A
+primeira consulta só marca o que já existia. A Inbox usa a tela toda (`.main:has(.inbox-page)`). SQL: `backend/prisma/sql/2026-10-whatsapp-resposta-automatica.sql` (rodar antes do deploy; `Conversation.lastAutoReplyAt` da 1ª versão ficou no banco sem uso).
+
+### Ligações pelo WhatsApp (Calling API da Meta) — passo 0: diagnóstico
+
+Decisão: o cliente liga PARA nós pelo WhatsApp (ligação recebida, sem pedir permissão; a empresa ligar exige permissão por template, 2.000 destinatários/dia e tem limites por cliente). Requisitos
+da Meta (documentação oficial): número na Cloud API, assinar o campo `calls` do webhook, `whatsapp_business_messaging`, limite diário de **2.000 destinatários únicos** e ligar o recurso nas "call
+settings" do número (vem desligado). Mídia por WebRTC (ICE+DTLS+SRTP) ou SIP; áudio Opus, e G.711 (PCMA/PCMU) desde março/2026 — PCMU é o que a ponte da xAI já usa. Isso exige um servidor SEMPRE
+LIGADO fora da Vercel (ainda não existe). Passo 0 já feito: `services/whatsappCalling.ts` (puro, testado) lê `messaging_limit_tier` e `GET /{phone}/settings → calling.status` e o "Testar conexão" do
+modal da Meta devolve `ligacoes` (informativo: não muda o resultado do teste). Próximos passos: ligar o recurso no número, assinar `calls`, tratar o webhook (SDP offer → accept com SDP answer),
+servidor de áudio ↔ xAI e registro das ligações.
+
+### RETOMAR DEPOIS: ligação pelo WhatsApp (cliente liga para a IA) e outras pendências
+
+**Estado em 18/10/2026.** Decisão: o cliente liga PARA nós pelo WhatsApp (Calling API da Meta); ligação da empresa para o cliente fica de fora (exige permissão por template). Já feito e em produção: só o
+diagnóstico no "Testar conexão" (passo 0 acima). Conferido na Meta: limite diário = **10.000** (atende o mínimo de 2.000; o campo `messaging_limit_tier` NÃO vem pela Graph API para esse número, então o
+diagnóstico mostra ❔ no limite: aceitável, ou trocar a leitura); recurso de ligações **desligado de propósito** (ligar antes do servidor de áudio pronto faria o ícone aparecer e as chamadas tocarem
+sem atender, o que derruba a taxa de atendimento e gera restrição da Meta). **Vercel não serve para o áudio** (WebRTC usa UDP; função da Vercel só atende HTTP/WebSocket).
+Hospedagem escolhida em princípio: **Fly.io** (aceita UDP, região gru; só o áudio vai para lá, o resto do CRM continua na Vercel); o usuário ainda precisa criar a conta (cartão) e dizer "pode seguir
+com o Fly.io". Alternativas: VPS (Docker), ou serviço gerenciado (LiveKit Cloud).
+Passos que faltam, em ordem: (1) servidor de áudio em pacote separado (Node + WebRTC, ex. `werift`, codec **PCMU** para repassar direto à xAI sem converter; reaproveitar `services/voice.ts` e
+`voiceBridge.ts`); (2) tratar o webhook `calls` (o `POST /api/integrations/webhooks/whatsapp` da Vercel recebe o SDP offer, repassa ao servidor de áudio com segredo compartilhado, devolve o SDP answer e
+chama `accept` na Graph API; `terminate` ao fim); (3) assinar o campo `calls` no app da Meta e ligar `calling.status=ENABLED` no número (`POST /{phone}/settings`) e escolher o codec PCMU nas call settings;
+(4) tabela de ligações (cliente, duração, resultado, custo) + tela/relatório; (5) template com botão de ligar (call button) e ajuste do texto da resposta automática da Inbox (hoje diz "não realizamos
+atendimentos por aqui"); (6) testar com um celular de teste antes de abrir a todos. Limites a respeitar: baixa taxa de atendimento e reclamações geram restrição; ligação da empresa: 1 pedido de permissão/dia e
+2/semana por cliente. Não dá para testar contra a Meta fora do ambiente real (sandbox só para Tech Partners).
+
+**Outras pendências em aberto:** Twilio — concluir o Trust Hub (Primary Customer Profile) para ligações de SAÍDA; teste de ligação RECEBIDA ainda não reportado (número do Twilio precisa estar na conta e
+"A call comes in" = `https://crmtopconta-backend.vercel.app/api/voice/inbound`). Inbox — opcional: avisar na tela quando a assinatura do webhook for inválida. Cidades — opcional: incluir "assessoria/
+consultoria/tecnologia/comunicacao" na regex de nome de empresa de `cidades.ts`; 90 clientes ativos com limite sem cidade válida. Dados — enviar extrato de setembro de Natal (06/09–05/10) e Carmópolis
+(07/09–06/10) para medir o ciclo anterior; reimportar a base de 790 clientes com limite 0; 15 clientes lixo; `LINK_BASE_URL` com domínio próprio; templates fase 3 (copiar código, cabeçalho de
+vídeo/documento); limpeza de sobras do Supabase. Dashboard — oferecer botão "Criar campanha" por cidade para quem não usou o saldo.
+
+### Acesso por área (Usuários → Acessos)
+
+Além do papel (ADMIN/OPERATOR/ANALYST/VIEWER = o que a pessoa pode FAZER), cada usuário tem as **áreas** que pode ABRIR: `User.areasRestritas` (false = todas, é o padrão e vale para quem já existia) +
+`User.areas` (lista). ADMIN sempre vê tudo. As 12 áreas são as do menu (dashboard, clients, segments, commerce, ciclos, inbox, campaigns, templates, automations, imports, integrations, audit);
+Usuários/Configurações/Minha conta são livres. `services/areas.ts` (puro, testado em `areas.test.ts`) tem a tabela `RULES` "método + caminho da API → áreas que dão acesso (qualquer uma serve)"; a
+conferência real é `middleware/areaAccess.ts`, montado em `app.use("/api", areaAccess)` ANTES das rotas: lê o JWT, busca `active`/`role`/áreas no banco (cache de 15 s, limpo ao editar) e devolve 403
+`SEM_ACESSO_AREA`; também barra usuário DESATIVADO (401) — antes ele continuava até o token de 12 h vencer. Sem token/token inválido não decide nada (o `requireAuth` da rota responde 401). Dependências entre
+áreas estão nas regras: Campanhas LÊ templates/segmentos/filtros de comércio (GET) sem ganhar as telas; cartões do dashboard usam `/ciclos/proximos|audiencia` e `POST /segments/presets`; importar compras
+(`/purchases/import`) e `/clients/purge` são de Importações; Automações lê `/ciclos` e templates. **Rota nova em `app.ts` sem regra faz o teste falhar**: acrescente-a em `RULES` (ou a deixe aberta de propósito).
+`/auth/login`, `/auth/2fa/verify` e `/auth/me` devolvem `areas` (null = todas); o front (`utils/areas.ts`, espelho do backend) filtra o menu, `AreaRouteGuard` redireciona acesso direto por endereço à primeira
+tela liberada e o Layout chama `refreshUser()` ao abrir. Tela: Usuários ganhou a coluna e o editor "Acessos" (caixinhas + atalhos Marketing/Atendimento/Analista) e as caixinhas no formulário de novo usuário;
+`PATCH /api/users/:id` aceita `areas` (lista = restringe, null = todas), auditado. SQL: `backend/prisma/sql/2026-10-acesso-por-area.sql` (rodar antes do deploy; ninguém perde acesso ao publicar).
+
+### WhatsApp: Meta (oficial) ou Z-API (não oficial) — conexão ativa em Configurações
+
+Duas conexões convivem; `Tenant.whatsappProvider` (META|ZAPI, padrão META) diz qual **ENVIA** (campanhas). **Receber** vale para as duas conectadas (cada uma tem o seu webhook) e a Inbox mostra as conversas
+das duas; cada resposta sai pela conexão de ONDE a conversa veio. A Z-API é uma linha de `WhatsAppAccount` com `provider="ZAPI"`: `phoneNumberId="zapi:<instanceId>"` (único), `credentials` cifrado
+`{token, clientToken}`, `verifyToken` = segredo da URL do webhook, `accessTokenHint/appSecretHint` = dicas dos 4 últimos caracteres. **Todo código da Meta filtra `provider: "META"`** (nova consulta a
+`WhatsAppAccount` da Meta precisa disso, senão enxerga a linha da Z-API). `services/zapi.ts` (puro/injetável, formato conferido na documentação oficial github.com/Z-API/z-api-docs): base
+`https://api.z-api.io/instances/{ID}/token/{TOKEN}/...`, cabeçalho `Client-Token` (opcional), `status`, `device`, `qr-code/image`, `send-text` (id em `messageId`), `update-every-webhooks` (só HTTPS) e
+`parseZapiWebhook` (só `ReceivedCallback` de contato individual, ignora grupo/canal/`fromMe`/edição; `MessageStatusCallback` vira sent/delivered/read). Webhook PÚBLICO
+`POST /api/integrations/webhooks/zapi/:secret` (`routes/zapiWebhook.ts`; a Z-API não assina, então segredo na URL + conferência do `instanceId`): grava na MESMA Inbox via `storeInboundMessage` (liga ao
+cliente pelo telefone, opt-out PARAR/SAIR vale), baixa a mídia na hora para `WaMediaBlob` (`zapiMedia.ts`: só https e host com nome, até 4 MB; `mediaId="zapi"` marca origem) e **não** manda resposta
+automática (essa é só do número da Meta). Responder pela Inbox em conversa da Z-API (`sendZapiReply` em `whatsappReply.ts`): só texto, só dentro da janela de 24h (LGPD), sem template, sem anexo (ainda). Campanha com Z-API
+ativa (`campaignQueue.resolveProviders`): adaptador `channels/zapi.ts` manda só o TEXTO do template (variáveis preenchidas; sem imagem/botão/link rastreado), com pausa aleatória e `delayMessage`, em lotes de
+no máximo `ZAPI_BATCH_MAX` (4) por chamada (a tela repete); sem Z-API configurada o disparo é BLOQUEADO (não cai na Meta). O assistente (`campaignWizard.ts`) avisa o risco e que imagem/botão não vão. Tela:
+Configurações → WhatsApp (`components/WhatsAppProviderCard.tsx`, só ADMIN): escolha da conexão ativa (só aceita configurada), instância/token/token de segurança, Testar conexão, QR code (renova a cada
+8 s), "Configurar webhooks automaticamente" e a URL secreta para colar à mão. API em `routes/tenantWhatsapp.ts` (`/api/tenant/whatsapp`, ADMIN, área livre). **Ainda não testado contra a Z-API real.**
+Z-API viola os termos do WhatsApp: risco de bloqueio do número (usar número separado do oficial). SQL: `backend/prisma/sql/2026-10-whatsapp-zapi.sql` (rodar antes do deploy).
 
 ### Templates do WhatsApp (Meta) — Fase 4
 
@@ -341,7 +473,7 @@ de cada importação de clientes e no job diário de snapshot) — assim os filt
 (`diasAberturaNaFaixa`); cidade sem ciclo não entra em nenhum. `routes/ciclos.ts`: `GET /api/ciclos` (cadastro + cidades da base sem ciclo), `PUT /api/ciclos` (ADMIN, tabela inteira),
 `GET /api/ciclos/proximos` (card do Dashboard: abriu há ≤2 dias ou abre em ≤7), `GET /api/ciclos/audiencia?cidadeKey=` (ids aptos + mensagem para "Criar campanha"). Telas: `/ciclos`
 (preenche a tabela da TopConta: Natal 6, Carmópolis 7, Itaporanga e N. S. da Glória 10, Lagarto/Itabaianinha/Boquim/Luziânia 15), card no Dashboard e seção em Segmentos. **Fase 2:** gatilho de automação `CICLO_ABERTO` (`automationEngine.ts`): casa quem tem `diaCicloAbertura` igual ao de uma cidade que abriu há `diasAposAbertura` dias
-(default 0 = no dia), opcionalmente só `cidades` escolhidas (chaves de `CicloCidade`), `perfilRenda`, `etapaUso` (exige extrato em dia) e `comSaldo` (o saldo vem da última planilha, pode não
+(default 0 = no dia), opcionalmente só `cidades` escolhidas (chaves de `CicloCidade`), `etapaUso` (exige extrato em dia) e `comSaldo` (o saldo vem da última planilha, pode não
 refletir a renovação). `matchClients` devolve **um grupo por cidade** e `runRule` executa a ação por grupo: uma campanha por cidade (`Automação: <regra> · <cidade> (<data>)`, resultado separado e
 sem repetir no mesmo dia). `POST /api/automations/:id/run` (`simular: true` só conta por cidade) alimenta "Simular"/"Rodar agora" na tela. Limite do plano Hobby: o motor roda 1x/dia (~07h BRT) e a
 ação de campanha envia só `throttlePerMin` (default 60) mensagens por execução; o resto depende do "Disparar lote"/cron de disparo — para públicos grandes (Natal) o caminho mais completo é o botão
@@ -350,6 +482,33 @@ total, normalizada em "usos por 100 clientes por dia observado" (o extrato cobre
 pico nos dias 1–3 = ok, pico depois = "revisar data" (ou o limite renova mais tarde), <30 usos = poucos dados. Componente `UsoPorDiaCiclo` na tela `/ciclos`. (b) `porCiclo` em
 `GET /api/campaigns/:id/report` — resultado e lift pelo dia do ciclo da cidade do cliente no momento do envio (faixas 1–3, 4–7, 8–15, 16+, sem ciclo), card "Resultado por dia do ciclo no
 envio". Não usa `AccountSnapshot` para validar a abertura (hoje só há uma foto; quando houver histórico dá para checar o salto do saldo). SQL: `backend/prisma/sql/2026-10-ciclos-cidade.sql` (rodar antes do deploy).
+
+### Filtro por datas e "Uso no período" no dashboard
+
+`GET /api/dashboard/overview` aceita `de`/`ate` (YYYY-MM-DD, Brasília) no lugar de `days`: a janela passa a ser a das datas para a série (fotos `DashboardSnapshot`), a linha de base da variação, campanhas e novos clientes
+(os KPIs seguem sendo "de agora"; `periodo.personalizado`). `GET /api/dashboard/uso-periodo` (`services/usoPeriodo.ts`, puro: `resolvePeriodo`, `periodoAnterior`, `preencheDias`, `variacaoPct`) mede o uso REAL pelo extrato
+(`Purchase`, antecipação e compra à vista, mesmo critério de `USO_TIPO_SQL`): clientes que usaram, usos, valor, juros das antecipações, uso por dia e cidades que mais usaram, com variação contra o período anterior de mesma duração,
+e `extrato.cobrePeriodo` avisa quando o extrato termina antes do fim do período. Aceita cidade/convênio. Tela: campos De/Até no cabeçalho do Dashboard (sobrepõem os botões 7/30/90 dias; "Limpar datas" volta) e o card
+`UsoPeriodoCard`. **Adesão da base ativa ao saldo** (`adesao` e `cidades[]` em `uso-periodo`; `services/usoPeriodo.ts`: `taxaAdesao`, `faixaAdesao`, `faltamParaMeta`): meta da TopConta = **80% da base ATIVA** (conta `ATIVO` e `limiteTotal > 0`)
+usando o saldo; taxa = clientes dessa base que usaram no período (antecipação ou compra à vista, distintos) ÷ base ativa, no geral e por cidade (cidade sem uso entra com 0%), com "faltam N clientes para a meta" e variação em p.p. contra o período
+anterior (mesma base de hoje nos dois). Faixas: ≥80% meta atingida, 60–79,9% atenção, abaixo fora da meta. Nos dados de 10/09–09/10: Luziânia 86,4%, Itaporanga 79,8% (falta 1), Natal 43,1%, Lagarto 45,3% (cidade vem de `cidadeKeySql`; nomes de empresa
+sem a palavra-chave da regra, como "ASSESSORIA", ainda aparecem como cidade). **Adesão por ciclo** (`GET /api/dashboard/adesao-ciclo`, card `AdesaoCicloCard`): uma janela fixa de 30 dias corta o ciclo de cada cidade num ponto diferente (Luziânia foi de 86% para 76% só por isso), então a comparação justa para a meta de 80% é por
+ciclo: para cada cidade de `CicloCidade`, `janelasDoCiclo` (`cicloReport.ts`) dá o último ciclo COMPLETO (abertura anterior → dia antes da última abertura) e o ciclo em andamento (parcial); mede clientes ativos com limite que usaram em cada um, `faltam` para 80%,
+e `coberto`/`semDados` quando o extrato não cobre a janela (ex.: Natal e Carmópolis não têm compras de setembro no extrato: ciclo anterior ≈ 0% com ciclo atual alto = falta de dado, não de uso). O geral do ciclo completo soma só cidades com dados.
+`.main:has(.pd)` libera a largura do dashboard (antes limitada a 1440px, o que deixava faixa vazia à direita em monitor largo).
+
+### Ligação com IA de voz (xAI + Twilio) — fase 1: teste
+
+O CRM manda o Twilio ligar (`POST /api/voice/test-call`, ADMIN, `routes/voice.ts`); ao atender, o Twilio abre um WebSocket (Media Streams) com a **ponte** `backend/api/voice-bridge.ts` (função própria da Vercel, só importa código
+puro), que abre outro WebSocket com o agente de voz da xAI (`wss://api.x.ai/v1/realtime?agent_id=…` ou `?model=grok-voice-latest`) e repassa o áudio nos dois sentidos em G.711 μ-law 8 kHz (`audio/pcmu`, sem conversão).
+`services/voice.ts` (puro): token HMAC da ligação (contexto nome/saldo, expira em 10 min; o endpoint da ponte é público, então só confia no token), `buildTwiml`, `buildInstructions` (português; só diz o saldo depois de
+confirmar quem atende; nunca pede CPF/senha), `buildSessionUpdate` e as funções `registrar_resultado`/`encerrar_ligacao`. `services/voiceBridge.ts`: máquina de estados da ponte, sem rede e testada (`voiceBridge.test.ts`): agente fala
+primeiro, `speech_started` manda `clear` ao Twilio, aviso de despedida 12 s antes do limite (`VOICE_MAX_SECONDS`, padrão 90), fechar o WebSocket do Twilio encerra a ligação, logs `[voice] …` (latência do primeiro áudio, duração,
+resultado; transcrição só com `VOICE_LOG_TRANSCRIPT=1`). Webhook de status público `POST /api/voice/twilio-status` (assinatura X-Twilio-Signature). Fase 1 liga SÓ para `VOICE_TEST_NUMBER` (nunca número da tela), 3 por hora. Teste por ligação RECEBIDA: `POST /api/voice/inbound` (público, assinatura Twilio; configurar em "A call comes in" do número) só atende quando o `From` é o `VOICE_TEST_NUMBER` (senão `<Reject/>`, sem custo); usa `VOICE_TEST_NAME`/`VOICE_TEST_SALDO` (padrão Maria/250). Dispensa a verificação da empresa exigida pelo Twilio para ligações de saída.
+Env (backend): `XAI_API_KEY`, `XAI_AGENT_ID` (opcional), `XAI_VOICE_MODEL`, `XAI_VOICE`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_VOICE_NUMBER` (ou `TWILIO_FROM_NUMBER`), `VOICE_TEST_NUMBER`, `PUBLIC_BACKEND_URL`.
+`backend/vercel.json` ganhou build/rota própria da ponte antes do catch-all. **Ainda não verificado:** se a Vercel mantém o WebSocket com essa configuração `builds`/`routes` e por quanto tempo (limite de duração da função), a qualidade do
+português, a latência e o custo por minuto — o teste da fase 1 serve para isso. Protocolo da xAI conferido no código do Pipecat (`pipecat/services/xai/realtime`), não na documentação oficial. Próximas fases: campanha de voz (canal VOZ, fila,
+janela de horário), ações (link por WhatsApp, opt-out) e resultado no relatório.
 
 ### Cron jobs: local vs. Vercel
 

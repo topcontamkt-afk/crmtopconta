@@ -1,4 +1,4 @@
-import { TEMPLATE_VARIABLES, variablesIn } from "./templateVariables";
+import { mencionaOptOut, TEMPLATE_VARIABLES, variablesIn } from "./templateVariables";
 import { WHATSAPP_API_VERSION } from "./whatsappMedia";
 import { SendError, explainMetaError } from "./whatsappSend";
 import { trackedUrlExample, trackedUrlPattern } from "./trackedLinks";
@@ -74,6 +74,16 @@ export function toMetaBody(body: string): string {
   return body.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, v) => `{{${order.indexOf(v) + 1}}}`);
 }
 
+/**
+ * LGPD 02-05: o template ensina a parar de receber? Rodapé com a instrução ("Responda SAIR...") ou botão de
+ * resposta rápida de saída (SAIR, PARAR...). O toque no botão descadastra (whatsappInbox).
+ */
+export function templateTemOptOut(t: { footer?: string | null; quickReplies?: unknown }): boolean {
+  const botoes = Array.isArray(t.quickReplies) ? (t.quickReplies as unknown[]).filter((b): b is string => typeof b === "string") : [];
+  return mencionaOptOut(t.footer) || botoes.some((b) => mencionaOptOut(b));
+}
+
+/** Valida um template criado ou editado por nós (os importados da Meta não passam por aqui: só leitura). */
 export function validateTemplate(t: TemplateDraft): string[] {
   const erros: string[] = [];
   const body = t.body ?? "";
@@ -127,6 +137,7 @@ export function validateTemplate(t: TemplateDraft): string[] {
   if (new Set(textos).size !== textos.length) erros.push("Há botões com o mesmo texto.");
 
   if (!t.category || !(TEMPLATE_CATEGORIES as readonly string[]).includes(t.category)) erros.push("Escolha a categoria: Marketing ou Utilidade.");
+  // Rodapé/botão de saída não é mais exigido ao salvar; o assistente de campanha só avisa (ver campaignWizard).
   return erros;
 }
 
@@ -276,6 +287,8 @@ export interface MetaTemplate {
   rejected_reason?: string;
   quality_score?: { score?: string };
   parameter_format?: string;
+  /** Data da última atualização na Meta (ISO ou segundos desde 1970), quando a Graph API devolve. */
+  last_updated_time?: string | number;
   components?: any[];
 }
 
@@ -287,14 +300,23 @@ export async function createMetaTemplate(wabaId: string, token: string | undefin
 
 /** Lista todos os templates da conta (segue a paginação, com teto de segurança). */
 export async function listMetaTemplates(wabaId: string, token: string | undefined, fetchImpl: FetchLike = fetch as any): Promise<MetaTemplate[]> {
-  const out: MetaTemplate[] = [];
-  let url: string | null = `${root(wabaId)}/message_templates?fields=id,name,status,category,language,rejected_reason,quality_score,parameter_format,components&limit=100`;
-  for (let page = 0; url && page < 10; page++) {
-    const j: any = await call(url, token, { method: "GET" }, fetchImpl);
-    out.push(...(j?.data ?? []));
-    url = j?.paging?.next ?? null;
+  const campos = "id,name,status,category,language,rejected_reason,quality_score,parameter_format,components";
+  // `last_updated_time` dá a data de cada template; se a Meta recusar o campo, lista sem ele (sem data, nada quebra).
+  for (const fields of [`${campos},last_updated_time`, campos]) {
+    const out: MetaTemplate[] = [];
+    try {
+      let url: string | null = `${root(wabaId)}/message_templates?fields=${fields}&limit=100`;
+      for (let page = 0; url && page < 10; page++) {
+        const j: any = await call(url, token, { method: "GET" }, fetchImpl);
+        out.push(...(j?.data ?? []));
+        url = j?.paging?.next ?? null;
+      }
+      return out;
+    } catch (e) {
+      if (fields === campos) throw e;
+    }
   }
-  return out;
+  return [];
 }
 
 export async function deleteMetaTemplate(wabaId: string, token: string | undefined, name: string, fetchImpl: FetchLike = fetch as any): Promise<void> {

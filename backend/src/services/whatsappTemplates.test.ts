@@ -12,11 +12,12 @@ import {
   toMetaBody,
   validateTemplate,
   variableOrder,
+  templateTemOptOut,
 } from "./whatsappTemplates";
 
 const ok = (body: any) => ({ ok: true, status: 200, json: async () => body });
 const fail = (status: number, body: any) => ({ ok: false, status, json: async () => body });
-const base = { body: "Olá {{nome}}, seu limite é {{limite}}. Responda se quiser usar.", category: "MARKETING" };
+const base = { body: "Olá {{nome}}, seu limite é {{limite}}. Responda se quiser usar.", category: "MARKETING", footer: "Responda SAIR para não receber mais mensagens" };
 
 describe("variáveis e conversão para o formato da Meta", () => {
   it("numera na ordem em que aparecem, sem repetir", () => {
@@ -75,6 +76,13 @@ describe("validateTemplate", () => {
     expect(normalizeButtonPhone("(84) 99999-8888")).toBe("+5584999998888");
     expect(normalizeButtonPhone("+55 84 99999-8888")).toBe("+5584999998888");
     expect(normalizeButtonPhone("0800")).toBeNull();
+  });
+  it("marketing sem rodapé de saída nem botão SAIR é aceito (só o assistente de campanha avisa)", () => {
+    const semSaida = { body: base.body, category: "MARKETING" };
+    expect(validateTemplate(semSaida)).toEqual([]);
+    expect(validateTemplate({ ...semSaida, footer: "TopConta, cartão de benefícios" })).toEqual([]);
+    expect(templateTemOptOut({ footer: null, quickReplies: ["Sim", "Não quero"] })).toBe(false);
+    expect(templateTemOptOut({ footer: null, quickReplies: ["Sair da lista"] })).toBe(true);
   });
   it("exige a categoria", () => {
     expect(validateTemplate({ ...base, category: null }).join(" ")).toContain("categoria");
@@ -160,6 +168,16 @@ describe("Graph API de templates", () => {
     const r = await listMetaTemplates("W", "T", f as any);
     expect(r.map((t) => t.id)).toEqual(["1", "2"]);
     expect(f).toHaveBeenCalledTimes(2);
+  });
+  it("pede a data de cada template e, se a Meta recusar o campo, lista sem ele", async () => {
+    const f = jest
+      .fn()
+      .mockResolvedValueOnce(fail(400, { error: { code: 100, message: "Tried accessing nonexisting field (last_updated_time)" } }))
+      .mockResolvedValueOnce(ok({ data: [{ id: "1", name: "a", status: "APPROVED" }] }));
+    const r = await listMetaTemplates("W", "T", f as any);
+    expect(r.map((t) => t.id)).toEqual(["1"]);
+    expect((f.mock.calls[0] as any)[0]).toContain("last_updated_time");
+    expect((f.mock.calls[1] as any)[0]).not.toContain("last_updated_time");
   });
   it("envia template com idioma e parâmetros do corpo", async () => {
     const f = jest.fn(async (_u: string, _i?: any) => ok({ messages: [{ id: "wamid.T" }] }));

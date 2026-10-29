@@ -17,7 +17,7 @@ export interface WhatsAppConfig {
     lastCheckOk: boolean | null;
     lastCheckMessage: string | null;
   } | null;
-  webhookUrl: string;
+  webhookUrl: string | null;
   apiVersion: string;
 }
 
@@ -58,6 +58,7 @@ export default function WhatsAppConfigModal({ onClose, onChanged }: { onClose: (
   const [appSecret, setAppSecret] = useState("");
   const [msg, setMsg] = useState<{ tipo: "ok" | "erro"; texto: string } | null>(null);
   const [testes, setTestes] = useState<{ nome: string; ok: boolean; detalhe: string }[] | null>(null);
+  const [ligacoes, setLigacoes] = useState<{ nome: string; ok: boolean | null; detalhe: string }[] | null>(null);
   const [busy, setBusy] = useState(false);
 
   function aplicar(c: WhatsAppConfig) {
@@ -96,8 +97,9 @@ export default function WhatsAppConfigModal({ onClose, onChanged }: { onClose: (
   };
   const testar = () =>
     run(async () => {
-      const r = await api<{ ok: boolean; checks: { nome: string; ok: boolean; detalhe: string }[] }>("/integrations/whatsapp/test", { method: "POST" });
+      const r = await api<{ ok: boolean; checks: { nome: string; ok: boolean; detalhe: string }[]; ligacoes?: { nome: string; ok: boolean | null; detalhe: string }[] }>("/integrations/whatsapp/test", { method: "POST" });
       setTestes(r.checks);
+      setLigacoes(r.ligacoes ?? null);
       setMsg({ tipo: r.ok ? "ok" : "erro", texto: r.ok ? "Conexão com a Meta funcionando." : "A Meta recusou alguma verificação. Veja os detalhes abaixo." });
       aplicar(await api<WhatsAppConfig>("/integrations/whatsapp"));
       onChanged();
@@ -171,7 +173,7 @@ export default function WhatsAppConfigModal({ onClose, onChanged }: { onClose: (
             <div className="seg-field">
               <label>URL de Callback</label>
               <span className="seg-hint" style={{ margin: "0 0 6px" }}>Cole em WhatsApp → Configuração → Webhook</span>
-              {cfg ? <Copiavel valor={cfg.webhookUrl} /> : "…"}
+              {!cfg ? "…" : cfg.webhookUrl ? <Copiavel valor={cfg.webhookUrl} /> : <span className="seg-hint">Endereço público do sistema não configurado (PUBLIC_BACKEND_URL).</span>}
             </div>
             <div className="seg-field">
               <label>Token de Verificação</label>
@@ -191,6 +193,19 @@ export default function WhatsAppConfigModal({ onClose, onChanged }: { onClose: (
                 <li key={t.nome} style={{ color: t.ok ? "var(--success)" : "var(--danger)" }}>{t.ok ? "✅" : "❌"} {t.nome}: <span style={{ color: "var(--text-muted)" }}>{t.detalhe}</span></li>
               ))}
             </ul>
+          )}
+          {ligacoes && (
+            <div className="seg-section">
+              <strong style={{ fontSize: 13 }}>Ligações pelo WhatsApp (Calling API)</strong>
+              <span className="seg-hint" style={{ display: "block", margin: "2px 0 6px" }}>Só diagnóstico: mostra se o número já pode receber ligações da IA.</span>
+              <ul style={{ fontSize: 12.5, paddingLeft: 18, margin: 0, lineHeight: 1.7 }}>
+                {ligacoes.map((t) => (
+                  <li key={t.nome} style={{ color: t.ok === true ? "var(--success)" : t.ok === false ? "var(--danger)" : "var(--warning)" }}>
+                    {t.ok === true ? "✅" : t.ok === false ? "❌" : "❔"} {t.nome}: <span style={{ color: "var(--text-muted)" }}>{t.detalhe}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
 
           <button className="btn" type="submit" disabled={busy} style={{ width: "100%", background: "var(--success)", color: "#06130b" }}>Salvar Meta Cloud API</button>

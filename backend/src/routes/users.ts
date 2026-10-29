@@ -5,6 +5,8 @@ import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
+import { invalidateAccessCache } from "../middleware/areaAccess";
+import { allowedAreas, cleanAreas } from "../services/areas";
 
 const router = Router();
 router.use(requireAuth);
@@ -12,9 +14,11 @@ router.use(requireAuth);
 router.get("/", requireRole("ADMIN"), async (req, res) => {
   const users = await prisma.user.findMany({
     where: { tenantId: req.user!.tenantId },
-    select: { id: true, name: true, email: true, role: true, active: true, createdAt: true },
+    select: { id: true, name: true, email: true, role: true, active: true, createdAt: true, areasRestritas: true, areas: true },
+    orderBy: { createdAt: "asc" },
   });
-  res.json(users);
+  // `areas`: lista liberada, ou null = todas (Admin ou sem restrição)
+  res.json(users.map(({ areasRestritas, areas, ...u }) => ({ ...u, areas: allowedAreas({ role: u.role, areasRestritas, areas }) })));
 });
 
 const createSchema = z.object({
@@ -22,6 +26,7 @@ const createSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8),
   role: z.enum(["ADMIN", "OPERATOR", "ANALYST", "VIEWER"]),
+  areas: z.array(z.string()).nullable().optional(), // null/ausente = todas as áreas
 });
 
 router.post("/", requireRole("ADMIN"), async (req, res) => {
@@ -29,10 +34,12 @@ router.post("/", requireRole("ADMIN"), async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { tenantId, id: adminId } = req.user!;
   const { name, email, password, role } = parsed.data;
+  const restritas = Array.isArray(parsed.data.areas);
+  const areas = restritas ? cleanAreas(parsed.data.areas) : [];
 
   const passwordHash = await bcrypt.hash(password, 10);
-  const user = await prisma.user.create({ data: { tenantId, name, email, passwordHash, role } });
-  await logAudit({ tenantId, userId: adminId, action: "CREATE_USER", target: "User", targetId: user.id, details: { email, role } });
+  const user = await prisma.user.create({ data: { tenantId, name, email, passwordHash, role, areasRestritas: restritas, areas } });
+  await logAudit({ tenantId, userId: adminId, action: "CREATE_USER", target: "User", targetId: user.id, details: { email, role, areas: restritas ? areas : "todas" } });
 
   res.status(201).json({ id: user.id, name: user.name, email: user.email, role: user.role });
 });
@@ -42,10 +49,18 @@ router.patch("/:id", requireRole("ADMIN"), async (req, res) => {
   const target = await prisma.user.findFirst({ where: { id: req.params.id, tenantId } });
   if (!target) return res.status(404).json({ error: "Usuário não encontrado" });
 
+  // `areas`: lista = restringe a essas áreas; null = libera todas; ausente = não mexe
+  const areasInformadas = req.body.areas !== undefined;
+  if (areasInformadas && req.body.areas !== null && !Array.isArray(req.body.areas)) return res.status(400).json({ error: "areas inválidas" });
   const updated = await prisma.user.update({
     where: { id: target.id },
-    data: { role: req.body.role ?? target.role, active: req.body.active ?? target.active },
+    data: {
+      role: req.body.role ?? target.role,
+      active: req.body.active ?? target.active,
+      ...(areasInformadas ? { areasRestritas: req.body.areas !== null, areas: req.body.areas === null ? [] : cleanAreas(req.body.areas) } : {}),
+    },
   });
+  invalidateAccessCache(target.id);
   // Não loga req.body bruto: só os dois campos realmente aplicados acima, ambos não-PII
   // (enum de papel e flag booleana) — evita persistir indefinidamente no AuditLog qualquer
   // campo extra que o cliente HTTP venha a incluir no payload no futuro.
@@ -55,9 +70,9 @@ router.patch("/:id", requireRole("ADMIN"), async (req, res) => {
     action: "UPDATE_USER",
     target: "User",
     targetId: target.id,
-    details: { role: updated.role, active: updated.active },
+    details: { role: updated.role, active: updated.active, ...(areasInformadas ? { areas: updated.areasRestritas ? updated.areas : "todas" } : {}) },
   });
-  res.json({ id: updated.id, role: updated.role, active: updated.active });
+  res.json({ id: updated.id, role: updated.role, active: updated.active, areas: allowedAreas(updated) });
 });
 
 /**

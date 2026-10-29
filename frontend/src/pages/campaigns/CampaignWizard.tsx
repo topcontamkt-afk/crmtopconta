@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { api } from "../../api/client";
+import { api, ApiError } from "../../api/client";
 import { useAuth } from "../../context/AuthContext";
 import CostsModal from "../../components/campaign/CostsModal";
 import FiltrosRapidos, { FILTROS_VAZIOS, Filtros, filtrosParaApi } from "../../components/campaign/FiltrosRapidos";
@@ -82,12 +82,14 @@ export default function CampaignWizard() {
   const [filtros, setFiltros] = useState<Filtros>(FILTROS_VAZIOS);
   const [rows, setRows] = useState<PlanilhaRow[]>([]);
   const [consent, setConsent] = useState(false);
+  // LGPD 02-02: origem do consentimento de quem NÃO é cliente (onde e como foi coletado)
+  const [consentOrigem, setConsentOrigem] = useState("");
   const [telefonesTeste, setTelefonesTeste] = useState("");
   const [testeMsg, setTesteMsg] = useState<string | null>(null);
   const testeCampaign = useRef<string | null>(null);
 
   // validação / custo
-  const [validation, setValidation] = useState<Validation | null>(null);
+  const [validation, setValidation] = useState<(Validation & { foraDaBase?: number }) | null>(null);
   const [validando, setValidando] = useState(false);
   const [erroValidacao, setErroValidacao] = useState("");
   const [custosAberto, setCustosAberto] = useState(false);
@@ -114,6 +116,9 @@ export default function CampaignWizard() {
   }
   useEffect(() => {
     api<{ configurado: boolean }>("/templates/meta-status").then((m) => setMetaConectada(m.configurado)).catch(() => {});
+    // Mostra já o que está no cadastro e depois traz o que a sincronização achar de novo na Meta
+    // (a 1ª sincronização importa um template por vez e pode levar minutos: a lista não pode esperar por ela).
+    carregarTemplates().catch(() => undefined);
     api("/templates/sync", { method: "POST" })
       .catch(() => undefined)
       .finally(() => {
@@ -201,7 +206,8 @@ export default function CampaignWizard() {
   const faltamVariaveis = (template?.variaveisSemMapa?.length ?? 0) > 0;
   const passo0Ok = nome.trim() !== "" && !!template && usavel(template) && !faltamVariaveis;
   const passo1Ok = publico !== "teste" && !!audiencia && !!validation && validation.contatos > 0;
-  const passo2Ok = !!validation?.podeLancar && (publico !== "planilha" || consent);
+  const foraDaBase = publico === "planilha" ? validation?.foraDaBase ?? 0 : 0;
+  const passo2Ok = !!validation?.podeLancar && (publico !== "planilha" || (consent && (foraDaBase === 0 || consentOrigem.trim().length >= 10)));
   const passo3Ok = quando === "agora" || (!!agendadoPara && agendadoPara.getTime() > Date.now());
   const podeContinuar = [passo0Ok, passo1Ok, passo2Ok, passo3Ok][step];
 
@@ -241,7 +247,17 @@ export default function CampaignWizard() {
     if (publico === "planilha") {
       const r = await api<{ campaign: { id: string }; enviar: number }>("/campaigns/manual", {
         method: "POST",
-        body: { name: nome.trim(), templateId, rows, consentimento: true, rascunho, scheduledAt, costPerMessage: custo, throttlePerMin: throttle },
+        body: {
+          name: nome.trim(),
+          templateId,
+          rows,
+          consentimento: true,
+          ...(foraDaBase > 0 ? { consentimentoOrigem: consentOrigem.trim() } : {}),
+          rascunho,
+          scheduledAt,
+          costPerMessage: custo,
+          throttlePerMin: throttle,
+        },
       });
       return { id: r.campaign.id, total: r.enviar };
     }
@@ -282,33 +298,14 @@ export default function CampaignWizard() {
     try {
       setProgresso({ fase: "Criando a campanha…", enviados: 0, total: validation?.contatos ?? 0 });
       const { id } = await criarCampanha(false);
-      const fila = await api<{ queued: number; control: number }>(`/campaigns/${id}/schedule`, { method: "POST" });
-      const total = fila.queued;
+      await api(`/campaigns/${id}/schedule`, { method: "POST" });
 
       if (quando === "agendar") {
         navigate(`/campaigns/${id}/report`);
         return;
       }
-      // Imediato: manda em lotes pequenos, respeitando o limite por minuto, com a tela aberta.
-      let enviados = 0;
-      for (let guarda = 0; guarda < 2000 && !cancelar.current; guarda++) {
-        setProgresso({ fase: "Enviando as mensagens…", enviados, total });
-        const r = await api<{ processed: number; remaining: number; throttled?: boolean; bloqueado?: string }>(`/campaigns/${id}/dispatch`, { method: "POST", body: { limit: 25 } });
-        if (r.bloqueado) {
-          setProgresso({ fase: "Envio bloqueado", enviados, total, aviso: r.bloqueado });
-          setBusy(false);
-          return;
-        }
-        enviados = total - r.remaining;
-        if (r.remaining === 0) break;
-        if (r.throttled) {
-          setProgresso({ fase: "Aguardando o limite de envios por minuto…", enviados, total });
-          await sleep(8000);
-        } else if (r.processed === 0) {
-          await sleep(3000);
-        }
-      }
-      navigate(`/campaigns/${id}/report`);
+      // Imediato: o relatório da campanha roda o envio em lotes e mostra o funil ao vivo.
+      navigate(`/campaigns/${id}/report?enviar=1`);
     } catch (e) {
       setProgresso(null);
       setErro(textoErro(e));
@@ -388,7 +385,7 @@ export default function CampaignWizard() {
 
                 {(!template || buscando) && (verTodos || buscando) && (
                   <div className="cw-box" style={{ marginTop: 10 }}>
-                    {lista.length === 0 && <span className="pd-hint">Nenhum template encontrado.</span>}
+                    {lista.length === 0 && <span className="pd-hint">{sincronizando ? "Sincronizando com a Meta… os templates novos aparecem aqui quando terminar." : "Nenhum template encontrado."}</span>}
                     {lista.map((t) => <TemplateItem key={t.id} t={t} bloqueado={!usavel(t)} onPick={() => { setTemplateId(t.id); setBusca(""); }} />)}
                   </div>
                 )}
@@ -500,6 +497,24 @@ export default function CampaignWizard() {
                   <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
                   <span>Confirmo que tenho autorização para contatar estes números pelo WhatsApp. Quem já pediu para não receber mensagens foi retirado da lista automaticamente.</span>
                 </label>
+              )}
+              {publico === "planilha" && foraDaBase > 0 && (
+                <div className="form-row" style={{ marginTop: 10 }}>
+                  <label>
+                    Origem do consentimento dos {foraDaBase} contato(s) que não são clientes <span className="error-text">(obrigatório)</span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={consentOrigem}
+                    onChange={(e) => setConsentOrigem(e.target.value)}
+                    maxLength={1000}
+                    placeholder="Onde e como o aceite foi coletado. Ex.: formulário do site em out/2026, com caixa de aceite para receber ofertas pelo WhatsApp"
+                  />
+                  <div className="pd-hint">
+                    Quem não é cliente não tem relação com a empresa: a mensagem só pode ir com consentimento. A origem fica gravada na campanha, com o
+                    seu usuário e a data (LGPD).
+                  </div>
+                </div>
               )}
 
               {publico !== "planilha" && publico !== "teste" && (

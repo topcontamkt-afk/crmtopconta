@@ -62,10 +62,20 @@ export async function api<T = unknown>(
  * <a href> comum não funciona (o token vive no localStorage, não em cookie). Busca o arquivo com
  * o header correto e simula o download via Blob URL.
  */
-export async function downloadFile(path: string, filename: string): Promise<void> {
+export async function downloadFile(
+  path: string,
+  filename: string,
+  options: { method?: string; body?: unknown } = {}
+): Promise<void> {
   const token = getToken();
+  // POST com corpo: filtros com dado pessoal (busca por nome/telefone, motivo) não vão na URL (LGPD 07-03)
   const resp = await fetch(`/api${path}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    method: options.method || "GET",
+    headers: {
+      ...(options.body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
   });
   if (resp.status === 401 && token) {
     handleExpiredSession();

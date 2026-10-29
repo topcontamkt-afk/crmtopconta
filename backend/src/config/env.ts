@@ -11,10 +11,7 @@ import { z } from "zod";
  */
 
 const requiredSchema = z.object({
-  DATABASE_URL: z.string().min(1),
-  // Role privilegiado (RLS bypass) usado só pelos jobs cross-tenant do scheduler — ver
-  // config/tenantGuard.ts (withCrossTenantAccess/prismaAdmin) e a migration add_rls_policies.
-  DATABASE_URL_ADMIN: z.string().min(1),
+  // O banco é o binding D1 do Worker (config/db.ts), não uma URL.
   JWT_SECRET: z.string().min(1),
   CREDENTIALS_ENCRYPTION_KEY: z.string().min(1),
 });
@@ -72,8 +69,6 @@ function parseAllowedOrigins(): string[] {
 }
 
 export const env = {
-  DATABASE_URL: required.DATABASE_URL,
-  DATABASE_URL_ADMIN: required.DATABASE_URL_ADMIN,
   JWT_SECRET: required.JWT_SECRET,
   CREDENTIALS_ENCRYPTION_KEY: required.CREDENTIALS_ENCRYPTION_KEY,
 

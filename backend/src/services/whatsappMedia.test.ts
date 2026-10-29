@@ -1,4 +1,5 @@
 import { baseMime, fetchMetaMedia, getOrCacheMessageMedia, isInlineSafeMime, MediaError, MEDIA_MAX_BYTES } from "./whatsappMedia";
+import { configureMediaStore, memoryMediaStore } from "./mediaStore";
 
 const resp = (body: any, ok = true, status = 200) => ({
   ok,
@@ -59,6 +60,11 @@ describe("fetchMetaMedia", () => {
 });
 
 describe("getOrCacheMessageMedia", () => {
+  let store: ReturnType<typeof memoryMediaStore>;
+  beforeEach(() => {
+    store = memoryMediaStore();
+    configureMediaStore(store);
+  });
   const fake = (cached: any) => {
     const created: any[] = [];
     const prisma: any = { waMediaBlob: { findFirst: jest.fn(async () => cached), create: jest.fn(async (a: any) => void created.push(a)) } };
@@ -66,7 +72,8 @@ describe("getOrCacheMessageMedia", () => {
   };
 
   it("usa a cópia local sem chamar a Meta", async () => {
-    const { prisma } = fake({ data: Buffer.from("x"), mime: "image/png" });
+    await store.put("t/t1/wa/m", Buffer.from("x"), "image/png");
+    const { prisma } = fake({ storageKey: "t/t1/wa/m", mime: "image/png" });
     const f = jest.fn();
     const r = await getOrCacheMessageMedia(prisma, "t1", { id: "m", mediaId: "id" }, "T", f as any);
     expect(r.mime).toBe("image/png");
@@ -78,11 +85,21 @@ describe("getOrCacheMessageMedia", () => {
     const f = jest.fn(async (url: string) => (url.includes("graph") ? resp({ url: "https://cdn/x", mime_type: "image/jpeg", file_size: 3 }) : resp(Buffer.from("abc"))));
     const r = await getOrCacheMessageMedia(prisma, "t1", { id: "m", mediaId: "id" }, "T", f as any);
     expect(r.data.toString()).toBe("abc");
-    expect(created[0].data).toMatchObject({ tenantId: "t1", messageId: "m", mime: "image/jpeg", size: 3 });
+    // arquivo no R2 (aqui, em memória) e só metadados + chave no banco
+    expect(created[0].data).toEqual({ tenantId: "t1", messageId: "m", mime: "image/jpeg", size: 3, storageKey: "t/t1/wa/m" });
+    expect(Buffer.from((await store.get("t/t1/wa/m"))!).toString()).toBe("abc");
+  });
+
+  it("linha sem o arquivo no R2 conta como sem cópia: busca de novo na Meta", async () => {
+    const { prisma } = fake({ storageKey: "t/t1/wa/m", mime: "image/png" });
+    const f = jest.fn(async (url: string) => (url.includes("graph") ? resp({ url: "u", mime_type: "image/png" }) : resp(Buffer.from("z"))));
+    await expect(getOrCacheMessageMedia(prisma, "t1", { id: "m", mediaId: "id" }, "T", f as any)).resolves.toMatchObject({ mime: "image/png" });
+    expect(f).toHaveBeenCalled();
   });
 
   it("falha ao guardar não impede de mostrar o arquivo", async () => {
-    const prisma: any = { waMediaBlob: { findFirst: async () => null, create: async () => { throw new Error("dup"); } } };
+    const prisma: any = { waMediaBlob: { findFirst: async () => null, create: async () => { throw new Error("db fora"); } } };
+    jest.spyOn(console, "warn").mockImplementationOnce(() => undefined);
     const f = jest.fn(async (url: string) => (url.includes("graph") ? resp({ url: "u", mime_type: "image/png" }) : resp(Buffer.from("z"))));
     await expect(getOrCacheMessageMedia(prisma, "t1", { id: "m", mediaId: "id" }, "T", f as any)).resolves.toMatchObject({ mime: "image/png" });
   });

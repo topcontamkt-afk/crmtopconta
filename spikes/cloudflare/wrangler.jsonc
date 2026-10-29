@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "crmtopconta-spike",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // Spike local: o database_id é fictício e nunca vai para a conta (sem deploy de verdade).
+  "d1_databases": [
+    { "binding": "DB", "database_name": "crmtopconta-spike", "database_id": "00000000-0000-0000-0000-000000000000" }
+  ]
+}

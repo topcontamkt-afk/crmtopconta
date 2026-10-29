@@ -1,5 +1,8 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api/client";
+import { useAuth } from "../context/AuthContext";
+import WhatsAppProviderCard from "../components/WhatsAppProviderCard";
+import LgpdSettingsCard from "../components/LgpdSettingsCard";
 
 interface TenantSettings {
   id: string;
@@ -14,11 +17,13 @@ interface ChannelCfg {
   provider: string;
   priority: number;
   active: boolean;
+  /** só para ADMIN: endereço a configurar no provedor de SMS para receber STOP/SAIR (LGPD 05-05) */
+  webhookUrl?: string | null;
 }
 
 export default function Settings() {
+  const { user } = useAuth();
   const [settings, setSettings] = useState<TenantSettings | null>(null);
-  const [retentionDays, setRetentionDays] = useState(1095);
   const [maxMsgsPerMinute, setMaxMsgsPerMinute] = useState(600);
   const [status, setStatus] = useState<string | null>(null);
 
@@ -30,7 +35,6 @@ export default function Settings() {
   function load() {
     api<TenantSettings>("/tenant/settings").then((s) => {
       setSettings(s);
-      setRetentionDays(s.retentionDays);
       setMaxMsgsPerMinute(s.maxMsgsPerMinute);
     });
     api<ChannelCfg[]>("/integrations/channels").then(setChannels);
@@ -39,7 +43,8 @@ export default function Settings() {
 
   async function saveSettings(e: FormEvent) {
     e.preventDefault();
-    await api("/tenant/settings", { method: "PUT", body: { retentionDays, maxMsgsPerMinute } });
+    // LGPD 04-07: o prazo de retenção mudou para a seção LGPD (com fundamento e prévia do impacto)
+    await api("/tenant/settings", { method: "PUT", body: { maxMsgsPerMinute } });
     setStatus("Configurações salvas.");
     load();
   }
@@ -60,12 +65,17 @@ export default function Settings() {
     <div>
       <h2>Configurações</h2>
 
+      {user?.role === "ADMIN" && <WhatsAppProviderCard />}
+
+      <LgpdSettingsCard isAdmin={user?.role === "ADMIN"} />
+
       <form className="card" style={{ marginBottom: 16 }} onSubmit={saveSettings}>
-        <h3>Política de retenção &amp; rate limit</h3>
-        <div className="form-row">
-          <label>Retenção de dados (dias) — LGPD, right-to-be-forgotten automático após esse período sem uso</label>
-          <input type="number" value={retentionDays} onChange={(e) => setRetentionDays(Number(e.target.value))} />
-        </div>
+        <h3>Limite de envio</h3>
+        {settings && (
+          <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
+            Retenção de dados: {settings.retentionDays} dias sem uso (ajuste na seção LGPD acima).
+          </p>
+        )}
         <div className="form-row">
           <label>Rate limit global (mensagens/minuto, somando todas as campanhas do tenant)</label>
           <input type="number" value={maxMsgsPerMinute} onChange={(e) => setMaxMsgsPerMinute(Number(e.target.value))} />
@@ -77,7 +87,8 @@ export default function Settings() {
         <h3>Failover multi-provider de SMS</h3>
         <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
           Cadastre múltiplos provedores de SMS com prioridade — o de menor número é tentado
-          primeiro; se falhar, o próximo é tentado automaticamente no envio.
+          primeiro; se falhar, o próximo é tentado automaticamente no envio. Depois de salvar, configure no provedor o endereço da
+          coluna "Webhook" da tabela abaixo: é por ele que chega o STOP/SAIR de quem não quer mais receber.
         </p>
         <div style={{ display: "flex", gap: 8 }}>
           <select value={provider} onChange={(e) => setProvider(e.target.value)}>
@@ -98,7 +109,7 @@ export default function Settings() {
       <div className="card">
         <h3>Provedores configurados</h3>
         <table>
-          <thead><tr><th>Canal</th><th>Provedor</th><th>Prioridade</th><th>Status</th></tr></thead>
+          <thead><tr><th>Canal</th><th>Provedor</th><th>Prioridade</th><th>Status</th><th>Webhook (opt-out e status)</th></tr></thead>
           <tbody>
             {channels.map((c) => (
               <tr key={c.id}>
@@ -106,10 +117,13 @@ export default function Settings() {
                 <td>{c.provider}</td>
                 <td>{c.priority}</td>
                 <td><span className={`badge ${c.active ? "ok" : ""}`}>{c.active ? "Ativo" : "Inativo"}</span></td>
+                <td style={{ fontSize: 12, wordBreak: "break-all" }}>
+                  {c.channel === "SMS" ? (c.webhookUrl ? <code>{c.webhookUrl}</code> : <span style={{ color: "var(--text-muted)" }}>visível para administradores</span>) : "—"}
+                </td>
               </tr>
             ))}
             {channels.length === 0 && (
-              <tr><td colSpan={4} style={{ color: "var(--text-muted)" }}>Nenhum provedor configurado (usando variáveis de ambiente/mock)</td></tr>
+              <tr><td colSpan={5} style={{ color: "var(--text-muted)" }}>Nenhum provedor de SMS cadastrado: em produção, campanhas por SMS ficam bloqueadas até cadastrar um (fora de produção o envio é só simulado).</td></tr>
             )}
           </tbody>
         </table>

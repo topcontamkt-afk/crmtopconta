@@ -23,16 +23,17 @@ import {
   validateTemplate,
   variableOrder,
 } from "../services/whatsappTemplates";
-import { applyVariableMap, positionsIn, unmappedPositions, validateVariableMap } from "../services/templateImport";
+import { applyVariableMap, dataEnvioMeta, positionsIn, unmappedPositions, validateVariableMap } from "../services/templateImport";
 import { OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
 import { linkBase } from "../services/trackedLinks";
+import { deleteTemplateMedia, loadTemplateMedia, saveTemplateMedia } from "../services/mediaStore";
 
 const router = Router();
 router.use(requireAuth);
 
 /** Conta WhatsApp do tenant + token: o que é preciso para falar com a Meta sobre templates. */
 async function metaContext(tenantId: string) {
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: "META" }, orderBy: { createdAt: "asc" } });
   const token = credentialsOf(account).accessToken;
   return {
     account,
@@ -76,10 +77,12 @@ router.get("/", async (req, res) => {
       channel: channel ? (String(channel) as any) : undefined,
       status: status ? (String(status) as any) : undefined,
     },
-    orderBy: { updatedAt: "desc" },
     include: { media: { select: { mime: true, size: true, filename: true } } },
   });
-  res.json(templates.map(present));
+  // Mais recente primeiro, pela data em que foi para a Meta (empate: o nome, para a ordem não pular).
+  const comData = templates.map((t) => ({ t, em: dataEnvioMeta(t) }));
+  comData.sort((a, b) => b.em.getTime() - a.em.getTime() || a.t.name.localeCompare(b.t.name));
+  res.json(comData.map(({ t, em }) => ({ ...present(t), enviadoMetaEm: em.toISOString() })));
 });
 
 const ctaSchema = z.object({
@@ -242,13 +245,13 @@ router.post("/:id/submit", requireRole("ADMIN", "OPERATOR"), async (req, res) =>
     // Cabeçalho com imagem: a Meta exige uma imagem de exemplo, enviada por upload resumível (precisa do ID do app).
     let headerHandle: string | null = null;
     if (template.headerFormat === "IMAGE") {
-      const media = await prisma.templateMedia.findFirst({ where: { templateId: template.id, tenantId } });
+      const media = await loadTemplateMedia(prisma, tenantId, template.id);
       if (!media) return res.status(400).json({ error: "Este template tem cabeçalho de imagem, mas a imagem não foi enviada." });
       if (!ctx.account?.appId) return res.status(409).json({ error: "Para enviar um template com imagem, informe o ID do app da Meta em Integrações > WhatsApp." });
-      headerHandle = await uploadTemplateExample(ctx.account.appId, ctx.token, Buffer.from(media.data), media.mime, media.filename);
+      headerHandle = await uploadTemplateExample(ctx.account.appId, ctx.token, media.data, media.mime, media.filename);
       await prisma.messageTemplate.update({ where: { id: template.id }, data: { headerHandle } });
     }
-    const payload = buildCreatePayload({ ...template, quickReplies: (template.quickReplies as string[] | null) ?? [], buttons: (template.buttons as CtaButton[] | null) ?? [], category: template.category, headerHandle, linkBase: linkBase() });
+    const payload = buildCreatePayload({ ...template, quickReplies: (template.quickReplies as string[] | null) ?? [], buttons: (template.buttons as CtaButton[] | null) ?? [], category: template.category, headerHandle, linkBase: linkBase() ?? undefined });
     const created = await createMetaTemplate(ctx.wabaId!, ctx.token, payload);
     const updated = await prisma.messageTemplate.update({
       where: { id: template.id },
@@ -291,6 +294,8 @@ router.delete("/:id", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
     const ctx = await metaContext(tenantId);
     if (ctx.configurado) await deleteMetaTemplate(ctx.wabaId!, ctx.token, template.metaName).catch((e) => console.warn("[templates] exclusão na Meta falhou:", e.message));
   }
+  // a imagem do cabeçalho sai antes: a linha cairia em cascata, mas o arquivo no R2 ficaria sem dono
+  await deleteTemplateMedia(prisma, tenantId, template.id);
   await prisma.messageTemplate.delete({ where: { id: template.id } });
   await logAudit({ tenantId, userId, action: "DELETE_TEMPLATE", target: "MessageTemplate", targetId: template.id });
   res.status(204).send();
@@ -322,11 +327,7 @@ router.put("/:id/header", requireRole("ADMIN", "OPERATOR"), async (req, res) => 
   if (buf.length > OUTBOUND_MAX_BYTES) return res.status(413).json({ error: "A imagem passa de 3 MB." });
   if (!looksLikeImage(buf, mime)) return res.status(400).json({ error: "O arquivo não parece uma imagem JPG/PNG válida." });
 
-  await prisma.templateMedia.upsert({
-    where: { templateId: template.id },
-    create: { tenantId, templateId: template.id, mime, filename: parsed.data.filename, size: buf.length, data: buf },
-    update: { mime, filename: parsed.data.filename, size: buf.length, data: buf },
-  });
+  await saveTemplateMedia(prisma, tenantId, template.id, { mime, filename: parsed.data.filename, data: buf });
   const data: any = { headerFormat: "IMAGE" };
   // Template nosso que já foi para a Meta: trocar o cabeçalho é nova versão (precisa de nova aprovação).
   if (template.origin !== "META" && template.metaName) {
@@ -343,7 +344,7 @@ router.delete("/:id/header", requireRole("ADMIN", "OPERATOR"), async (req, res) 
   const template = await prisma.messageTemplate.findFirst({ where: { id: req.params.id, tenantId } });
   if (!template) return res.status(404).json({ error: "Template não encontrado" });
   if (template.origin === "META" || template.metaName) return res.status(409).json({ error: "Este template já tem o cabeçalho de imagem aprovado na Meta." });
-  await prisma.templateMedia.deleteMany({ where: { templateId: template.id, tenantId } });
+  await deleteTemplateMedia(prisma, tenantId, template.id);
   await prisma.messageTemplate.update({ where: { id: template.id }, data: { headerFormat: null, headerHandle: null } });
   await logAudit({ tenantId, userId, action: "REMOVE_TEMPLATE_HEADER", target: "MessageTemplate", targetId: template.id });
   res.status(204).send();
@@ -351,12 +352,12 @@ router.delete("/:id/header", requireRole("ADMIN", "OPERATOR"), async (req, res) 
 
 /** GET /api/templates/:id/header — a imagem (autenticado, para a pré-visualização). */
 router.get("/:id/header", async (req, res) => {
-  const media = await prisma.templateMedia.findFirst({ where: { templateId: req.params.id, tenantId: req.user!.tenantId } });
+  const media = await loadTemplateMedia(prisma, req.user!.tenantId, req.params.id);
   if (!media) return res.status(404).json({ error: "Sem imagem" });
   res.setHeader("Content-Type", media.mime);
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Cache-Control", "private, max-age=300");
-  res.send(Buffer.from(media.data));
+  res.send(media.data);
 });
 
 const previewSchema = z.object({

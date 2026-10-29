@@ -1,4 +1,4 @@
-import { cidadeKey, cidadeKeySql, parseCidades, SEM_CIDADE } from "./cidades";
+import { cidadeKey, parseCidades, SEM_CIDADE } from "./cidades";
 
 describe("cidadeKey — nome de empresa ou vazio vira 'Sem cidade'", () => {
   it.each(["TOP CONTA", "Top Conta", "MACHADO SERVICOS DE COBRANCA LTDA", "ARAUJO PROMOTORA", "Associação dos Servidores", "Empresa X EIRELI", "Posto 24h", "BSB BRASIL SMART BUSINESS"])(
@@ -25,14 +25,5 @@ describe("parseCidades", () => {
     expect(parseCidades("natal|__sem_cidade__")).toEqual(["natal", SEM_CIDADE]);
     expect(parseCidades(undefined)).toEqual([]);
     expect(parseCidades("")).toEqual([]);
-  });
-});
-
-describe("cidadeKeySql", () => {
-  it("usa a coluna informada e as mesmas palavras da regra em JS", () => {
-    const sql = cidadeKeySql('c."cidade"');
-    expect(sql).toContain('c."cidade"');
-    for (const w of ["ltda", "eireli", "promotora", "business", "top ?conta"]) expect(sql).toContain(w);
-    expect(sql).toContain(SEM_CIDADE);
   });
 });

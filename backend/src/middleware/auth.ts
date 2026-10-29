@@ -1,7 +1,9 @@
 import { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
+import { background } from "../config/background";
 import { env } from "../config/env";
 import { runWithTenantContext } from "../config/tenantGuard";
+import { logAcessoNegado } from "./audit";
 
 // Sem fallback: config/env.ts já falha o boot do processo se JWT_SECRET estiver ausente, então
 // nunca existe um caminho de execução em que este valor não esteja definido.
@@ -33,6 +35,8 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
 export function requireRole(...roles: Array<"ADMIN" | "OPERATOR" | "ANALYST" | "VIEWER">) {
   return (req: Request, res: Response, next: NextFunction) => {
     if (!req.user || !roles.includes(req.user.role)) {
+      // LGPD 05-03: tentativa de ação acima do papel fica consultável na auditoria (não derruba a resposta)
+      background("auditoria de acesso negado", logAcessoNegado(req.user, req.method, req.originalUrl, roles));
       return res.status(403).json({ error: "Permissão insuficiente para esta ação" });
     }
     next();

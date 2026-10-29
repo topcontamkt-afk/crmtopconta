@@ -1,14 +1,16 @@
 import { breakdownByPerfil } from "../services/campaignPerfil";
 import { classificarPerfil } from "../services/rendaPerfil";
 import { ETAPAS_USO } from "../services/etapaUso";
-import { Router } from "express";
+import { Request, Response, Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
+import { contarEmPartes } from "../config/d1Partes";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
-import { buildSegmentWhere, ENVIAVEL_WHERE } from "../services/segments";
+import { AVISO_RENDA_IGNORADA, buildSegmentWhere, ENVIAVEL_WHERE, filtrosRendaIgnorados } from "../services/segments";
 import { breakdownByCiclo } from "../services/cicloReport";
-import { PERFIS_RENDA } from "../services/rendaPerfil";
+import { baseLegalVigente, SEM_BASE_LEGAL } from "../services/baseLegal";
+import { CONTATO_LIBERADO_WHERE } from "../services/privacy";
 import {
   buildAudience,
   enqueueCampaign,
@@ -18,6 +20,7 @@ import {
 import { computeABSignificance } from "../services/statistics";
 import { linkRecipients, prepareManual } from "../services/manualCampaign";
 import { validateWizard } from "../services/campaignWizard";
+import { Funil, montarFunil } from "../services/campaignFunil";
 import { trackedButtons } from "../services/trackedLinks";
 import { costConfigFrom, DEFAULT_COSTS } from "../services/messageCost";
 import { maskPhone } from "../services/masking";
@@ -33,13 +36,43 @@ import {
 const router = Router();
 router.use(requireAuth);
 
+/**
+ * LGPD 02-01: base legal vigente do tenant, ou null. Sem base declarada nenhuma campanha de marketing é criada
+ * (a fila e o disparo conferem de novo em campaignQueue).
+ */
+async function baseLegalDoTenant(tenantId: string) {
+  const t = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { baseLegalMarketing: true } });
+  return baseLegalVigente(t);
+}
+const semBaseLegal = (res: any) => res.status(409).json({ error: SEM_BASE_LEGAL, code: "SEM_BASE_LEGAL" });
+
+const ENVIADOS = ["ENVIADO", "ENTREGUE", "LIDO", "RESPONDIDO"];
+
 router.get("/", async (req, res) => {
   const campaigns = await prisma.campaign.findMany({
     where: { tenantId: req.user!.tenantId },
     orderBy: { createdAt: "desc" },
     include: { segment: true, template: true },
   });
-  res.json(campaigns);
+  // Contagem por status das campanhas mais recentes (a tela mostra enviadas/na fila e bloqueia o botão de disparo
+  // de quem já foi enviado). Limitada para caber no limite de parâmetros do D1.
+  const recentes = campaigns.slice(0, 80).map((c) => c.id);
+  const grupos = recentes.length ? await prisma.messageEvent.groupBy({ by: ["campaignId", "status"], where: { campaignId: { in: recentes } }, _count: { _all: true } }) : [];
+  const contagens = new Map<string, { fila: number; enviadas: number; falhas: number; bloqueadas: number; total: number }>();
+  for (const g of grupos) {
+    const c = contagens.get(g.campaignId) ?? { fila: 0, enviadas: 0, falhas: 0, bloqueadas: 0, total: 0 };
+    const n = g._count._all;
+    if (g.status === "FILA") c.fila += n;
+    else if (ENVIADOS.includes(g.status)) c.enviadas += n;
+    else if (g.status === "FALHA") c.falhas += n;
+    else if (g.status === "BLOQUEADO") c.bloqueadas += n;
+    if (g.status !== "CONTROLE") c.total += n;
+    contagens.set(g.campaignId, c);
+  }
+  // o disparo é um por empresa: a campanha "em disparo" é a que segura a trava agora
+  const trava = await prisma.tenant.findUnique({ where: { id: req.user!.tenantId }, select: { dispatchUntil: true, dispatchCampaignId: true } });
+  const travaAtiva = !!trava?.dispatchUntil && trava.dispatchUntil.getTime() > Date.now();
+  res.json(campaigns.map((c) => ({ ...c, emDisparo: travaAtiva && trava!.dispatchCampaignId === c.id, contagem: contagens.get(c.id) ?? null })));
 });
 
 
@@ -78,6 +111,9 @@ const manualCreateSchema = z.object({
   costPerMessage: z.number().nonnegative().default(0),
   // Aceite obrigatório: quem sobe a lista responde por ter autorização para contatar os números.
   consentimento: z.literal(true),
+  // LGPD 02-02: com contatos FORA da base (sem relação com o controlador), a prova declarada do consentimento:
+  // onde e como foi coletado (ex.: "formulário do site em 10/2026, campo de aceite de WhatsApp").
+  consentimentoOrigem: z.string().trim().max(1000).optional(),
   // Rascunho: guarda a lista e a campanha sem enfileirar nada (o envio sai ao agendar/lançar).
   rascunho: z.boolean().default(false),
   scheduledAt: z.string().datetime().optional(),
@@ -94,9 +130,25 @@ router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const { tenantId, id: userId } = req.user!;
   const d = parsed.data;
 
+  const baseLegal = await baseLegalDoTenant(tenantId);
+  if (!baseLegal) return semBaseLegal(res);
+
   const r = await prepareManual(prisma, tenantId, d.rows, d.templateId);
   if ("error" in r) return res.status(400).json({ error: r.error });
   if (r.enviar.length === 0) return res.status(400).json({ error: "Nenhum contato da lista pode receber a mensagem", motivos: r.rejected.slice(0, 200) });
+
+  // LGPD 02-02: quem não é cliente não tem relação prévia com o controlador (legítimo interesse não cobre):
+  // só com o consentimento declarado (origem + quem declara + quando), gravado na campanha.
+  const foraDaBase = r.enviar.length - r.daBase;
+  const origem = d.consentimentoOrigem?.trim() ?? "";
+  if (foraDaBase > 0 && origem.length < 10) {
+    return res.status(400).json({
+      error: `A lista tem ${foraDaBase} contato(s) que não são clientes. Para eles, informe onde e como o consentimento foi coletado (mínimo de 10 caracteres).`,
+      code: "CONSENTIMENTO_OBRIGATORIO",
+      foraDaBase,
+    });
+  }
+  const consentimento = foraDaBase > 0 ? { consentimentoOrigem: origem, consentimentoPor: req.user!.email ?? userId, consentimentoEm: new Date() } : {};
 
   const campaign = await prisma.campaign.create({
     data: {
@@ -105,6 +157,8 @@ router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
       objective: d.objective,
       channel: "WHATSAPP",
       manual: true,
+      baseLegal,
+      ...consentimento,
       templateId: r.template.id,
       messageTemplate: r.template.body,
       throttlePerMin: d.throttlePerMin,
@@ -135,7 +189,7 @@ router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const saved = d.rascunho ? [] : await prisma.campaignRecipient.findMany({ where: { tenantId, campaignId: campaign.id }, select: { id: true, clientId: true } });
   for (let i = 0; i < saved.length; i += 500) {
     await prisma.messageEvent.createMany({
-      data: saved.slice(i, i + 500).map((rec) => ({ campaignId: campaign.id, clientId: rec.clientId, recipientId: rec.id, channel: "WHATSAPP" as const, status: "FILA" as const })),
+      data: saved.slice(i, i + 500).map((rec) => ({ tenantId, campaignId: campaign.id, clientId: rec.clientId, recipientId: rec.id, channel: "WHATSAPP" as const, status: "FILA" as const })),
     });
   }
 
@@ -146,7 +200,7 @@ router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
     action: "CREATE_MANUAL_CAMPAIGN",
     target: "Campaign",
     targetId: campaign.id,
-    details: { templateId: r.template.id, recebem: r.enviar.length, daBase: r.daBase, recusadas: r.rejected.length, consentimento: true },
+    details: { templateId: r.template.id, recebem: r.enviar.length, daBase: r.daBase, recusadas: r.rejected.length, consentimento: true, baseLegal, consentimentoDeclarado: foraDaBase > 0 },
   });
   res.status(201).json({ campaign, enviar: r.enviar.length, daBase: r.daBase, recusadas: r.rejected.length, motivos: r.rejected.slice(0, 200) });
 });
@@ -155,8 +209,9 @@ router.post("/manual", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
  * GET /api/campaigns/:id/destinatarios — quem entrou na lista manual, o que aconteceu com cada envio
  * e, para quem é cliente da base, se usou o limite e quantos dias depois do envio.
  */
-router.get("/:id/destinatarios", async (req, res) => {
-  const { tenantId } = req.user!;
+// LGPD 05-09: lista nominal com valores (até 5000 contatos): não vale para VIEWER e a leitura fica no AuditLog
+router.get("/:id/destinatarios", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
+  const { tenantId, id: userId } = req.user!;
   const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
 
@@ -195,6 +250,7 @@ router.get("/:id/destinatarios", async (req, res) => {
     };
   });
   const medidos = rows.filter((r) => r.naBase && r.enviadoEm);
+  await logAudit({ tenantId, userId, action: "READ_CAMPAIGN_RECIPIENTS", target: "Campaign", targetId: campaign.id, details: { quantidade: rows.length } });
   res.json({
     total: rows.length,
     naBase: rows.filter((r) => r.naBase).length,
@@ -274,8 +330,7 @@ const adHocFiltersSchema = z
     tags: z.array(z.string()).optional(),
     search: z.string().optional(),
     empresaConveniada: z.array(z.string()).optional(),
-    perfilRenda: z.array(z.enum(PERFIS_RENDA)).optional(),
-    noTetoLimite: z.boolean().optional(),
+    // LGPD 01-03: perfil de renda (perfilRenda/noTetoLimite) não é mais filtro de público: só estatística
     saldoDisponivelMin: z.number().optional(),
     etapaUso: z.array(z.enum(ETAPAS_USO)).optional(),
     usosMin: z.number().int().min(0).optional(),
@@ -324,6 +379,8 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { tenantId, id: userId } = req.user!;
   const d = parsed.data;
+  const baseLegal = await baseLegalDoTenant(tenantId);
+  if (!baseLegal) return semBaseLegal(res);
 
   let messageTemplate = d.messageTemplate || "";
   if (d.templateId) {
@@ -339,14 +396,17 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const filters = d.segmentId
     ? (await prisma.segmentDefinition.findFirst({ where: { id: d.segmentId, tenantId } }))?.filters
     : d.adHocFilters;
+  // LGPD 01-03: segmento antigo com filtro de renda ampliaria o público em silêncio
+  if (filtrosRendaIgnorados(filters).length) return res.status(409).json({ error: AVISO_RENDA_IGNORADA, code: "FILTRO_RENDA" });
   const where = buildSegmentWhere(tenantId, (filters as any) || {});
-  const estimatedAudience = await prisma.client.count({
-    where: { ...where, autorizacaoComunicacao: true, optOutAt: null, statusConta: { not: "BLOQUEADO" }, ...ENVIAVEL_WHERE },
-  });
+  const estimatedAudience = await contarEmPartes({ ...where, ...CONTATO_LIBERADO_WHERE, statusConta: { not: "BLOQUEADO" as const }, ...ENVIAVEL_WHERE }, (w) =>
+    prisma.client.count({ where: w })
+  );
 
   const campaign = await prisma.campaign.create({
     data: {
       tenantId,
+      baseLegal,
       name: d.name,
       objective: d.objective,
       channel: d.channel,
@@ -394,6 +454,7 @@ router.post("/", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
       controlGroupPercent: d.controlGroupPercent,
       costPerMessage: d.costPerMessage,
       estimatedAudience,
+      baseLegal,
     },
   });
   res.status(201).json(campaign);
@@ -412,6 +473,7 @@ router.post("/:id/schedule", requireRole("ADMIN", "OPERATOR"), async (req, res) 
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
 
   const result = await enqueueCampaign(prisma, tenantId, campaign.id);
+  if (result.bloqueado) return res.status(409).json({ error: result.bloqueado, code: "SEM_BASE_LEGAL" }); // LGPD 02-01
   await logAudit({ tenantId, userId, action: "SCHEDULE_CAMPAIGN", target: "Campaign", targetId: campaign.id, details: result });
   res.json(result);
 });
@@ -420,8 +482,34 @@ router.post("/:id/schedule", requireRole("ADMIN", "OPERATOR"), async (req, res) 
 router.post("/:id/dispatch", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
   const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId: req.user!.tenantId } });
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
-  const result = await processQueueBatch(prisma, campaign.id, Number(req.body?.limit) || 50);
+  const result: any = await processQueueBatch(prisma, campaign.id, Number(req.body?.limit) || undefined);
+  // Já há um disparo desta campanha em andamento (outra aba, outro clique): não envia nada de novo.
+  if (result.emAndamento) {
+    return res.status(409).json({ error: "Já existe um disparo em andamento. Aguarde terminar para enviar o próximo.", code: "DISPARO_EM_ANDAMENTO", remaining: result.remaining });
+  }
   res.json(result);
+});
+
+/** POST /api/campaigns/:id/pause — freio de emergência: o que está na fila fica parado até retomar. */
+router.post("/:id/pause", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const { tenantId, id: userId } = req.user!;
+  const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
+  if (campaign.status !== "AGENDADA" && campaign.status !== "EM_EXECUCAO") return res.status(409).json({ error: "Só dá para pausar uma campanha agendada ou em execução." });
+  await prisma.campaign.update({ where: { id: campaign.id }, data: { status: "PAUSADA" } });
+  await logAudit({ tenantId, userId, action: "PAUSE_CAMPAIGN", target: "Campaign", targetId: campaign.id });
+  res.json({ ok: true, status: "PAUSADA" });
+});
+
+/** POST /api/campaigns/:id/resume — retoma uma campanha pausada. */
+router.post("/:id/resume", requireRole("ADMIN", "OPERATOR"), async (req, res) => {
+  const { tenantId, id: userId } = req.user!;
+  const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
+  if (campaign.status !== "PAUSADA") return res.status(409).json({ error: "A campanha não está pausada." });
+  await prisma.campaign.update({ where: { id: campaign.id }, data: { status: "EM_EXECUCAO" } });
+  await logAudit({ tenantId, userId, action: "RESUME_CAMPAIGN", target: "Campaign", targetId: campaign.id });
+  res.json({ ok: true, status: "EM_EXECUCAO" });
 });
 
 const testSendSchema = z.object({
@@ -451,6 +539,51 @@ router.post("/:id/test-send", requireRole("ADMIN", "OPERATOR"), async (req, res)
   res.json(result);
 });
 
+/** Contagens do funil (por status e só dos que clicaram), em duas consultas leves. */
+async function contagensDoFunil(campaignId: string) {
+  const [porStatus, cliques] = await Promise.all([
+    prisma.messageEvent.groupBy({ by: ["status"], where: { campaignId }, _count: { _all: true } }),
+    prisma.messageEvent.groupBy({ by: ["status"], where: { campaignId, clickedAt: { not: null } }, _count: { _all: true } }),
+  ]);
+  const mapa = (g: { status: string; _count: { _all: number } }[]) => Object.fromEntries(g.map((x) => [x.status, x._count._all])) as Record<string, number>;
+  return { porStatus: mapa(porStatus), cliquesPorStatus: mapa(cliques) };
+}
+
+/**
+ * GET /api/campaigns/:id/funil — acompanhamento ao vivo do envio: funil, se há disparo em andamento e as últimas
+ * mensagens. Leve de propósito (a tela consulta a cada poucos segundos enquanto envia); o relatório completo
+ * (uso do limite, ROI) continua em /report.
+ */
+router.get("/:id/funil", async (req, res) => {
+  const { tenantId } = req.user!;
+  const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
+  const [contagens, trava, ultimos] = await Promise.all([
+    contagensDoFunil(campaign.id),
+    prisma.tenant.findUnique({ where: { id: tenantId }, select: { dispatchUntil: true, dispatchCampaignId: true } }),
+    prisma.messageEvent.findMany({
+      where: { campaignId: campaign.id, status: { notIn: ["FILA", "CONTROLE"] } },
+      orderBy: [{ sentAt: "desc" }, { queuedAt: "desc" }],
+      take: 8,
+      select: { status: true, sentAt: true, error: true, client: { select: { nome: true, telefone: true } }, recipient: { select: { nome: true, telefone: true } } },
+    }),
+  ]);
+  const funil: Funil = montarFunil({ ...contagens, audienceCount: campaign.audienceCount });
+  res.json({
+    status: campaign.status,
+    emDisparo: !!trava?.dispatchUntil && trava.dispatchUntil.getTime() > Date.now() && trava.dispatchCampaignId === campaign.id,
+    funil,
+    ultimos: ultimos.map((e) => ({
+      nome: e.recipient?.nome ?? e.client?.nome ?? "—",
+      telefone: maskPhone(e.recipient?.telefone ?? e.client?.telefone ?? ""),
+      status: e.status,
+      em: (e.sentAt ?? null)?.toISOString() ?? null,
+      erro: e.status === "FALHA" || e.status === "BLOQUEADO" ? e.error : null,
+    })),
+    atualizadoEm: new Date().toISOString(),
+  });
+});
+
 /**
  * GET /api/campaigns/:id/report — resultado pelo USO REAL do cliente (transações): curva de
  * conversão D0 a D30, separação de quem tinha saldo no envio, grupo de controle (se houver),
@@ -462,10 +595,11 @@ router.get("/:id/report", async (req, res) => {
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
 
   if (campaign.manual) await linkRecipients(prisma, tenantId, campaign.id);
-  const [grouped, costAgg, evals] = await Promise.all([
+  const [grouped, costAgg, evals, contagensFunil] = await Promise.all([
     prisma.messageEvent.groupBy({ by: ["status"], where: { campaignId: campaign.id }, _count: true }),
-    prisma.messageEvent.aggregate({ where: { campaignId: campaign.id }, _sum: { cost: true } }),
+    prisma.messageEvent.aggregate({ where: { campaignId: campaign.id, status: { in: ENVIADOS as any } }, _sum: { cost: true } }),
     loadCampaignEvaluations(prisma, tenantId, campaign.id),
+    contagensDoFunil(campaign.id),
   ]);
 
   const treated = evals.filter((e) => e.cohort === "TRATADO");
@@ -581,9 +715,12 @@ router.get("/:id/report", async (req, res) => {
   // Quebra pelo dia do ciclo da cidade em que o cliente estava ao receber (ver services/cicloReport.ts).
   const porCiclo = breakdownByCiclo(treated, control, (id) => aberturas.get(id), janelaDias).map((p) => ({ ...p, taxaConversao: (p.taxa * 100).toFixed(2) }));
 
+  const funil = montarFunil({ ...contagensFunil, audienceCount: campaign.audienceCount, usaram: headline.convertidos });
+
   res.json({
     campaignId: campaign.id,
     manual: campaign.manual,
+    funil,
     cliques,
     porPerfil,
     porCiclo,
@@ -611,11 +748,16 @@ router.get("/:id/report", async (req, res) => {
 });
 
 /**
- * GET /api/campaigns/:id/report/export.csv — lista nominal de envios com o uso de cada cliente
- * (saldo no envio, primeiro uso, uso por horizonte D0..D30, valor e lucro em 30 dias).
+ * Export da lista nominal de envios com o uso de cada cliente (saldo no envio, primeiro uso, uso por horizonte
+ * D0..D30, valor e lucro em 30 dias). LGPD 05-01: telefone MASCARADO por padrão; completo só para ADMIN, com
+ * motivo (no corpo, nunca na URL), e a auditoria registra se saiu completo e o motivo.
  */
-router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
-  const { tenantId, id: userId } = req.user!;
+async function exportarRelatorio(req: Request, res: Response, src: Record<string, unknown>) {
+  const { tenantId, id: userId, role } = req.user!;
+  const completo = src.completo === "1" || src.completo === "true" || src.completo === true;
+  const motivo = typeof src.motivo === "string" ? src.motivo.trim().slice(0, 500) : "";
+  if (completo && role !== "ADMIN") return res.status(403).json({ error: "Só administradores exportam o telefone completo" });
+  if (completo && motivo.length < 5) return res.status(400).json({ error: "Informe o motivo para exportar o telefone completo" });
   const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
 
@@ -646,7 +788,7 @@ router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST")
       const usos = ev?.usos ?? [];
       return [
         csvEscape(e.client?.nome ?? e.recipient?.nome ?? ""),
-        e.client?.telefone ?? e.recipient?.telefone ?? "",
+        telefoneCsv(e.client?.telefone ?? e.recipient?.telefone ?? "", completo),
         csvEscape(e.client?.cidade || ""),
         e.status === "CONTROLE" ? "CONTROLE" : "TRATADO",
         e.variant,
@@ -668,10 +810,36 @@ router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST")
     })
     .join("\n");
 
-  await logAudit({ tenantId, userId, action: "EXPORT_CAMPAIGN_REPORT", target: "Campaign", targetId: campaign.id });
+  await logAudit({
+    tenantId,
+    userId,
+    action: "EXPORT_CAMPAIGN_REPORT",
+    target: "Campaign",
+    targetId: campaign.id,
+    details: { count: events.length, telefoneCompleto: completo, ...(completo ? { motivo } : {}) },
+  });
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="campanha-${campaign.id}.csv"`);
   res.send(header + rows);
+}
+
+/** Telefone no CSV: mascarado, salvo export completo autorizado; valor anonimizado ("anon-...") nunca vira dígitos. */
+function telefoneCsv(telefone: string, completo: boolean): string {
+  if (!telefone) return "";
+  return completo ? telefone : maskPhone(telefone);
+}
+
+/** GET /api/campaigns/:id/report/export.csv — sempre mascarado (motivo não vai na URL). */
+router.get("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
+  if (req.query.completo !== undefined || req.query.motivo !== undefined) {
+    return res.status(400).json({ error: "Telefone completo só por POST, com o motivo no corpo (LGPD)." });
+  }
+  await exportarRelatorio(req, res, {});
+});
+
+/** POST /api/campaigns/:id/report/export.csv — o mesmo export; `{ completo: true, motivo }` só para ADMIN. */
+router.post("/:id/report/export.csv", requireRole("ADMIN", "OPERATOR", "ANALYST"), async (req, res) => {
+  await exportarRelatorio(req, res, (req.body ?? {}) as Record<string, unknown>);
 });
 
 function csvEscape(value: string): string {

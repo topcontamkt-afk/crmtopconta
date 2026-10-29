@@ -3,12 +3,14 @@ import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, signPending2FAToken, signToken, verifyPending2FAToken } from "../middleware/auth";
-import { logAudit } from "../middleware/audit";
-import { twoFactorVerifyLimiter } from "../middleware/rateLimit";
+import { ACOES_ACESSO_INDEVIDO, logAudit, logTentativaAcesso, origemRequisicao } from "../middleware/audit";
+import { allowedAreas } from "../services/areas";
+import { loginLimiter, twoFactorVerifyLimiter } from "../middleware/rateLimit";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 import {
   isLocked,
   lockedMinutesRemaining,
+  maskEmail,
   registerFailedLogin,
   resetFailedLogins,
 } from "../services/authSecurity";
@@ -28,7 +30,7 @@ const loginSchema = z.object({
   password: z.string().min(1),
 });
 
-router.post("/login", async (req, res) => {
+router.post("/login", loginLimiter, async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Dados inválidos" });
 
@@ -37,9 +39,32 @@ router.post("/login", async (req, res) => {
   // pertence (é exatamente isso que estamos descobrindo) — RLS real (config/tenantGuard.ts) não
   // tem uma GUC de tenant pra setar aqui, então precisa do mesmo desvio dos jobs de scheduler.
   const user = await withCrossTenantAccess(() => prisma.user.findUnique({ where: { email } }));
-  if (!user || !user.active) return res.status(401).json({ error: "Credenciais inválidas" });
+  const emailMascarado = maskEmail(email);
+  // LGPD 05-03: nunca senha nem token nos detalhes; e-mail só mascarado; IP e User-Agent da origem.
+  const origem = origemRequisicao(req);
+
+  // LGPD 05-03: e-mail inexistente não tem tenant. Gravar no AuditLog de algum controlador seria
+  // atribuir a ele uma tentativa que pode não ser dele (e expor o e-mail tentado a quem não deve
+  // vê-lo). Decisão: NÃO grava no AuditLog; fica só uma linha estruturada no log do servidor, com
+  // e-mail mascarado, e a tentativa continua limitada por IP (loginLimiter). Reter esse log por mais
+  // tempo (log drain) é pendência de infraestrutura (ver docs/lgpd/correcoes).
+  if (!user) {
+    console.warn(JSON.stringify({ evento: ACOES_ACESSO_INDEVIDO.LOGIN_FALHA, motivo: "EMAIL_DESCONHECIDO", email: emailMascarado, ip: origem.ip, em: new Date().toISOString() }));
+    return res.status(401).json({ error: "Credenciais inválidas" });
+  }
+  if (!user.active) {
+    // E-mail existe: a tentativa vai para o AuditLog do tenant dele, já no contexto de RLS dele.
+    await runWithTenantContextAsync(user.tenantId, () =>
+      logTentativaAcesso({ tenantId: user.tenantId, userId: user.id, action: ACOES_ACESSO_INDEVIDO.LOGIN_FALHA, details: { email: emailMascarado, motivo: "USUARIO_INATIVO", ...origem } })
+    );
+    return res.status(401).json({ error: "Credenciais inválidas" });
+  }
 
   if (isLocked(user)) {
+    // LGPD 05-03: tentativa durante o bloqueio também é rastro de ataque em andamento.
+    await runWithTenantContextAsync(user.tenantId, () =>
+      logTentativaAcesso({ tenantId: user.tenantId, userId: user.id, action: ACOES_ACESSO_INDEVIDO.LOGIN_FALHA, details: { email: emailMascarado, motivo: "CONTA_BLOQUEADA", bloqueadaAte: user.lockedUntil?.toISOString() ?? null, ...origem } })
+    );
     return res.status(423).json({
       error: `Conta temporariamente bloqueada por excesso de tentativas. Tente novamente em ${lockedMinutesRemaining(user)} min.`,
     });
@@ -50,7 +75,22 @@ router.post("/login", async (req, res) => {
   await runWithTenantContextAsync(user.tenantId, async () => {
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) {
-      await registerFailedLogin(prisma, user.id, user.failedLoginCount);
+      const falha = await registerFailedLogin(prisma, user.id, user.failedLoginCount);
+      // LGPD 05-03: o contador em User é zerado no próximo login certo; o AuditLog preserva o rastro.
+      await logTentativaAcesso({
+        tenantId: user.tenantId,
+        userId: user.id,
+        action: ACOES_ACESSO_INDEVIDO.LOGIN_FALHA,
+        details: { email: emailMascarado, motivo: "SENHA_INVALIDA", tentativa: falha.count, ...origem },
+      });
+      if (falha.locked) {
+        await logTentativaAcesso({
+          tenantId: user.tenantId,
+          userId: user.id,
+          action: ACOES_ACESSO_INDEVIDO.LOGIN_BLOQUEADO,
+          details: { email: emailMascarado, tentativas: falha.count, bloqueadaAte: falha.lockedUntil?.toISOString() ?? null, ...origem },
+        });
+      }
       return res.status(401).json({ error: "Credenciais inválidas" });
     }
 
@@ -62,7 +102,8 @@ router.post("/login", async (req, res) => {
     }
 
     const token = signToken({ id: user.id, tenantId: user.tenantId, role: user.role, email: user.email });
-    await logAudit({ tenantId: user.tenantId, userId: user.id, action: "LOGIN", target: "User", targetId: user.id });
+    // LGPD 05-03: de onde veio o acesso que deu certo (para separar ataque de uso legítimo depois de um incidente)
+    await logAudit({ tenantId: user.tenantId, userId: user.id, action: "LOGIN", target: "User", targetId: user.id, details: origem });
 
     res.json({
       token,
@@ -73,6 +114,7 @@ router.post("/login", async (req, res) => {
         role: user.role,
         tenantId: user.tenantId,
         mustChangePassword: user.mustChangePassword,
+        areas: allowedAreas(user),
       },
     });
   });
@@ -97,18 +139,27 @@ router.post("/2fa/verify", twoFactorVerifyLimiter, async (req, res) => {
 
   // Mesmo motivo do /login: ainda não sabemos o tenant deste userId até buscá-lo.
   const user = await withCrossTenantAccess(() => prisma.user.findUnique({ where: { id: userId } }));
-  if (!user || !user.active || !user.twoFactorEnabled || !user.twoFactorSecret) {
+  // LGPD 05-03: token pending2FA inválido/expirado não identifica o usuário com segurança (fica só
+  // no rate limit por IP). Com o usuário identificado, a falha vai para o AuditLog do tenant dele.
+  if (!user) return res.status(401).json({ error: "Não foi possível verificar o código" });
+  const falha2FA = (motivo: string) =>
+    runWithTenantContextAsync(user.tenantId, () =>
+      logTentativaAcesso({ tenantId: user.tenantId, userId: user.id, action: ACOES_ACESSO_INDEVIDO.FALHA_2FA, details: { email: maskEmail(user.email), motivo, ...origemRequisicao(req) } })
+    );
+  if (!user.active || !user.twoFactorEnabled || !user.twoFactorSecret) {
+    await falha2FA(!user.active ? "USUARIO_INATIVO" : "2FA_NAO_ATIVO");
     return res.status(401).json({ error: "Não foi possível verificar o código" });
   }
 
   const secret = decryptTwoFactorSecret(user.twoFactorSecret);
   if (!verifyTotpToken(parsed.data.code, secret)) {
+    await falha2FA("CODIGO_INVALIDO");
     return res.status(401).json({ error: "Código inválido" });
   }
 
   await runWithTenantContextAsync(user.tenantId, async () => {
     const token = signToken({ id: user.id, tenantId: user.tenantId, role: user.role, email: user.email });
-    await logAudit({ tenantId: user.tenantId, userId: user.id, action: "LOGIN_2FA", target: "User", targetId: user.id });
+    await logAudit({ tenantId: user.tenantId, userId: user.id, action: "LOGIN_2FA", target: "User", targetId: user.id, details: origemRequisicao(req) });
 
     res.json({
       token,
@@ -119,6 +170,7 @@ router.post("/2fa/verify", twoFactorVerifyLimiter, async (req, res) => {
         role: user.role,
         tenantId: user.tenantId,
         mustChangePassword: user.mustChangePassword,
+        areas: allowedAreas(user),
       },
     });
   });
@@ -134,6 +186,7 @@ router.get("/me", requireAuth, async (req, res) => {
     tenantId: user.tenantId,
     mustChangePassword: user.mustChangePassword,
     twoFactorEnabled: user.twoFactorEnabled,
+    areas: allowedAreas(user),
   });
 });
 
@@ -149,7 +202,11 @@ router.post("/change-password", requireAuth, async (req, res) => {
 
   const user = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
   const ok = await bcrypt.compare(parsed.data.currentPassword, user.passwordHash);
-  if (!ok) return res.status(400).json({ error: "Senha atual incorreta" });
+  if (!ok) {
+    // LGPD 05-03: senha errada numa sessão já aberta pode ser sessão sequestrada.
+    await logTentativaAcesso({ tenantId: user.tenantId, userId: user.id, action: ACOES_ACESSO_INDEVIDO.LOGIN_FALHA, details: { email: maskEmail(user.email), motivo: "SENHA_ATUAL_INVALIDA_TROCA_SENHA", ...origemRequisicao(req) } });
+    return res.status(400).json({ error: "Senha atual incorreta" });
+  }
 
   const passwordHash = await bcrypt.hash(parsed.data.newPassword, 10);
   await prisma.user.update({ where: { id: user.id }, data: { passwordHash, mustChangePassword: false } });
@@ -203,7 +260,11 @@ router.post("/2fa/disable", requireAuth, async (req, res) => {
 
   const user = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
   const ok = await bcrypt.compare(parsed.data.password, user.passwordHash);
-  if (!ok) return res.status(400).json({ error: "Senha incorreta" });
+  if (!ok) {
+    // LGPD 05-03: tentativa de desligar o 2FA com senha errada (possível sessão sequestrada).
+    await logTentativaAcesso({ tenantId: user.tenantId, userId: user.id, action: ACOES_ACESSO_INDEVIDO.LOGIN_FALHA, details: { email: maskEmail(user.email), motivo: "SENHA_INVALIDA_DESATIVAR_2FA", ...origemRequisicao(req) } });
+    return res.status(400).json({ error: "Senha incorreta" });
+  }
 
   await prisma.user.update({ where: { id: user.id }, data: { twoFactorEnabled: false, twoFactorSecret: null } });
   await logAudit({ tenantId: user.tenantId, userId: user.id, action: "DISABLE_2FA", target: "User", targetId: user.id });

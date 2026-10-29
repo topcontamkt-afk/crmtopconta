@@ -19,7 +19,7 @@ function fakeTemplates(local: any[]) {
         return { id: `novo${created.length}`, ...data };
       }),
     },
-    templateMedia: { create: jest.fn(async ({ data }: any) => void media.push(data)) },
+    templateMedia: { upsert: jest.fn(async ({ create }: any) => void media.push(create)) },
   };
   return { prisma, updates, created, media };
 }
@@ -103,7 +103,7 @@ describe("applyTemplateEvent / sync", () => {
       { id: "42", name: "com_imagem", status: "APPROVED", category: "MARKETING", language: "pt_BR", components: [{ type: "HEADER", format: "IMAGE", example: { header_handle: ["https://cdn.example/a.png"] } }, { type: "BODY", text: "Oi" }] },
     ]);
     expect(created[0]).toMatchObject({ name: "com_imagem (Meta)", headerFormat: "IMAGE" });
-    expect(media[0]).toMatchObject({ mime: "image/png", size: 7 });
+    expect(media[0]).toMatchObject({ mime: "image/png", size: 7, storageKey: `t/${media[0].tenantId}/tpl/novo${created.length}` });
   });
 });
 
@@ -116,6 +116,11 @@ describe("sendTemplateReply (fora da janela de 24h)", () => {
       conversation: { findFirst: jest.fn(async () => ({ id: "c1", waId: "5584999998888", contactName: "Maria", client, account: { phoneNumberId: "1055", active: true } })), update: jest.fn() },
       messageTemplate: { findFirst: jest.fn(async () => template) },
       waMessage: { create: jest.fn(async ({ data }: any) => { created.push(data); return { id: "m1", ...data }; }) },
+      // supressão por telefone (LGPD 02-03): nada suprimido
+      tenant: { findUnique: jest.fn(async () => ({ cpfSalt: "salt", baseLegalMarketing: "LEGITIMO_INTERESSE" })) },
+      supressaoTitular: { findMany: jest.fn(async () => []) },
+      client: { findMany: jest.fn(async () => []) },
+      campaignRecipient: { findMany: jest.fn(async () => []) },
     };
     return { prisma, created };
   }

@@ -30,12 +30,14 @@ import OpportunityQueue from "../components/OpportunityQueue";
 import FrescorExtrato from "../components/FrescorExtrato";
 import PerfisRendaCard from "../components/PerfisRendaCard";
 import CiclosCard from "../components/CiclosCard";
+import UsoPeriodoCard from "../components/UsoPeriodoCard";
+import AdesaoCicloCard from "../components/AdesaoCicloCard";
 import { FAIXA_LABELS, FAIXA_OPTIONS } from "../utils/faixas";
 
 type Delta = { abs: number; pct: number | null } | null;
 
 interface Overview {
-  periodo: { dias: number; desde: string };
+  periodo: { dias: number; desde: string; ate?: string | null; personalizado?: boolean };
   filtros: {
     aplicados: { cidade: string | null; empresaConveniada: string | null };
     cidades: { valor: string; count: number }[];
@@ -135,6 +137,9 @@ const REFRESH_MS = 60_000;
 export default function Dashboard() {
   const navigate = useNavigate();
   const [days, setDays] = useState<7 | 30 | 90>(30);
+  // Filtro por datas (YYYY-MM-DD): quando preenchido vale no lugar dos 7/30/90 dias
+  const [de, setDe] = useState("");
+  const [ate, setAte] = useState("");
   const [cidade, setCidade] = useState("");
   const [convenio, setConvenio] = useState("");
   const [tab, setTab] = useState<ChartTab>("uso");
@@ -143,11 +148,15 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const requestId = useRef(0);
+  const periodoCustom = !!(de || ate);
+  const hojeIso = new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
 
   const load = useCallback(() => {
     const id = ++requestId.current;
     setLoading(true);
     const qs = new URLSearchParams({ days: String(days) });
+    if (de) qs.set("de", de);
+    if (ate) qs.set("ate", ate);
     if (cidade) qs.set("cidade", cidade);
     if (convenio) qs.set("empresaConveniada", convenio);
     Promise.all([api<Overview>(`/dashboard/overview?${qs}`), api<Perfil>("/dashboard/perfil")])
@@ -159,7 +168,7 @@ export default function Dashboard() {
       })
       .catch((e) => id === requestId.current && setError(e.message))
       .finally(() => id === requestId.current && setLoading(false));
-  }, [days, cidade, convenio]);
+  }, [days, de, ate, cidade, convenio]);
 
   useEffect(() => {
     load();
@@ -198,10 +207,25 @@ export default function Dashboard() {
         <div className="pd-filters">
           <div className="pd-seg" role="group" aria-label="Período">
             {([7, 30, 90] as const).map((d) => (
-              <button key={d} type="button" className={days === d ? "on" : ""} aria-pressed={days === d} onClick={() => setDays(d)}>
+              <button key={d} type="button" className={!periodoCustom && days === d ? "on" : ""} aria-pressed={!periodoCustom && days === d} onClick={() => { setDays(d); setDe(""); setAte(""); }}>
                 {d} dias
               </button>
             ))}
+          </div>
+          <div className="pd-dates" role="group" aria-label="Filtro por datas">
+            <label>
+              <span>De</span>
+              <input type="date" value={de} max={ate || hojeIso} onChange={(e) => setDe(e.target.value)} />
+            </label>
+            <label>
+              <span>Até</span>
+              <input type="date" value={ate} min={de || undefined} max={hojeIso} onChange={(e) => setAte(e.target.value)} />
+            </label>
+            {periodoCustom && (
+              <button type="button" className="btn secondary pd-refresh" onClick={() => { setDe(""); setAte(""); }}>
+                Limpar datas
+              </button>
+            )}
           </div>
           <select className="pd-select" aria-label="Filtrar por cidade" value={cidade} onChange={(e) => setCidade(e.target.value)}>
             <option value="">Todas as cidades</option>
@@ -271,7 +295,9 @@ export default function Dashboard() {
         />
       </div>
       <p className="pd-note">
-        {temFiltro
+        {periodoCustom
+          ? `Período de ${(de || "início").split("-").reverse().join("/")} a ${(ate || hojeIso).split("-").reverse().join("/")}: o gráfico, a variação e as campanhas usam essas datas; os cartões acima mostram a base de agora.`
+          : temFiltro
           ? "Com filtro ativo os números são do recorte; variações e histórico só existem para a base inteira."
           : data.baseline
             ? `Variação contra ${dayLabel(data.baseline.day)} (${data.baseline.dias} dia${data.baseline.dias === 1 ? "" : "s"} atrás${
@@ -284,6 +310,10 @@ export default function Dashboard() {
         <ChartCard data={data} tab={tab} setTab={setTab} temFiltro={temFiltro} />
         <HealthCard saude={data.saude} />
       </div>
+
+      <UsoPeriodoCard days={days} de={de} ate={ate} cidade={cidade} convenio={convenio} />
+
+      <AdesaoCicloCard cidade={cidade} convenio={convenio} />
 
       <FrescorExtrato />
 
@@ -586,7 +616,7 @@ function ChartCard({ data, tab, setTab, temFiltro }: { data: Overview; tab: Char
   const hasHistory = data.historicoDisponivel && points.length >= 2;
 
   return (
-    <div className="card pd-card pd-grow-2">
+    <div className="card pd-card pd-grow-2 pd-fill-card">
       <div className="pd-card-head">
         <div>
           <h3>{c.title}</h3>
@@ -603,7 +633,7 @@ function ChartCard({ data, tab, setTab, temFiltro }: { data: Overview; tab: Char
         </div>
       </div>
       {!hasHistory ? (
-        <div className="chart-empty-state" style={{ height: 240 }}>
+        <div className="chart-empty-state" style={{ flex: 1, minHeight: 240 }}>
           <strong>{temFiltro ? "Histórico indisponível com filtro" : "O histórico está começando"}</strong>
           <span>
             {temFiltro
@@ -612,7 +642,8 @@ function ChartCard({ data, tab, setTab, temFiltro }: { data: Overview; tab: Char
           </span>
         </div>
       ) : (
-        <ResponsiveContainer width="100%" height={250}>
+        <div style={{ flex: 1, minHeight: 250 }}>
+        <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={points} margin={{ top: 10, right: 12, left: -14, bottom: 0 }}>
             <defs>
               <linearGradient id="pdArea" x1="0" y1="0" x2="0" y2="1">
@@ -627,6 +658,7 @@ function ChartCard({ data, tab, setTab, temFiltro }: { data: Overview; tab: Char
             <Area type="monotone" dataKey={c.key as string} stroke={c.color} strokeWidth={2.5} fill="url(#pdArea)" dot={{ r: 3, fill: c.color, strokeWidth: 0 }} activeDot={{ r: 5, fill: c.color, stroke: "#0b0f19", strokeWidth: 2 }} animationDuration={700} connectNulls />
           </AreaChart>
         </ResponsiveContainer>
+        </div>
       )}
     </div>
   );

@@ -1,8 +1,8 @@
-import "dotenv/config";
-// Validação fail-fast de variáveis de ambiente — precisa ser o próximo import depois de
-// "dotenv/config" (que carrega o .env local) e antes de qualquer outro módulo que leia
-// process.env (rotas, serviços), para travar o processo/cold-start imediatamente com uma
-// mensagem clara em vez de falhar de forma obscura só quando a rota afetada for chamada.
+// Validação fail-fast de variáveis de ambiente — precisa ser o primeiro import, antes de qualquer
+// outro módulo que leia process.env (rotas, serviços), para travar o cold start com uma mensagem
+// clara em vez de falhar de forma obscura só quando a rota afetada for chamada. No Worker,
+// process.env vem das vars/secrets do wrangler (`.dev.vars` no local); o `.env` (dotenv) só vale
+// no servidor Node (src/index.ts).
 import { env } from "./config/env";
 import express from "express";
 import cors from "cors";
@@ -31,6 +31,11 @@ import tenantRoutes from "./routes/tenant";
 import cronRoutes from "./routes/cron";
 import purchaseRoutes from "./routes/purchases";
 import cicloRoutes from "./routes/ciclos";
+import voiceRoutes, { voiceWebhook } from "./routes/voice";
+import { areaAccess } from "./middleware/areaAccess";
+import zapiWebhookRoutes from "./routes/zapiWebhook";
+import tenantWhatsappRoutes from "./routes/tenantWhatsapp";
+import titularRoutes from "./routes/titular";
 
 /**
  * Criação do Express app, sem app.listen() nem inicialização do scheduler — para poder ser
@@ -73,22 +78,29 @@ app.use(
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
 app.use("/r", trackedLinkRoutes);
+// Acesso por área (Usuários → Acessos): confere antes de qualquer rota de /api
+app.use("/api", areaAccess);
 app.use("/api/auth", authRoutes);
 app.use("/api/clients", clientRoutes);
+app.use("/api/titular/pedidos", titularRoutes); // LGPD 03-05
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/imports", importRoutes);
 app.use("/api/segments", segmentRoutes);
 app.use("/api/campaigns", campaignRoutes);
 app.use("/api/automations", automationRoutes);
+app.use("/api/integrations/webhooks/zapi", zapiWebhookRoutes); // público: segredo na URL
 app.use("/api/integrations", integrationRoutes);
 app.use("/api/inbox", inboxRoutes);
 app.use("/api/audit-logs", auditRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/templates", templateRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/tenant/whatsapp", tenantWhatsappRoutes);
 app.use("/api/tenant", tenantRoutes);
 app.use("/api/purchases", purchaseRoutes);
 app.use("/api/ciclos", cicloRoutes);
+app.use("/api/voice", voiceWebhook); // público (Twilio): só /twilio-status, validado por assinatura
+app.use("/api/voice", voiceRoutes);
 // Equivalente HTTP do scheduler, para disparo via Vercel Cron Jobs em produção serverless
 // (ver src/services/scheduler.ts e routes/cron.ts).
 app.use("/api/cron", cronRoutes);

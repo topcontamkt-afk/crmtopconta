@@ -1,4 +1,5 @@
 import { AppPrismaClient } from "../config/db";
+import { LOTE_IN } from "../config/d1Partes";
 import { computeABSignificance } from "./statistics";
 import { classifyTransaction } from "./transactionClassifier";
 
@@ -306,7 +307,8 @@ export function buildCampaignResults(evals: EventEvaluation[], now: Date = new D
 /* ───────────────────────── carregamento do banco ───────────────────────── */
 
 const SENT_STATUSES = ["ENVIADO", "ENTREGUE", "LIDO", "RESPONDIDO"] as const;
-const BATCH = 1000;
+// clientes por consulta: `not`, dois `in` e `orderBy` impedem o Prisma de dividir a lista sozinho no limite do D1
+const BATCH = LOTE_IN - 10; // a consulta de envios de outras campanhas leva ~8 parâmetros além da lista
 
 function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];

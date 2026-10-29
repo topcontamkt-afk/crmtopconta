@@ -1,4 +1,6 @@
-import { applyOutboundStatus, nextOutboundStatus, sendReply } from "./whatsappReply";
+import { applyOutboundStatus, nextOutboundStatus, sendReply, sendTemplateReply } from "./whatsappReply";
+import { SEM_BASE_LEGAL } from "./baseLegal";
+import { phoneHash } from "./privacy";
 
 const now = new Date("2026-10-11T12:00:00Z");
 const ok = (body: any) => ({ ok: true, status: 200, json: async () => body });
@@ -105,5 +107,80 @@ describe("status de entrega", () => {
     const prisma: any = { waMessage: { findFirst: async () => ({ id: "m1", status: "sent" }), update: async (a: any) => void updates.push(a) } };
     await applyOutboundStatus(prisma, "t1", { wamid: "w1", status: "failed", errorText: "131026 Message undeliverable" });
     expect(updates[0].data).toMatchObject({ status: "failed", errorText: "131026 Message undeliverable" });
+  });
+});
+
+// LGPD 02-03 / 02-06: contato PROATIVO (template) só para quem não pediu para parar, também sem cliente ligado
+describe("sendTemplateReply — opt-out por telefone", () => {
+  const now = new Date("2026-10-11T12:00:00Z");
+  const approved = { id: "tp1", channel: "WHATSAPP", status: "APROVADO", metaStatus: "APPROVED", metaName: "oferta_v1", language: "pt_BR", body: "Olá {{nome}}" };
+  function fakeTpl(client: any, supressoes: any[] = [], optOutOutroCadastro: any[] = [], base: string | null = "LEGITIMO_INTERESSE", category = "MARKETING") {
+    const created: any[] = [];
+    const prisma: any = {
+      conversation: { findFirst: jest.fn(async () => ({ id: "c1", waId: "558499998888", contactName: "Maria", client, account: { tenantId: "t1", phoneNumberId: "1055", active: true } })), update: jest.fn() },
+      messageTemplate: { findFirst: jest.fn(async () => ({ ...approved, category })) },
+      waMessage: { create: jest.fn(async ({ data }: any) => { created.push(data); return { id: "m1", ...data }; }) },
+      tenant: { findUnique: jest.fn(async () => ({ cpfSalt: "salt", baseLegalMarketing: base })) },
+      supressaoTitular: { findMany: jest.fn(async () => supressoes) },
+      client: { findMany: jest.fn(async () => optOutOutroCadastro) },
+      campaignRecipient: { findMany: jest.fn(async () => []) },
+    };
+    return { prisma, created };
+  }
+  const okFetch = () => jest.fn(async () => ({ ok: true, status: 200, json: async () => ({ messages: [{ id: "wamid.T" }] }) }));
+  const liberado = { nome: "Maria", autorizacaoComunicacao: true, optOutAt: null, bloqueadoLgpdAt: null, cpfHash: "doc1" };
+
+  it("conversa SEM cliente (contato de lista) com telefone suprimido: bloqueia e não chama a Meta", async () => {
+    const sup = [{ tenantId: "t1", phoneHash: phoneHash("salt", "+5584999998888"), docHash: null, motivo: "OPT_OUT" }];
+    const { prisma, created } = fakeTpl(null, sup);
+    const f = okFetch();
+    await expect(sendTemplateReply(prisma, "t1", "u1", "c1", "tp1", { token: "T", fetchImpl: f, now })).rejects.toMatchObject({ code: "OPT_OUT" });
+    expect(f).not.toHaveBeenCalled();
+    expect(created).toHaveLength(0);
+  });
+
+  it("o mesmo número em OUTRO cadastro com opt-out também bloqueia", async () => {
+    const { prisma } = fakeTpl(liberado, [], [{ telefone: "+5584999998888" }]);
+    const f = okFetch();
+    await expect(sendTemplateReply(prisma, "t1", "u1", "c1", "tp1", { token: "T", fetchImpl: f, now })).rejects.toMatchObject({ code: "OPT_OUT" });
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it("tratamento bloqueado a pedido do titular bloqueia", async () => {
+    const { prisma } = fakeTpl({ ...liberado, bloqueadoLgpdAt: new Date() });
+    await expect(sendTemplateReply(prisma, "t1", "u1", "c1", "tp1", { token: "T", fetchImpl: okFetch(), now })).rejects.toMatchObject({ code: "OPT_OUT" });
+  });
+
+  it("contato liberado recebe", async () => {
+    const { prisma, created } = fakeTpl(liberado);
+    await sendTemplateReply(prisma, "t1", "u1", "c1", "tp1", { token: "T", fetchImpl: okFetch(), now });
+    expect(created).toHaveLength(1);
+  });
+
+  it("LGPD 02-01: template de marketing sem base legal declarada não sai; utilidade sai", async () => {
+    const semBase = fakeTpl(liberado, [], [], null);
+    const f = okFetch();
+    await expect(sendTemplateReply(semBase.prisma, "t1", "u1", "c1", "tp1", { token: "T", fetchImpl: f, now })).rejects.toMatchObject({ code: "TEMPLATE_INDISPONIVEL", message: SEM_BASE_LEGAL });
+    expect(f).not.toHaveBeenCalled();
+    const utilidade = fakeTpl(liberado, [], [], null, "UTILITY");
+    await sendTemplateReply(utilidade.prisma, "t1", "u1", "c1", "tp1", { token: "T", fetchImpl: okFetch(), now });
+    expect(utilidade.created).toHaveLength(1);
+  });
+});
+
+describe("sendReply — atendimento dentro da janela", () => {
+  it("responder em texto a quem ACABOU de escrever vale mesmo com opt-out (é atendimento, não marketing)", async () => {
+    const now = new Date("2026-10-11T12:00:00Z");
+    const created: any[] = [];
+    const prisma: any = {
+      conversation: {
+        findFirst: jest.fn(async () => ({ id: "c1", waId: "5584999998888", lastInboundAt: new Date("2026-10-11T11:00:00Z"), client: { optOutAt: new Date(), autorizacaoComunicacao: false }, account: { tenantId: "t1", phoneNumberId: "1055", active: true } })),
+        update: jest.fn(),
+      },
+      waMessage: { create: jest.fn(async ({ data }: any) => { created.push(data); return { id: "m1", ...data }; }) },
+    };
+    const f = jest.fn(async () => ({ ok: true, status: 200, json: async () => ({ messages: [{ id: "wamid.R" }] }) }));
+    await sendReply(prisma, "t1", "u1", "c1", { tipo: "text", texto: "Pronto, você foi descadastrado." }, { token: "T", fetchImpl: f, now });
+    expect(created).toHaveLength(1);
   });
 });

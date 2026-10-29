@@ -18,8 +18,13 @@ export function buildOtpAuthUri(email: string, secret: string): string {
   return authenticator.keyuri(email, ISSUER, secret);
 }
 
+/**
+ * QR code como SVG em data URI. O PNG (`toDataURL`) usa zlib/pngjs, que trava a requisição no Worker;
+ * o SVG é texto puro e a tela mostra do mesmo jeito (`<img src>`).
+ */
 export async function buildQrCodeDataUri(otpAuthUri: string): Promise<string> {
-  return QRCode.toDataURL(otpAuthUri);
+  const svg = await QRCode.toString(otpAuthUri, { type: "svg", margin: 1 });
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 }
 
 export function verifyToken(token: string, secret: string): boolean {

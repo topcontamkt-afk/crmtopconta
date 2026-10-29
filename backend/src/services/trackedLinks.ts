@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { publicBackendUrl } from "../config/publicUrl";
 
 /**
  * Link rastreado de botão de template. O que a Meta aprova é `https://<nosso domínio>/r/{{1}}`; a cada
@@ -9,14 +10,14 @@ import crypto from "crypto";
  *  - tipo "n": id do template (envio de teste/Inbox) → só redireciona, sem registrar.
  */
 
-export const DEFAULT_LINK_BASE = "https://crmtopconta-backend.vercel.app";
 export const TOKEN_LENGTH = 45;
 
 export type TokenKind = "e" | "n";
 
-/** Domínio dos links (sem barra no fim). LINK_BASE_URL > PUBLIC_BACKEND_URL > endereço da Vercel. */
-export function linkBase(): string {
-  return (process.env.LINK_BASE_URL || process.env.PUBLIC_BACKEND_URL || DEFAULT_LINK_BASE).replace(/\/+$/, "");
+/** Domínio dos links (sem barra no fim): LINK_BASE_URL, senão PUBLIC_BACKEND_URL; null sem nenhuma das duas. */
+export function linkBase(): string | null {
+  const url = process.env.LINK_BASE_URL?.trim() || publicBackendUrl();
+  return url ? url.replace(/\/+$/, "") : null;
 }
 
 function secretKey(secret?: string): Buffer {

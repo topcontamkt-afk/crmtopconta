@@ -1,7 +1,7 @@
 import { Router } from "express";
-import rateLimit from "express-rate-limit";
 import { prisma } from "../config/db";
 import { withCrossTenantAccess } from "../config/tenantGuard";
+import { rateLimit } from "../middleware/rateLimit";
 import { isBotUserAgent, parseToken, trackedButtons } from "../services/trackedLinks";
 
 /**

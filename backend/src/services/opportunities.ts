@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../generated/prisma/client";
 import { AppPrismaClient, tenantRaw } from "../config/db";
 import { addDays, clientWhere, DashboardFilters, rawFilterSql } from "./dashboardMetrics";
 
@@ -158,9 +158,9 @@ export interface Buyer {
 /** Quem comprou no comércio credenciado, com o necessário para os cortes de comércio. */
 async function loadBuyers(tenantId: string, filters: DashboardFilters): Promise<Buyer[]> {
   const raw = rawFilterSql(filters, 2, "c");
-  const rows = await tenantRaw.query<Array<{ id: string; n: number; valor: number; super: boolean; posto: boolean }>>(
-    `SELECT p."clientId" AS id, COUNT(*)::int AS n, COALESCE(SUM(p."valorPrincipal"), 0)::float AS valor,
-            BOOL_OR(m."category" = 'SUPERMERCADO') AS super, BOOL_OR(m."category" = 'POSTO') AS posto
+  const rows = await tenantRaw.query<Array<{ id: string; n: number; valor: number; super: number; posto: number }>>(
+    `SELECT p."clientId" AS id, COUNT(*) AS n, CAST(COALESCE(SUM(p."valorPrincipal"), 0) AS REAL) AS valor,
+            MAX(m."category" = 'SUPERMERCADO') AS super, MAX(m."category" = 'POSTO') AS posto
      FROM "Purchase" p
      JOIN "Merchant" m ON m."id" = p."merchantId"
      JOIN "Client" c ON c."id" = p."clientId"
@@ -169,7 +169,7 @@ async function loadBuyers(tenantId: string, filters: DashboardFilters): Promise<
     tenantId,
     ...raw.params
   );
-  return rows;
+  return rows.map((r) => ({ id: r.id, n: Number(r.n), valor: Number(r.valor), super: !!r.super, posto: !!r.posto }));
 }
 
 /** Cortes de comércio sobre a lista de compradores (função pura, testada). */
@@ -184,7 +184,9 @@ export function commerceCohorts(buyers: Buyer[]): Record<"comercio_super_sem_pos
   };
 }
 
-const MONTH_BRT = `EXTRACT(MONTH FROM (now() AT TIME ZONE 'America/Sao_Paulo'))`;
+const MONTH_BRT = `CAST(strftime('%m', 'now', '-3 hours') AS INTEGER)`;
+// data de nascimento é uma data (meia-noite UTC): o mês sai direto, sem fuso
+const MES_NASCIMENTO = `CAST(strftime('%m', "dataNascimento") AS INTEGER)`;
 
 /** Resultado de `computeOpportunities`. */
 export async function computeOpportunities(prisma: AppPrismaClient, tenantId: string, filters: DashboardFilters = {}) {
@@ -206,8 +208,8 @@ export async function computeOpportunities(prisma: AppPrismaClient, tenantId: st
     prisma.client.count({ where: and({ cidade: null }) }),
     prisma.client.count({ where: and({ dataValidadeCartao: { lt: new Date() } }) }),
     tenantRaw.query<Array<{ count: bigint }>>(
-      `SELECT COUNT(*)::bigint AS count FROM "Client"
-       WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL AND EXTRACT(MONTH FROM "dataNascimento") = ${MONTH_BRT} ${raw.sql}`,
+      `SELECT COUNT(*) AS count FROM "Client"
+       WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL AND ${MES_NASCIMENTO} = ${MONTH_BRT} ${raw.sql}`,
       tenantId,
       ...raw.params
     ),
@@ -277,7 +279,7 @@ export async function opportunityAudience(
       const raw = rawFilterSql(filters, 2);
       const rows = await tenantRaw.query<Array<{ id: string }>>(
         `SELECT "id" FROM "Client" WHERE "tenantId" = $1 AND "dataNascimento" IS NOT NULL
-           AND EXTRACT(MONTH FROM "dataNascimento") = ${MONTH_BRT} ${raw.sql} LIMIT 5000`,
+           AND ${MES_NASCIMENTO} = ${MONTH_BRT} ${raw.sql} LIMIT 5000`,
         tenantId,
         ...raw.params
       );

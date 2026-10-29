@@ -1,11 +1,13 @@
 import express, { Router } from "express";
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../generated/prisma/client";
 import crypto from "crypto";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
-import { encryptSecret } from "../services/crypto";
+import { decryptSecret, encryptSecret, isEncryptedPayload } from "../services/crypto";
+import { isSmsOptOut, parseSmsWebhook, smsWebhookSecretOk } from "../services/channels/sms";
+import { registrarOptOutTelefone } from "../services/privacy";
 import { exportTenantSummaryToSheet } from "../services/biExport";
 import { env } from "../config/env";
 import { withCrossTenantAccess, runWithTenantContextAsync } from "../config/tenantGuard";
@@ -15,9 +17,12 @@ import { applyTemplateEvent } from "../services/whatsappTemplateSync";
 import { parseTemplateEvents, parseWebhookPayload } from "../services/whatsappPayload";
 import { nextEventStatus } from "../services/whatsappPayload";
 import { applyOutboundStatus } from "../services/whatsappReply";
+import { callingChecks } from "../services/whatsappCalling";
 import { getOrCacheMessageMedia } from "../services/whatsappMedia";
 import { storeInboundMessage } from "../services/whatsappInbox";
+import { maybeAutoReply } from "../services/whatsappAutoReply";
 import { verifyTwilioSignature, verifyWhatsAppSignature } from "../services/webhookAuth";
+import { publicBackendUrl, publicUrlOfRequest } from "../config/publicUrl";
 import { webhookLimiter } from "../middleware/rateLimit";
 
 const router = Router();
@@ -59,13 +64,23 @@ router.put("/sheets", requireRole("ADMIN"), async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { tenantId, id: userId } = req.user!;
 
+  // LGPD 06-02: a Service Account é uma só para todos os tenants; a mesma planilha não pode ser de dois
+  // controladores (a leitura recusa planilha ativa em mais de um, então cadastrar a de outro travaria a dele).
+  const outro = await withCrossTenantAccess(() =>
+    prisma.sheetConnection.findFirst({ where: { sheetId: parsed.data.sheetId, active: true, tenantId: { not: tenantId } }, select: { id: true } })
+  );
+  if (outro) return res.status(409).json({ error: "Esta planilha já está conectada a outra conta.", codigo: "PLANILHA_EM_OUTRO_CONTROLADOR" });
+
   const existing = await prisma.sheetConnection.findFirst({ where: { tenantId } });
   const data = { tenantId, ...parsed.data, columnMapping: parsed.data.columnMapping as any };
   const conn = existing
     ? await prisma.sheetConnection.update({ where: { id: existing.id }, data })
     : await prisma.sheetConnection.create({ data });
 
-  await logAudit({ tenantId, userId, action: "CONFIGURE_SHEETS_CONNECTION", target: "SheetConnection", targetId: conn.id });
+  await logAudit({
+    tenantId, userId, action: "CONFIGURE_SHEETS_CONNECTION", target: "SheetConnection", targetId: conn.id,
+    details: { sheetId: conn.sheetId, sheetRange: conn.sheetRange },
+  });
   res.json(conn);
 });
 
@@ -90,9 +105,17 @@ router.get("/channels", async (req, res) => {
     where: { tenantId: req.user!.tenantId },
     orderBy: [{ channel: "asc" }, { priority: "asc" }],
   });
-  // nunca retorna as credenciais (mesmo cifradas) para o frontend
-  res.json(configs.map((c) => ({ id: c.id, channel: c.channel, provider: c.provider, priority: c.priority, active: c.active })));
+  // nunca retorna as credenciais (mesmo cifradas) para o frontend; a URL do webhook (com o segredo) só para ADMIN
+  const admin = req.user!.role === "ADMIN";
+  res.json(configs.map((c) => ({ id: c.id, channel: c.channel, provider: c.provider, priority: c.priority, active: c.active, ...(admin ? { webhookUrl: smsWebhookUrl(c) } : {}) })));
 });
+
+/** LGPD 05-05: URL que o provedor de SMS deve chamar (status e respostas do titular); o segredo autentica o canal. */
+function smsWebhookUrl(c: { id: string; channel: string; provider: string; webhookSecret: string | null }): string | null {
+  if (c.channel !== "SMS" || !c.webhookSecret) return null;
+  const base = publicBackendUrl();
+  return base ? `${base}/api/integrations/webhooks/sms/${encodeURIComponent(c.provider)}/${c.id}/${c.webhookSecret}` : null;
+}
 
 const channelSchema = z.object({
   channel: z.enum(["WHATSAPP", "SMS"]),
@@ -110,10 +133,12 @@ router.put("/channels", requireRole("ADMIN"), async (req, res) => {
   const { channel, provider, credentials, priority } = parsed.data;
 
   const encrypted = encryptSecret(credentials);
+  const atual = await prisma.channelConfig.findFirst({ where: { tenantId, channel, provider }, select: { webhookSecret: true } });
 
   const config = await prisma.channelConfig.upsert({
     where: { tenantId_channel_provider: { tenantId, channel, provider } },
-    update: { credentials: encrypted as any, active: true, priority },
+    // canal antigo sem segredo ganha um (sem ele o webhook do canal recusa tudo — LGPD 05-05)
+    update: { credentials: encrypted as any, active: true, priority, ...(atual?.webhookSecret ? {} : { webhookSecret: crypto.randomBytes(16).toString("hex") }) },
     create: {
       tenantId,
       channel,
@@ -125,7 +150,7 @@ router.put("/channels", requireRole("ADMIN"), async (req, res) => {
   });
 
   await logAudit({ tenantId, userId, action: "CONFIGURE_CHANNEL", target: "ChannelConfig", targetId: config.id, details: { channel, provider, priority } });
-  res.json({ id: config.id, channel: config.channel, provider: config.provider, priority: config.priority, active: config.active });
+  res.json({ id: config.id, channel: config.channel, provider: config.provider, priority: config.priority, active: config.active, webhookUrl: smsWebhookUrl(config) });
 });
 
 router.delete("/channels/:id", requireRole("ADMIN"), async (req, res) => {
@@ -140,8 +165,6 @@ router.delete("/channels/:id", requireRole("ADMIN"), async (req, res) => {
 /** ---- WhatsApp (Meta Cloud API): configuração pela tela de Integrações ---- */
 // Credenciais cifradas por conta (WhatsAppAccount); nada disso volta para a tela além das "dicas" (4 últimos
 // caracteres). O token de verificação do webhook é gerado aqui e mostrado para colar na Meta.
-
-const publicBackend = () => process.env.PUBLIC_BACKEND_URL || "https://crmtopconta-backend.vercel.app";
 
 function presentWhatsApp(account: any) {
   return {
@@ -162,13 +185,13 @@ function presentWhatsApp(account: any) {
           lastCheckMessage: account.lastCheckMessage,
         }
       : null,
-    webhookUrl: `${publicBackend()}/api/integrations/webhooks/whatsapp`,
+    webhookUrl: publicBackendUrl() ? `${publicBackendUrl()}/api/integrations/webhooks/whatsapp` : null,
     apiVersion: WHATSAPP_API_VERSION,
   };
 }
 
 router.get("/whatsapp", requireAuth, async (req, res) => {
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId: req.user!.tenantId }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId: req.user!.tenantId, provider: "META" }, orderBy: { createdAt: "asc" } });
   res.json(presentWhatsApp(account));
 });
 
@@ -189,10 +212,10 @@ router.put("/whatsapp", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const { phoneNumberId, wabaId } = parsed.data;
 
   // Cross-tenant de propósito: phoneNumberId é único no banco inteiro (o webhook só conhece esse id).
-  const sameNumber = await withCrossTenantAccess(() => prisma.whatsAppAccount.findFirst({ where: { phoneNumberId } }));
+  const sameNumber = await withCrossTenantAccess(() => prisma.whatsAppAccount.findFirst({ where: { phoneNumberId, provider: "META" } }));
   if (sameNumber && sameNumber.tenantId !== tenantId) return res.status(409).json({ error: "Este número já está conectado a outra conta." });
 
-  const current = await prisma.whatsAppAccount.findFirst({ where: { tenantId }, orderBy: { createdAt: "asc" } });
+  const current = await prisma.whatsAppAccount.findFirst({ where: { tenantId, provider: "META" }, orderBy: { createdAt: "asc" } });
   const old = credentialsOf(current && current.credentials ? current : null);
   const hadStored = !!current?.credentials;
   const accessToken = parsed.data.accessToken || (hadStored ? old.accessToken : undefined);
@@ -220,7 +243,7 @@ router.put("/whatsapp", requireAuth, requireRole("ADMIN"), async (req, res) => {
 /** POST /api/integrations/whatsapp/test — valida token + número + WABA na Meta e guarda o resultado. */
 router.post("/whatsapp/test", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const { tenantId } = req.user!;
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, provider: "META" }, orderBy: { createdAt: "asc" } });
   const token = credentialsOf(account).accessToken;
   if (!account || !token) return res.status(409).json({ error: "Salve o Phone Number ID, o WABA ID e o Access Token antes de testar." });
 
@@ -256,13 +279,26 @@ router.post("/whatsapp/test", requireAuth, requireRole("ADMIN"), async (req, res
 
   const message = checks.map((c) => `${c.ok ? "OK" : "FALHA"}: ${c.nome} — ${c.detalhe}`).join(" | ").slice(0, 500);
   await prisma.whatsAppAccount.update({ where: { id: account.id }, data: { lastCheckAt: new Date(), lastCheckOk: ok, lastCheckMessage: message, displayName, displayPhone } });
-  res.json({ ok, checks });
+
+  // Pré-requisitos da Calling API: só informativo (não muda "ok" nem o resultado guardado acima).
+  let tier: string | undefined, tierError: string | undefined, callingStatus: string | undefined, callingError: string | undefined;
+  try {
+    tier = (await get(`${encodeURIComponent(account.phoneNumberId)}?fields=messaging_limit_tier`)).messaging_limit_tier;
+  } catch (e) {
+    tierError = (e as Error).message;
+  }
+  try {
+    callingStatus = (await get(`${encodeURIComponent(account.phoneNumberId)}/settings`))?.calling?.status;
+  } catch (e) {
+    callingError = (e as Error).message;
+  }
+  res.json({ ok, checks, ligacoes: callingChecks({ tier, callingStatus, tierError, callingError }) });
 });
 
 /** POST /api/integrations/whatsapp/subscribe — inscreve o app na conta (WABA) para a Meta enviar os webhooks. */
 router.post("/whatsapp/subscribe", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const { tenantId, id: userId } = req.user!;
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, provider: "META" }, orderBy: { createdAt: "asc" } });
   const token = credentialsOf(account).accessToken;
   if (!account?.wabaId || !token) return res.status(409).json({ error: "Salve o WABA ID e o Access Token antes." });
   try {
@@ -283,7 +319,7 @@ router.post("/whatsapp/subscribe", requireAuth, requireRole("ADMIN"), async (req
 /** DELETE /api/integrations/whatsapp — desconecta: apaga as credenciais e desativa a conta (o histórico de conversas fica). */
 router.delete("/whatsapp", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const { tenantId, id: userId } = req.user!;
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, provider: "META" }, orderBy: { createdAt: "asc" } });
   if (!account) return res.status(404).json({ error: "Nenhuma conta conectada." });
   await prisma.whatsAppAccount.update({ where: { id: account.id }, data: { active: false, credentials: Prisma.DbNull, accessTokenHint: null, appSecretHint: null } });
   await logAudit({ tenantId, userId, action: "DISCONNECT_WHATSAPP", target: "WhatsAppAccount", targetId: account.id });
@@ -307,7 +343,7 @@ router.get("/webhooks/whatsapp", async (req, res) => {
   if (req.query["hub.mode"] === "subscribe" && token) {
     const envToken = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
     // Cross-tenant de propósito: o desafio da Meta não traz tenant; o token é que identifica a conta.
-    const account = await withCrossTenantAccess(() => prisma.whatsAppAccount.findFirst({ where: { verifyToken: token } }));
+    const account = await withCrossTenantAccess(() => prisma.whatsAppAccount.findFirst({ where: { verifyToken: token, provider: "META" } }));
     if (account || (envToken && token === envToken)) return res.status(200).send(req.query["hub.challenge"]);
   }
   res.sendStatus(403);
@@ -327,7 +363,7 @@ async function accountForPayload(body: any) {
   const list = [...ids];
   // Cross-tenant de propósito (webhook público): é por estes ids que se descobre o tenant.
   return withCrossTenantAccess(() =>
-    prisma.whatsAppAccount.findFirst({ where: { active: true, OR: [{ phoneNumberId: { in: list } }, { wabaId: { in: list } }] } })
+    prisma.whatsAppAccount.findFirst({ where: { active: true, provider: "META", OR: [{ phoneNumberId: { in: list } }, { wabaId: { in: list } }] } })
   );
 }
 
@@ -370,7 +406,7 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
       for (const m of messages) {
         try {
           const account = await withCrossTenantAccess(() =>
-            prisma.whatsAppAccount.findFirst({ where: { phoneNumberId: m.phoneNumberId, active: true } })
+            prisma.whatsAppAccount.findFirst({ where: { phoneNumberId: m.phoneNumberId, active: true, provider: "META" } })
           );
           if (!account) {
             console.warn(`[webhooks/whatsapp] phone_number_id ${m.phoneNumberId} sem conta cadastrada — mensagem ignorada`);
@@ -386,6 +422,8 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
                 console.warn(`[webhooks/whatsapp] mídia ${m.mediaId} não guardada agora: ${e.message}`)
               );
             }
+            // Canal só de avisos: manda o cliente ao suporte (uma vez por conversa a cada poucas horas).
+            await maybeAutoReply(prisma, account.tenantId, account, r);
           });
         } catch (e) {
           console.error("[webhooks/whatsapp] falha ao gravar mensagem recebida:", e);
@@ -398,7 +436,7 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
       for (const st of statuses) {
         try {
           const account = await withCrossTenantAccess(() =>
-            prisma.whatsAppAccount.findFirst({ where: { phoneNumberId: st.phoneNumberId, active: true } })
+            prisma.whatsAppAccount.findFirst({ where: { phoneNumberId: st.phoneNumberId, active: true, provider: "META" } })
           );
           if (!account) continue;
           await runWithTenantContextAsync(account.tenantId, () => applyOutboundStatus(prisma, account.tenantId, st));
@@ -413,7 +451,7 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
       for (const ev of parseTemplateEvents(req.body)) {
         try {
           const account = await withCrossTenantAccess(() =>
-            prisma.whatsAppAccount.findFirst({ where: { wabaId: ev.wabaId, active: true } })
+            prisma.whatsAppAccount.findFirst({ where: { wabaId: ev.wabaId, active: true, provider: "META" } })
           );
           if (!account) continue;
           await runWithTenantContextAsync(account.tenantId, () => applyTemplateEvent(prisma, account.tenantId, ev));
@@ -428,48 +466,96 @@ router.post("/webhooks/whatsapp", webhookLimiter, async (req, res) => {
   }
 });
 
-// Twilio assina o corpo form-encoded (application/x-www-form-urlencoded) da requisição — o
-// parser global do app é express.json() (app.ts), que não popula req.body para esse
-// content-type. express.urlencoded() é montado só nesta rota para não afetar as demais.
-router.post("/webhooks/sms/:provider", webhookLimiter, express.urlencoded({ extended: false }), async (req, res) => {
-  if (req.params.provider === "twilio") {
-    const signature = req.headers["x-twilio-signature"] as string | undefined;
-    const authToken = env.TWILIO_AUTH_TOKEN;
-    if (!authToken) {
-      console.warn(
-        "[webhooks/sms/twilio] TWILIO_AUTH_TOKEN não configurado — não é possível verificar a " +
-          "assinatura X-Twilio-Signature. Requisição rejeitada."
-      );
-      return res.sendStatus(401);
-    }
+/**
+ * ---- Webhook de SMS (status de entrega e mensagem RECEBIDA do titular) ----
+ *
+ * LGPD 05-05: nenhuma requisição é aceita sem autenticação válida, para TODO provedor:
+ *  - rota por canal `/webhooks/sms/:provider/:configId/:secret` (ou o segredo no cabeçalho `X-Webhook-Secret`):
+ *    o segredo é o `ChannelConfig.webhookSecret` do tenant, comparado em tempo constante; na Twilio a assinatura
+ *    X-Twilio-Signature também é conferida, com o Auth Token DAQUELE canal. O tenant sai do canal, e status e
+ *    opt-out só mexem nele.
+ *  - rota antiga `/webhooks/sms/:provider`: só Twilio com assinatura do token do ambiente (TWILIO_AUTH_TOKEN), para
+ *    o número global; qualquer outro provedor recebe 401 (antes a Zenvia passava sem verificação nenhuma).
+ * LGPD 02-04: resposta "PARAR/SAIR/STOP..." do titular por SMS grava a supressão do telefone (canal SMS) e o
+ * opt-out de todos os cadastros com o número, com auditoria OPT_OUT_SMS.
+ */
+const smsParsers = [webhookLimiter, express.urlencoded({ extended: false })];
 
-    // Reconstrói a URL pública exatamente como a Twilio a assinou. Respeita X-Forwarded-*
-    // (a app roda atrás do proxy da Vercel) sem alterar a configuração global de trust proxy,
-    // que é responsabilidade de outra frente de trabalho.
-    const forwardedProto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0];
-    const forwardedHost = req.headers["x-forwarded-host"] as string | undefined;
-    const proto = forwardedProto || req.protocol;
-    const host = forwardedHost || req.get("host") || "";
-    const fullUrl = `${proto}://${host}${req.originalUrl}`;
+function twilioSignatureOk(req: express.Request, authToken: string | undefined): boolean {
+  if (!authToken) return false;
+  return verifyTwilioSignature(publicUrlOfRequest(req), req.body as Record<string, string>, req.headers["x-twilio-signature"] as string | undefined, authToken);
+}
 
-    if (!verifyTwilioSignature(fullUrl, req.body as Record<string, string>, signature, authToken)) {
-      return res.sendStatus(401);
+/** Aplica os eventos já autenticados. `tenantId` nulo = rota antiga sem tenant definido (só status, como antes). */
+async function processSmsWebhook(req: express.Request, res: express.Response, provider: string, tenantId: string | null) {
+  let inbound = false;
+  for (const ev of parseSmsWebhook(provider, req.body)) {
+    try {
+      if (ev.kind === "status") {
+        await applyStatusUpdate(ev.providerMsgId, ev.status, undefined, null, tenantId);
+        continue;
+      }
+      inbound = true;
+      if (!isSmsOptOut(ev.body)) continue; // só o pedido de parar é tratado; o resto do texto não é guardado
+      if (!tenantId) {
+        console.warn("[webhooks/sms] pedido de descadastro por SMS sem tenant definido (rota antiga sem PLATFORM_DEFAULT_TENANT_ID): use a URL do canal.");
+        continue;
+      }
+      await runWithTenantContextAsync(tenantId, async () => {
+        const r = await registrarOptOutTelefone(prisma, tenantId, { telefone: ev.from, canal: "SMS", origem: `sms_webhook:${provider}` });
+        await logAudit({ tenantId, action: "OPT_OUT_SMS", target: "Telefone", details: { telefone: r.telefoneMasked, clientIds: r.clientIds, provider, providerMsgId: ev.providerMsgId } });
+      });
+    } catch (e) {
+      console.error("[webhooks/sms] falha ao processar evento:", e);
     }
   }
-
-  // Formato varia por provedor (Twilio/Zenvia); normaliza para {providerMsgId, status}
-  const { MessageSid, MessageStatus, sid, status } = req.body;
-  const providerMsgId = MessageSid || sid;
-  const providerStatus = MessageStatus || status;
-  if (providerMsgId) await applyStatusUpdate(providerMsgId, providerStatus);
+  // Mensagem recebida da Twilio: TwiML vazio (nenhuma resposta automática por SMS)
+  if (inbound && provider === "twilio") return res.type("text/xml").send("<Response></Response>");
   res.sendStatus(200);
+}
+
+async function smsWebhookPorCanal(req: express.Request, res: express.Response) {
+  const { provider, configId } = req.params;
+  const secret = req.params.secret || (req.headers["x-webhook-secret"] as string | undefined);
+  // Cross-tenant de propósito (webhook público): o canal é o que identifica o tenant.
+  const config = await withCrossTenantAccess(() => prisma.channelConfig.findFirst({ where: { id: configId, channel: "SMS", provider } })).catch(() => null);
+  if (!config || !smsWebhookSecretOk(secret, config.webhookSecret)) return res.sendStatus(401);
+  if (provider === "twilio") {
+    let authToken: string | undefined;
+    try {
+      const payload = config.credentials as any;
+      authToken = (isEncryptedPayload(payload) ? decryptSecret(payload) : payload)?.authToken;
+    } catch {
+      authToken = undefined;
+    }
+    if (!twilioSignatureOk(req, authToken)) return res.sendStatus(401);
+  }
+  return processSmsWebhook(req, res, provider, config.tenantId);
+}
+
+router.post("/webhooks/sms/:provider/:configId/:secret", ...smsParsers, smsWebhookPorCanal);
+router.post("/webhooks/sms/:provider/:configId", ...smsParsers, smsWebhookPorCanal);
+
+// Rota antiga (número global do ambiente): só Twilio, só com assinatura válida.
+router.post("/webhooks/sms/:provider", ...smsParsers, async (req, res) => {
+  if (req.params.provider !== "twilio") return res.sendStatus(401); // LGPD 05-05: provedor sem verificação não entra
+  const authToken = env.TWILIO_AUTH_TOKEN;
+  if (!authToken) {
+    console.warn("[webhooks/sms/twilio] TWILIO_AUTH_TOKEN não configurado — não é possível verificar a assinatura X-Twilio-Signature. Requisição rejeitada.");
+    return res.sendStatus(401);
+  }
+  if (!twilioSignatureOk(req, authToken)) return res.sendStatus(401);
+  // O número global só pode ter sido usado pelo tenant dono dele (LGPD 06-01); sem ele, status sem tenant (como antes).
+  const dono = process.env.PLATFORM_DEFAULT_TENANT_ID?.trim() || null;
+  return processSmsWebhook(req, res, "twilio", dono);
 });
 
-async function applyStatusUpdate(providerMsgId: string, providerStatus: string, timestamp?: string, errorText?: string | null) {
+async function applyStatusUpdate(providerMsgId: string, providerStatus: string, timestamp?: string, errorText?: string | null, tenantId?: string | null) {
   // Cross-tenant de propósito: o webhook é público e a única chave é o id da mensagem na Meta (único).
   // Sem isso a RLS (MessageEvent só enxerga o tenant da sessão) escondia a linha e o status nunca atualizava.
+  // LGPD 05-05: quando o webhook identificou o tenant (canal autenticado), só mexe nas mensagens dele.
   await withCrossTenantAccess(async () => {
-    const event = await prisma.messageEvent.findFirst({ where: { providerMsgId } });
+    const event = await prisma.messageEvent.findFirst({ where: { providerMsgId, ...(tenantId ? { campaign: { tenantId } } : {}) } });
     if (!event) return; // idempotência: evento desconhecido/duplicado é ignorado silenciosamente
 
     const next = nextEventStatus(event.status, providerStatus);

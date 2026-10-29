@@ -1,7 +1,8 @@
-import { Router } from "express";
+import { Request, Response, Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/db";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { logAudit } from "../middleware/audit";
 import { maskPhone } from "../services/masking";
 import { classificarPerfil } from "../services/rendaPerfil";
 import { getOrCacheMessageMedia, isInlineSafeMime, MediaError, MEDIA_MAX_BYTES } from "../services/whatsappMedia";
@@ -9,6 +10,8 @@ import { isSendableTemplate, previewTemplateFor, sendReply, sendTemplateReply } 
 import { SendError, OUTBOUND_MAX_BYTES } from "../services/whatsappSend";
 import { accessTokenFor, credentialsOf } from "../services/whatsappAccount";
 import { janelaAte } from "../services/whatsappPayload";
+import { AUTO_REPLY_JANELA_HORAS_LIMITE, AUTO_REPLY_MAX_LIMITE, autoReplyLimitesOf, autoReplyPadraoDo, autoReplyTextOf } from "../services/whatsappAutoReply";
+import { textoBusca } from "../config/derivedColumns";
 
 /**
  * Inbox do WhatsApp (Fase 1): lista de conversas e histórico de mensagens recebidas. Leitura e
@@ -20,12 +23,90 @@ router.use(requireAuth);
 /** GET /api/inbox/status — o WhatsApp está conectado? (a configuração fica em Integrações) */
 router.get("/status", async (req, res) => {
   const { tenantId } = req.user!;
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { whatsappProvider: true } });
+  const ativo = tenant?.whatsappProvider === "ZAPI" ? "ZAPI" : "META";
+  // A Inbox mostra as conversas das duas conexões; o "conectado?" vale para a conexão ATIVA (Configurações → WhatsApp)
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: ativo }, orderBy: { createdAt: "asc" } });
   const cred = credentialsOf(account && account.credentials ? account : null);
   res.json({
+    provider: ativo,
     account: account ? { id: account.id, phoneNumberId: account.phoneNumberId, displayName: account.displayName, displayPhone: account.displayPhone } : null,
-    config: { appSecret: !!cred.appSecret, accessToken: !!cred.accessToken },
+    config: ativo === "ZAPI" ? { appSecret: true, accessToken: true } : { appSecret: !!cred.appSecret, accessToken: !!cred.accessToken },
   });
+});
+
+/**
+ * GET /api/inbox/resumo — leve, para o aviso de mensagem nova que roda em qualquer tela: quantas
+ * conversas têm mensagem não lida e qual foi a última a chegar (o front compara com o que já viu).
+ * LGPD 07-05: só id e horário; nome e trecho da mensagem não saem daqui (o aviso aparece em qualquer
+ * tela e na notificação do sistema operacional). O conteúdo só se vê dentro da Inbox.
+ */
+router.get("/resumo", async (req, res) => {
+  const { tenantId } = req.user!;
+  const [naoLidas, ultima] = await Promise.all([
+    prisma.conversation.count({ where: { tenantId, status: "ABERTA", unreadCount: { gt: 0 } } }),
+    prisma.conversation.findFirst({
+      where: { tenantId, status: "ABERTA", unreadCount: { gt: 0 }, lastInboundAt: { not: null } },
+      orderBy: { lastInboundAt: "desc" },
+      select: { id: true, lastInboundAt: true },
+    }),
+  ]);
+  res.json({
+    naoLidas,
+    ultima: ultima ? { id: ultima.id, em: ultima.lastInboundAt!.toISOString() } : null,
+  });
+});
+
+/** Dados do controlador deste tenant usados no texto padrão da resposta automática (LGPD 02-08). */
+function controladorDo(tenantId: string) {
+  return prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true, controladorNome: true, encarregadoNome: true, encarregadoContato: true } });
+}
+
+/** GET /api/inbox/auto-reply — configuração da resposta automática da conta ativa. */
+router.get("/auto-reply", async (req, res) => {
+  const { tenantId } = req.user!;
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: "META" }, orderBy: { createdAt: "asc" } });
+  if (!account) return res.status(404).json({ error: "WhatsApp não conectado" });
+  const controlador = await controladorDo(tenantId);
+  const limites = autoReplyLimitesOf(account);
+  res.json({
+    ativa: account.autoReplyEnabled,
+    // LGPD 02-08: mostra o que de fato sai (padrão do controlador deste tenant, ou o texto próprio com a instrução de SAIR)
+    texto: autoReplyTextOf(account, controlador),
+    padrao: autoReplyPadraoDo(controlador),
+    personalizado: !!account.autoReplyText?.trim(),
+    maximo: limites.max,
+    janelaHoras: limites.janelaHoras,
+    maximoLimite: AUTO_REPLY_MAX_LIMITE,
+    janelaHorasLimite: AUTO_REPLY_JANELA_HORAS_LIMITE,
+  });
+});
+
+const autoReplySchema = z.object({
+  ativa: z.boolean(),
+  texto: z.string().max(4096),
+  maximo: z.number().int().min(1).max(AUTO_REPLY_MAX_LIMITE).optional(),
+  janelaHoras: z.number().int().min(1).max(AUTO_REPLY_JANELA_HORAS_LIMITE).optional(),
+});
+
+/** PUT /api/inbox/auto-reply (ADMIN) — liga/desliga, troca o texto e os limites (máximo por conversa e janela em horas); texto igual ao padrão ou vazio volta ao padrão. */
+router.put("/auto-reply", requireRole("ADMIN"), async (req, res) => {
+  const parsed = autoReplySchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Dados inválidos" });
+  const { tenantId } = req.user!;
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: "META" }, orderBy: { createdAt: "asc" } });
+  if (!account) return res.status(404).json({ error: "WhatsApp não conectado" });
+  const texto = parsed.data.texto.trim();
+  if (parsed.data.ativa && !texto) return res.status(400).json({ error: "Escreva a mensagem da resposta automática." });
+  await prisma.whatsAppAccount.update({
+    where: { id: account.id },
+    data: { autoReplyEnabled: parsed.data.ativa, autoReplyText: !texto || texto === autoReplyPadraoDo(await controladorDo(tenantId)) ? null : texto,
+      ...(parsed.data.maximo !== undefined ? { autoReplyMax: parsed.data.maximo } : {}),
+      ...(parsed.data.janelaHoras !== undefined ? { autoReplyJanelaHoras: parsed.data.janelaHoras } : {}),
+    },
+  });
+  await logAudit({ tenantId, userId: req.user!.id, action: "WHATSAPP_AUTO_REPLY_UPDATE", target: "WhatsAppAccount", targetId: account.id, details: { ativa: parsed.data.ativa, maximo: parsed.data.maximo, janelaHoras: parsed.data.janelaHoras } });
+  res.json({ ok: true });
 });
 
 const listQuery = z.object({
@@ -34,24 +115,39 @@ const listQuery = z.object({
   limite: z.coerce.number().int().min(1).max(100).default(50),
 });
 
-/** GET /api/inbox/conversations */
+/** LGPD 07-03: nome ou telefone procurado não vai na URL (logs de requisição). */
+const BUSCA_NA_URL = "A busca por nome ou telefone não vai mais na URL (LGPD). Use POST /api/inbox/conversations/search com o termo no corpo.";
+
+/** GET /api/inbox/conversations — só filtros não pessoais na URL. */
 router.get("/conversations", async (req, res) => {
-  const q = listQuery.safeParse(req.query);
+  if (req.query.busca !== undefined) return res.status(400).json({ error: BUSCA_NA_URL });
+  await listarConversas(req, res, req.query);
+});
+
+/** POST /api/inbox/conversations/search — LGPD 07-03: a mesma lista, com a busca e os filtros no corpo. */
+router.post("/conversations/search", async (req, res) => {
+  await listarConversas(req, res, req.body ?? {});
+});
+
+async function listarConversas(req: Request, res: Response, src: unknown) {
+  const q = listQuery.safeParse(src);
   if (!q.success) return res.status(400).json({ error: "Parâmetros inválidos" });
   const { tenantId } = req.user!;
   const { filtro, busca, limite } = q.data;
 
   const where: any = { tenantId, status: "ABERTA" };
   if (filtro === "nao_lidas") where.unreadCount = { gt: 0 };
+  // LGPD 02-06: a Z-API segue a mesma janela de 24h da Meta (whatsappReply.ts recusa fora dela)
   if (filtro === "janela_aberta") where.lastInboundAt = { gte: new Date(Date.now() - 24 * 3600_000) };
   if (filtro === "sem_cliente") where.clientId = null;
   if (busca?.trim()) {
     const t = busca.trim();
-    where.OR = [
-      { contactName: { contains: t, mode: "insensitive" } },
-      { client: { is: { nome: { contains: t, mode: "insensitive" } } } },
+    where.AND = [{ OR: [
+      // SQLite: LIKE ignora caixa só em ASCII; o nome do cliente tem a coluna sem acento (nomeBusca)
+      { contactName: { contains: t } },
+      { client: { is: { nomeBusca: { contains: textoBusca(t) } } } },
       ...(/\d{4,}/.test(t) ? [{ waId: { contains: t.replace(/\D/g, "") } }] : []),
-    ];
+    ] }];
   }
 
   const [rows, naoLidas] = await Promise.all([
@@ -59,7 +155,7 @@ router.get("/conversations", async (req, res) => {
       where,
       orderBy: { lastMessageAt: "desc" },
       take: limite,
-      include: { client: { select: { id: true, nome: true, cidade: true } } },
+      include: { client: { select: { id: true, nome: true, cidade: true } }, account: { select: { provider: true } } },
     }),
     prisma.conversation.count({ where: { tenantId, status: "ABERTA", unreadCount: { gt: 0 } } }),
   ]);
@@ -70,6 +166,7 @@ router.get("/conversations", async (req, res) => {
     conversas: rows.map((c) => {
       const ate = janelaAte(c.lastInboundAt);
       return {
+        canal: c.account.provider,
         id: c.id,
         nome: c.client?.nome ?? c.contactName ?? "Contato sem cadastro",
         cidade: c.client?.cidade ?? null,
@@ -83,7 +180,7 @@ router.get("/conversations", async (req, res) => {
       };
     }),
   });
-});
+}
 
 const msgsQuery = z.object({ antes: z.string().datetime().optional(), limite: z.coerce.number().int().min(1).max(200).default(100) });
 
@@ -94,7 +191,10 @@ router.get("/conversations/:id/messages", async (req, res) => {
   const { tenantId } = req.user!;
   const conversa = await prisma.conversation.findFirst({
     where: { id: req.params.id, tenantId },
-    include: { client: { select: { id: true, nome: true, cidade: true, limiteTotal: true, saldoDisponivel: true, faixaUso: true, autorizacaoComunicacao: true, optOutAt: true } } },
+    include: {
+      client: { select: { id: true, nome: true, cidade: true, limiteTotal: true, saldoDisponivel: true, faixaUso: true, autorizacaoComunicacao: true, optOutAt: true } },
+      account: { select: { provider: true } },
+    },
   });
   if (!conversa) return res.status(404).json({ error: "Conversa não encontrada" });
 
@@ -112,6 +212,7 @@ router.get("/conversations/:id/messages", async (req, res) => {
       id: conversa.id,
       nome: c?.nome ?? conversa.contactName ?? "Contato sem cadastro",
       telefone: maskPhone(conversa.waId),
+      canal: conversa.account.provider,
       janelaAberta: !!ate && ate.getTime() > Date.now(),
       janelaAte: ate?.toISOString() ?? null,
       naoLidas: conversa.unreadCount,
@@ -137,6 +238,7 @@ router.get("/conversations/:id/messages", async (req, res) => {
       midia: m.mediaId ? { mime: m.mediaMime, nomeArquivo: m.mediaFilename } : null,
       status: m.status,
       erro: m.errorText,
+      automatica: m.automatic,
       em: m.timestamp.toISOString(),
     })),
     temMais: mensagens.length === q.data.limite,
@@ -162,6 +264,7 @@ const presentMessage = (m: any) => ({
   midia: m.mediaId ? { mime: m.mediaMime, nomeArquivo: m.mediaFilename } : null,
   status: m.status,
   erro: m.errorText,
+  automatica: m.automatic,
   em: m.timestamp.toISOString(),
 });
 

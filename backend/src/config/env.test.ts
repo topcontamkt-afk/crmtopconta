@@ -11,26 +11,20 @@ describe("config/env", () => {
   });
 
   it("lança erro ao importar com variáveis obrigatórias ausentes", () => {
-    delete process.env.DATABASE_URL;
-    delete process.env.DATABASE_URL_ADMIN;
     delete process.env.JWT_SECRET;
     delete process.env.CREDENTIALS_ENCRYPTION_KEY;
 
-    expect(() => require("./env")).toThrow(/DATABASE_URL/);
+    expect(() => require("./env")).toThrow(/JWT_SECRET/);
   });
 
   it("lista todas as variáveis obrigatórias ausentes na mensagem de erro", () => {
-    delete process.env.DATABASE_URL;
-    process.env.DATABASE_URL_ADMIN = "postgresql://localhost:5432/test";
-    process.env.JWT_SECRET = "segredo-de-teste";
+    delete process.env.JWT_SECRET;
     delete process.env.CREDENTIALS_ENCRYPTION_KEY;
 
-    expect(() => require("./env")).toThrow(/DATABASE_URL.*CREDENTIALS_ENCRYPTION_KEY/s);
+    expect(() => require("./env")).toThrow(/JWT_SECRET.*CREDENTIALS_ENCRYPTION_KEY/s);
   });
 
   it("não lança erro quando todas as variáveis obrigatórias estão presentes", () => {
-    process.env.DATABASE_URL = "postgresql://localhost:5432/test";
-    process.env.DATABASE_URL_ADMIN = "postgresql://localhost:5432/test";
     process.env.JWT_SECRET = "segredo-de-teste";
     process.env.CREDENTIALS_ENCRYPTION_KEY = "chave-de-teste";
 
@@ -38,8 +32,6 @@ describe("config/env", () => {
     expect(() => {
       mod = require("./env");
     }).not.toThrow();
-    expect(mod?.env.DATABASE_URL).toBe("postgresql://localhost:5432/test");
-    expect(mod?.env.DATABASE_URL_ADMIN).toBe("postgresql://localhost:5432/test");
     expect(mod?.env.JWT_SECRET).toBe("segredo-de-teste");
     expect(mod?.env.CREDENTIALS_ENCRYPTION_KEY).toBe("chave-de-teste");
   });

@@ -1,7 +1,6 @@
-import cron from "node-cron";
 import { prisma } from "../config/db";
-import { runImport } from "./importService";
-import { DEFAULT_COLUMN_MAPPING, fetchSheetRows } from "./googleSheets";
+import { DEFAULT_COLUMN_MAPPING } from "./googleSheets";
+import { iniciarSyncPlanilha } from "./sheetSync";
 import { notify } from "./notifications";
 import { buildSegmentWhere } from "./segments";
 import { evaluateAutomationRules } from "./automationEngine";
@@ -21,13 +20,12 @@ import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tena
  */
 
 /** Sincronização automática do Google Sheets (PRD — Must have), respeitando o cron por tenant. */
-export async function runSheetSyncJob() {
+export async function runSheetSyncJob(now: Date = new Date()) {
   // Genuinely cross-tenant by design: sweeps every tenant's active SheetConnection to check
   // whose cron is due right now. Each row is re-scoped to its own tenant below (conn.tenantId).
   const connections = await withCrossTenantAccess(() =>
     prisma.sheetConnection.findMany({ where: { active: true } })
   );
-  const now = new Date();
   let synced = 0;
 
   for (const conn of connections) {
@@ -36,11 +34,16 @@ export async function runSheetSyncJob() {
     // resto do trabalho roda com o contexto de tenant setado (não mais o desvio cross-tenant
     // acima), pela mesma conexão restrita (app_runtime) usada por qualquer request normal.
     try {
-      await runWithTenantContextAsync(conn.tenantId, async () => {
-        const rows = await fetchSheetRows(conn.sheetId, conn.sheetRange, (conn.columnMapping as any) || DEFAULT_COLUMN_MAPPING);
-        await runImport(prisma, conn.tenantId, rows, "scheduler", "google_sheets", conn.sheetId);
-        await prisma.sheetConnection.update({ where: { id: conn.id }, data: { lastSyncAt: now } });
-      });
+      // No Worker a planilha vai em páginas pela fila (services/sheetSync.ts); `lastSyncAt` é gravado na última.
+      await runWithTenantContextAsync(conn.tenantId, () =>
+        iniciarSyncPlanilha({
+          tenantId: conn.tenantId,
+          sheetId: conn.sheetId,
+          range: conn.sheetRange,
+          mapping: (conn.columnMapping as any) || DEFAULT_COLUMN_MAPPING,
+          triggeredBy: "scheduler",
+        })
+      );
       synced++;
     } catch (e: any) {
       console.error(`[scheduler] Falha ao sincronizar SheetConnection ${conn.id}:`, e);
@@ -60,13 +63,12 @@ export async function runSheetSyncJob() {
 }
 
 /** Recontagem periódica de segmentos dinâmicos (Fase 2), cada um no seu próprio refreshCron. */
-export async function runSegmentRefreshJob() {
+export async function runSegmentRefreshJob(now: Date = new Date()) {
   // Genuinely cross-tenant by design: sweeps every tenant's dynamic segments to check whose
   // refreshCron is due right now. Each row is re-scoped via buildSegmentWhere(segment.tenantId).
   const segments = await withCrossTenantAccess(() =>
     prisma.segmentDefinition.findMany({ where: { dynamic: true } })
   );
-  const now = new Date();
   let refreshed = 0;
 
   for (const segment of segments) {
@@ -112,8 +114,12 @@ export async function runCampaignDispatchJob() {
   const results = [];
   for (const c of pendingCampaigns) {
     try {
-      const batchResult = await runWithTenantContextAsync(c.tenantId, async () => await processQueueBatch(prisma, c.id, 100));
-      results.push({ campaignId: c.id, ...batchResult });
+      // até 4 lotes por campanha por execução; para antes se há outro disparo em andamento, bloqueio ou limite
+      for (let i = 0; i < 4; i++) {
+        const batchResult: any = await runWithTenantContextAsync(c.tenantId, async () => await processQueueBatch(prisma, c.id));
+        results.push({ campaignId: c.id, ...batchResult });
+        if (batchResult.emAndamento || batchResult.bloqueado || batchResult.throttled || batchResult.parcial || !(batchResult.remaining > 0) || batchResult.processed === 0) break;
+      }
     } catch (e) {
       console.error(`[scheduler] Falha ao processar fila da campanha ${c.id}:`, e);
     }
@@ -121,7 +127,12 @@ export async function runCampaignDispatchJob() {
   return { checked: pendingCampaigns.length, results };
 }
 
-/** Política de retenção/anonimização (LGPD) — normalmente 1x/dia. */
+/**
+ * Política de retenção/anonimização (LGPD) — normalmente 1x/dia (cron `/api/cron/retention`). Num passe só:
+ * clientes inativos (04-01), contas encerradas há mais de `retentionDaysAfterClosure` (04-06), resíduo de
+ * anonimizações antigas, destinatários de listas manuais, Inbox e mídias (04-02) e o estado de desfazer
+ * importação com mais de 30 dias (04-04). Nenhum cron novo: tudo entra no job diário que já existe.
+ */
 export async function runRetentionJob() {
   return runRetentionSweep(prisma);
 }
@@ -147,19 +158,4 @@ function cronMatchesNow(expr: string, date: Date): boolean {
     matches(month, date.getMonth() + 1) &&
     matches(dow, date.getDay())
   );
-}
-
-/**
- * Orquestra os jobs periódicos via node-cron, em processo — usado apenas no servidor de longa
- * duração (dev local ou um host tipo Railway/Render). Em serverless (Vercel), NÃO é chamada;
- * os mesmos jobs rodam via Vercel Cron Jobs batendo em /api/cron/* (ver routes/cron.ts).
- */
-export function startScheduler() {
-  cron.schedule("* * * * *", () => runSheetSyncJob().catch((e) => console.error("[scheduler] sheet-sync:", e)));
-  cron.schedule("* * * * *", () => runSegmentRefreshJob().catch((e) => console.error("[scheduler] segments-refresh:", e)));
-  cron.schedule("*/5 * * * *", () => runAutomationJob().catch((e) => console.error("[scheduler] automations:", e)));
-  cron.schedule("* * * * *", () => runCampaignDispatchJob().catch((e) => console.error("[scheduler] dispatch:", e)));
-  cron.schedule("0 3 * * *", () => runRetentionJob().catch((e) => console.error("[scheduler] retention:", e)));
-  cron.schedule("30 6 * * *", () => runSnapshotJobEntry().catch((e) => console.error("[scheduler] snapshot:", e)));
-  cron.schedule("0 4 * * *", () => runBiExportJob().catch((e) => console.error("[scheduler] bi-export:", e)));
 }

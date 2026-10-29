@@ -1,5 +1,6 @@
-import { Request } from "express";
-import rateLimit, { Options } from "express-rate-limit";
+import { Request, RequestHandler } from "express";
+import expressRateLimit, { Options } from "express-rate-limit";
+import { ipDoCliente } from "./audit";
 
 /**
  * Limitadores de taxa por rota (defesa complementar ao bloqueio de login por tentativas
@@ -19,6 +20,24 @@ import rateLimit, { Options } from "express-rate-limit";
  * trocar o `store` de cada limitador abaixo.
  */
 
+/**
+ * Limitador criado só na 1ª requisição. No Worker não dá para criar timer no escopo global, e o
+ * armazenamento em memória do express-rate-limit cria um ao nascer. Por padrão a chave é o IP de
+ * `ipDoCliente` (CF-Connecting-IP na Cloudflare); as validações de proxy do pacote ficam desligadas
+ * porque o IP não vem do req.ip/X-Forwarded-For.
+ */
+export function rateLimit(options: Partial<Options>): RequestHandler {
+  let handler: RequestHandler | undefined;
+  return (req, res, next) => {
+    handler ??= expressRateLimit({
+      keyGenerator: (r: Request) => ipDoCliente(r) ?? "unknown",
+      validate: false,
+      ...options,
+    });
+    return handler(req, res, next);
+  };
+}
+
 const jsonRateLimitHandler: Options["handler"] = (_req, res) => {
   res.status(429).json({ error: "Muitas requisições. Tente novamente mais tarde." });
 };
@@ -31,6 +50,20 @@ const jsonRateLimitHandler: Options["handler"] = (_req, res) => {
 export const twoFactorVerifyLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: jsonRateLimitHandler,
+});
+
+/**
+ * POST /api/auth/login — LGPD 05-08: a senha errada grava LOGIN_FALHA no AuditLog do controlador sem autenticação.
+ * O bloqueio por conta (authSecurity.ts) não limita tentativas em paralelo nem a conta já bloqueada; este limite por
+ * IP corta a rajada (força bruta e linhas forjadas na trilha). 20 tentativas a cada 15 minutos por IP: folga para
+ * vários usuários atrás do mesmo NAT errarem a senha algumas vezes.
+ */
+export const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
   standardHeaders: true,
   legacyHeaders: false,
   handler: jsonRateLimitHandler,
@@ -69,6 +102,6 @@ export const importLimiter = rateLimit({
   // req.user é preenchido por requireAuth, que roda antes desse limiter em todas as rotas de
   // routes/imports.ts (router.use(requireAuth) no topo do arquivo). Cai para o IP só como
   // fallback defensivo, caso o limiter algum dia seja montado antes do requireAuth.
-  keyGenerator: (req: Request) => req.user?.id || req.ip || "unknown",
+  keyGenerator: (req: Request) => req.user?.id || ipDoCliente(req) || "unknown",
   handler: jsonRateLimitHandler,
 });

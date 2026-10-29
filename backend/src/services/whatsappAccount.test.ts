@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { credentialsOf, encryptCredentials, generateVerifyToken, hint, maskedHint } from "./whatsappAccount";
+import { credentialsOf, encryptCredentials, generateVerifyToken, globalCredentialsAllowed, hint, maskedHint } from "./whatsappAccount";
 
 describe("credenciais da conta WhatsApp", () => {
   const OLD = { ...process.env };
@@ -7,6 +7,8 @@ describe("credenciais da conta WhatsApp", () => {
     process.env.CREDENTIALS_ENCRYPTION_KEY = crypto.randomBytes(32).toString("base64");
     delete process.env.WHATSAPP_ACCESS_TOKEN;
     delete process.env.WHATSAPP_APP_SECRET;
+    delete process.env.ALLOW_GLOBAL_CHANNEL_CREDENTIALS;
+    delete process.env.PLATFORM_DEFAULT_TENANT_ID;
   });
   afterAll(() => {
     process.env = OLD;
@@ -19,11 +21,30 @@ describe("credenciais da conta WhatsApp", () => {
     expect(credentialsOf({ credentials: enc })).toEqual({ accessToken: "EAAGsecretTOKEN123", appSecret: "appsecret456" });
   });
 
-  it("sem credenciais na conta usa as variáveis de ambiente como reserva", () => {
+  // LGPD 06-01: o token GLOBAL (envia dados de clientes) não é usado por tenant sem liberação explícita
+  it("sem credenciais na conta e sem liberação: NÃO usa o token do ambiente (o segredo do webhook continua)", () => {
     process.env.WHATSAPP_ACCESS_TOKEN = "ENV_TOKEN";
     process.env.WHATSAPP_APP_SECRET = "ENV_SECRET";
+    expect(credentialsOf({ credentials: null, tenantId: "tB" })).toEqual({ accessToken: undefined, appSecret: "ENV_SECRET" });
+    expect(credentialsOf(null)).toEqual({ accessToken: undefined, appSecret: "ENV_SECRET" });
+  });
+
+  it("com ALLOW_GLOBAL_CHANNEL_CREDENTIALS=true (dev) usa o ambiente como reserva", () => {
+    process.env.WHATSAPP_ACCESS_TOKEN = "ENV_TOKEN";
+    process.env.WHATSAPP_APP_SECRET = "ENV_SECRET";
+    process.env.ALLOW_GLOBAL_CHANNEL_CREDENTIALS = "true";
     expect(credentialsOf({ credentials: null })).toEqual({ accessToken: "ENV_TOKEN", appSecret: "ENV_SECRET" });
-    expect(credentialsOf(null)).toEqual({ accessToken: "ENV_TOKEN", appSecret: "ENV_SECRET" });
+  });
+
+  it("com PLATFORM_DEFAULT_TENANT_ID só o tenant dono das credenciais do ambiente usa a reserva", () => {
+    process.env.WHATSAPP_ACCESS_TOKEN = "ENV_TOKEN";
+    process.env.PLATFORM_DEFAULT_TENANT_ID = "tA";
+    expect(credentialsOf({ credentials: null, tenantId: "tA" }).accessToken).toBe("ENV_TOKEN");
+    expect(credentialsOf({ credentials: null, tenantId: "tB" }).accessToken).toBeUndefined();
+    expect(credentialsOf(null).accessToken).toBeUndefined();
+    expect(globalCredentialsAllowed("tA")).toBe(true);
+    expect(globalCredentialsAllowed("tB")).toBe(false);
+    expect(globalCredentialsAllowed(undefined)).toBe(false);
   });
 
   it("as credenciais da conta têm prioridade sobre o ambiente", () => {

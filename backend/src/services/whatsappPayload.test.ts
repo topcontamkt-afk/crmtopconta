@@ -101,6 +101,45 @@ describe("isOptOutMessage", () => {
   });
 });
 
+// LGPD 02-04: pedidos usuais em pt-BR, sem depender da palavra exata, acento, caixa ou pontuação
+describe("isOptOutMessage — frases usuais (LGPD 02-04)", () => {
+  it.each([
+    "Não quero mais",
+    "NAO QUERO MAIS!!!",
+    "n quero mais receber",
+    "Me tira dessa lista",
+    "me tira dessa lista por favor, obrigada",
+    "Tire meu número da lista de vocês",
+    "Por favor parar de mandar mensagem",
+    "pare de me enviar essas coisas",
+    "Não quero receber mais mensagens",
+    "não desejo receber propaganda",
+    "Não me mande mais nada",
+    "Quero me descadastrar",
+    "quero sair da lista",
+    "Não tenho interesse",
+    "chega de mensagem",
+    "Não me perturbe",
+    "Descadastre",
+    "STOP",
+  ])("%s é pedido de descadastro", (t) => {
+    expect(isOptOutMessage(t)).toBe(true);
+  });
+  it.each([
+    "Não pare de me mandar as ofertas!",
+    "Bloquear meu cartão",
+    "Quando chega o cartão?",
+    "Me tira uma dúvida sobre o cadastro",
+    "Oi, quero saber meu limite",
+    "Quero sair do aperto financeiro hoje mesmo",
+    "Pode parar no posto de sempre?",
+    // frase de descadastro perdida num texto longo sobre outro assunto não conta
+    "Oi boa tarde eu queria saber se o limite do meu cartão renova amanhã porque não quero mais receber cobrança de juros no meu salário",
+  ])("%s NÃO é", (t) => {
+    expect(isOptOutMessage(t)).toBe(false);
+  });
+});
+
 describe("previewOf e janela de 24 horas", () => {
   it("mídia mostra um rótulo e a legenda", () => {
     expect(previewOf({ type: "image", body: "contracheque" })).toBe("📷 Imagem: contracheque");

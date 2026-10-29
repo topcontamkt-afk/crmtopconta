@@ -57,7 +57,6 @@ export default function PerfisRenda() {
   const navigate = useNavigate();
   const [d, setD] = useState<Detalhe | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
   const [params, setParams] = useSearchParams();
   const cidade = params.get("cidade") ?? "";
   const de = params.get("de") ?? "";
@@ -102,12 +101,6 @@ export default function PerfisRenda() {
       atual = false;
     };
   }, [perfil, cidade, de, ate, ordemDatas]);
-
-  async function criarSegmentos() {
-    setMsg(null);
-    const r = await api<{ criados: number }>("/segments/presets/perfis-renda", { method: "POST" });
-    setMsg(`Segmentos de perfil de renda prontos (${r.criados} novos). Veja em Segmentos.`);
-  }
 
   const cor = PERFIL_COR[perfil] ?? "#4f7cff";
   const faixas = d ? FAIXA_OPTIONS.map((f) => ({ label: f.label, count: d.faixas[f.value] ?? 0, pct: fmtPct(d.faixas[f.value] ?? 0, d.total), key: f.value })) : [];
@@ -306,15 +299,10 @@ export default function PerfisRenda() {
             </div>
           </div>
 
+          {/* LGPD 01-03: o perfil de renda é só estatística; não vira segmento nem público de campanha */}
           <div className="card pd-card" style={{ marginTop: 16 }}>
-            <h3>Ações</h3>
-            <p className="pd-card-sub">Os segmentos prontos de perfil e de etapa podem ser usados no assistente de campanha e nas automações.</p>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button className="btn" onClick={criarSegmentos}>Criar segmentos de perfil de renda</button>
-              <Link to="/segments" className="btn secondary" style={{ textDecoration: "none" }}>Ir para Segmentos</Link>
-              <Link to="/campaigns/new" className="btn secondary" style={{ textDecoration: "none" }}>Nova campanha</Link>
-            </div>
-            {msg && <p className="pd-hint" style={{ marginTop: 8 }}>{msg}</p>}
+            <h3>Uso desta página</h3>
+            <p className="pd-card-sub">O perfil de renda (estimado pelo limite) é só estatística agregada: não seleciona público de campanha nem de automação.</p>
           </div>
         </>
       )}

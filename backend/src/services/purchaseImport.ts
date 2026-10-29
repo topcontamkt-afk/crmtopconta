@@ -3,6 +3,7 @@ import { AppPrismaClient, tenantRaw } from "../config/db";
 import { hashDocument } from "./masking";
 import { categorizeMerchant, normalizeMerchantName } from "./merchantCategories";
 import { isCommercePurchase, isUsageType, normalizeDocumentDigits, parseMoney, parsePurchaseDate } from "./purchaseParsing";
+import { sqlTs } from "../config/sql";
 
 /**
  * Importa a aba "Todas as Compras" (transações do cartão). As chaves abaixo são o vocabulário
@@ -51,6 +52,7 @@ export interface PurchaseImportResult {
   duplicateCount: number; // já existiam (mesmo idTransacaoCartao)
   unmatchedRows: number; // transações de documentos que não estão na base de clientes
   unmatchedClients: number; // quantos documentos distintos
+  bloqueadasLgpd: number; // LGPD 03-04: transações de cliente com tratamento suspenso, ignoradas
   merchantsCreated: number;
   errorCount: number;
   errors: RowError[];
@@ -112,16 +114,22 @@ export async function runPurchaseImport(
 
   // Fase 2: clientes (uma consulta para o lote inteiro).
   const clientByHash = new Map<string, string>();
+  const bloqueadosHash = new Set<string>();
   if (prepared.length > 0) {
     const hashes = Array.from(new Set(prepared.map((p) => p.cpfHash)));
     const clients = await prisma.client.findMany({
       where: { tenantId, cpfHash: { in: hashes } },
-      select: { id: true, cpfHash: true },
+      select: { id: true, cpfHash: true, bloqueadoLgpdAt: true },
     });
-    for (const c of clients) clientByHash.set(c.cpfHash, c.id);
+    for (const c of clients) {
+      // LGPD 03-04: tratamento suspenso a pedido do titular: a compra não entra nem mexe no último uso
+      if (c.bloqueadoLgpdAt) bloqueadosHash.add(c.cpfHash);
+      else clientByHash.set(c.cpfHash, c.id);
+    }
   }
   const matched = prepared.filter((p) => clientByHash.has(p.cpfHash));
-  const unmatched = prepared.filter((p) => !clientByHash.has(p.cpfHash));
+  const bloqueadas = prepared.filter((p) => bloqueadosHash.has(p.cpfHash)).length;
+  const unmatched = prepared.filter((p) => !clientByHash.has(p.cpfHash) && !bloqueadosHash.has(p.cpfHash));
   const unmatchedClients = new Set(unmatched.map((p) => p.cpfHash)).size;
 
   // Fase 3: lojistas (só de compras no comércio). Categoria automática para os novos; os que já
@@ -146,7 +154,6 @@ export async function runPurchaseImport(
           category: categorizeMerchant(merchantNames.get(k)!),
           categorySource: "AUTO",
         })),
-        skipDuplicates: true,
       });
       merchantsCreated = created.count;
       const refetched = await prisma.merchant.findMany({ where: { tenantId, nameKey: { in: missing } }, select: { id: true, nameKey: true } });
@@ -154,11 +161,29 @@ export async function runPurchaseImport(
     }
   }
 
-  // Fase 4: grava as compras (createMany + skipDuplicates: uma ida ao banco para o lote todo).
+  // Fase 4: grava as compras numa ida ao banco para o lote todo. O SQLite não tem `skipDuplicates`:
+  // as transações que já existem (reenvio do arquivo, idempotente por `externalId`) e as repetidas
+  // dentro do lote ficam de fora antes do createMany.
   let importedCount = 0;
-  if (matched.length > 0) {
+  const jaGravadas = new Set(
+    matched.length
+      ? (
+          await prisma.purchase.findMany({
+            where: { tenantId, externalId: { in: [...new Set(matched.map((p) => p.externalId))] } },
+            select: { externalId: true },
+          })
+        ).map((p) => p.externalId)
+      : []
+  );
+  const novas: typeof matched = [];
+  for (const p of matched) {
+    if (jaGravadas.has(p.externalId)) continue;
+    jaGravadas.add(p.externalId);
+    novas.push(p);
+  }
+  if (novas.length > 0) {
     const created = await prisma.purchase.createMany({
-      data: matched.map((p) => ({
+      data: novas.map((p) => ({
         tenantId,
         clientId: clientByHash.get(p.cpfHash)!,
         merchantId: p.lojista && isCommercePurchase(p.tipo) ? merchantIdByKey.get(normalizeMerchantName(p.lojista)) ?? null : null,
@@ -172,7 +197,6 @@ export async function runPurchaseImport(
         razaoSocial: p.razaoSocial,
         importJobId: job.id,
       })),
-      skipDuplicates: true,
     });
     importedCount = created.count;
   }
@@ -188,14 +212,14 @@ export async function runPurchaseImport(
     if (!current || p.occurredAt > current) lastUse.set(clientId, p.occurredAt);
   }
   if (lastUse.size > 0) {
+    // pares [id, data] num JSON (o SQLite não tem array); a data no mesmo formato gravado pelo Prisma
     await tenantRaw.execute(
-      `UPDATE "Client" AS c SET "dataUltimaUtilizacao" = u.d
-       FROM (SELECT unnest($2::text[]) AS id, unnest($3::timestamptz[]) AS d) AS u
-       WHERE c.id = u.id AND c."tenantId" = $1
-         AND (c."dataUltimaUtilizacao" IS NULL OR c."dataUltimaUtilizacao" < u.d)`,
+      `UPDATE "Client" SET "dataUltimaUtilizacao" = u.d
+       FROM (SELECT json_extract(value, '$[0]') AS id, json_extract(value, '$[1]') AS d FROM json_each($2)) AS u
+       WHERE "Client".id = u.id AND "Client"."tenantId" = $1
+         AND ("Client"."dataUltimaUtilizacao" IS NULL OR "Client"."dataUltimaUtilizacao" < u.d)`,
       tenantId,
-      Array.from(lastUse.keys()),
-      Array.from(lastUse.values()).map((d) => d.toISOString())
+      JSON.stringify(Array.from(lastUse.entries()).map(([id, d]) => [id, sqlTs(d)]))
     );
   }
 
@@ -203,6 +227,9 @@ export async function runPurchaseImport(
   await refreshUsageColumns(tenantId).catch((e) => console.error('[purchaseImport] uso real:', e));
 
   const storedErrors: RowError[] = errors.slice(0, MAX_ERRORS_STORED);
+  if (bloqueadas > 0) {
+    storedErrors.unshift({ row: 0, motivo: `Aviso: ${bloqueadas} transação(ões) de cliente(s) com tratamento suspenso a pedido do titular (LGPD) foram ignoradas.` });
+  }
   if (unmatched.length > 0) {
     storedErrors.unshift({
       row: 0,
@@ -231,6 +258,7 @@ export async function runPurchaseImport(
       duplicateCount,
       unmatchedRows: unmatched.length,
       unmatchedClients,
+      bloqueadasLgpd: bloqueadas,
       merchantsCreated,
       errorCount: errors.length,
       errors: storedErrors,

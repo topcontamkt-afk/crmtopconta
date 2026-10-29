@@ -1,7 +1,9 @@
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../generated/prisma/client";
 import { AppPrismaClient } from "../config/db";
 import { logAudit } from "../middleware/audit";
 import { InboundMessage, isOptOutMessage, phoneCandidates, previewOf } from "./whatsappPayload";
+import { registrarOptOutTelefone } from "./privacy";
+import { prazoDoPedido } from "./titular";
 
 /**
  * Grava uma mensagem recebida do cliente: acha (ou cria) a conversa, liga ao cliente pelo telefone,
@@ -35,7 +37,7 @@ export async function recordOutboundTemplateMessage(
   wamid: string,
   renderedBody: string
 ): Promise<void> {
-  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true }, orderBy: { createdAt: "asc" } });
+  const account = await prisma.whatsAppAccount.findFirst({ where: { tenantId, active: true, provider: "META" }, orderBy: { createdAt: "asc" } });
   if (!account) return;
   const digits = client.telefone.replace(/\D/g, "");
   if (!digits) return;
@@ -150,31 +152,43 @@ export async function storeInboundMessage(
     if (evento) await prisma.messageEvent.update({ where: { id: evento.id }, data: { status: "RESPONDIDO", respondedAt: m.timestamp } });
   }
 
-  // 6) pedido de descadastro (LGPD): vale na hora e fica no log de auditoria
+  // 6) pedido de descadastro (LGPD): vale na hora e fica no log de auditoria.
+  // LGPD 02-03: o pedido vale para o TELEFONE, não para um registro: grava a supressão (sobrevive à
+  // reimportação e à anonimização) e marca opt-out em TODOS os clientes do tenant com esse número (todas as
+  // formas do nono dígito, não só o `findFirst` acima) e em todos os destinatários de listas manuais.
   let optedOut = false;
   // texto digitado ou toque num botão (ex.: o botão "SAIR" do template)
-  if (client && ["text", "button", "interactive"].includes(m.type) && isOptOutMessage(m.body)) {
-    await prisma.client.updateMany({
-      where: { id: client.id, tenantId },
-      data: { autorizacaoComunicacao: false, optOutAt: new Date() },
-    });
+  if (candidates.length && ["text", "button", "interactive"].includes(m.type) && isOptOutMessage(m.body)) {
+    const r = await registrarOptOutTelefone(prisma, tenantId, { telefone: m.waId, canal: "WHATSAPP", origem: "whatsapp_inbound", quando: m.timestamp });
     await logAudit({
       tenantId,
       action: "OPT_OUT_WHATSAPP",
-      target: "Client",
-      targetId: client.id,
-      details: { conversationId: conversation.id, wamid: m.wamid },
+      target: client ? "Client" : "CampaignRecipient",
+      targetId: client?.id,
+      details: { conversationId: conversation.id, wamid: m.wamid, telefone: r.telefoneMasked, clientIds: r.clientIds },
     });
-    optedOut = true;
-  } else if (!client && candidates.length && ["text", "button", "interactive"].includes(m.type) && isOptOutMessage(m.body)) {
-    // Contato fora da base (lista manual): o pedido de descadastro vale para as próximas listas.
-    await prisma.campaignRecipient.updateMany({ where: { tenantId, telefone: { in: candidates } }, data: { optOutAt: new Date() } });
-    await logAudit({
-      tenantId,
-      action: "OPT_OUT_WHATSAPP",
-      target: "CampaignRecipient",
-      details: { conversationId: conversation.id, wamid: m.wamid },
-    });
+    // LGPD 02-03: o "PARAR" é uma revogação do consentimento (art. 18, IX) e entra na fila de pedidos do
+    // titular já atendida (o opt-out foi aplicado agora). Sem o texto da mensagem: só o fato e o telefone mascarado.
+    try {
+      await prisma.pedidoTitular.create({
+        data: {
+          tenantId,
+          clientId: client?.id ?? null,
+          telefoneMasked: r.telefoneMasked,
+          tipo: "REVOGACAO",
+          canal: "WHATSAPP",
+          status: "ATENDIDO",
+          descricao: null,
+          recebidoEm: m.timestamp,
+          prazoEm: prazoDoPedido(m.timestamp),
+          respondidoEm: new Date(),
+          resposta: "Opt-out registrado automaticamente",
+        },
+      });
+    } catch (err) {
+      // o opt-out já valeu; o registro do pedido não pode derrubar o webhook
+      console.error("[whatsappInbox] falha ao registrar pedido de revogação", (err as Error).message);
+    }
     optedOut = true;
   }
 

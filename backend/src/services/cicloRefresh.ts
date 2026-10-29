@@ -1,5 +1,4 @@
 import { tenantRaw } from "../config/db";
-import { cidadeKeySql } from "./cidades";
 
 /**
  * Preenche `Client.diaCicloAbertura` a partir do cadastro de ciclos por cidade (CicloCidade), casando pela mesma
@@ -8,14 +7,14 @@ import { cidadeKeySql } from "./cidades";
  */
 export async function refreshCicloColumns(tenantId: string): Promise<number> {
   return tenantRaw.execute(
-    `UPDATE "Client" c SET "diaCicloAbertura" = s.dia
+    `UPDATE "Client" SET "diaCicloAbertura" = s.dia
      FROM (
        SELECT c2.id, cc."diaAbertura" AS dia
        FROM "Client" c2
-       LEFT JOIN "CicloCidade" cc ON cc."tenantId" = c2."tenantId" AND cc."cidadeKey" = ${cidadeKeySql('c2."cidade"')}
+       LEFT JOIN "CicloCidade" cc ON cc."tenantId" = c2."tenantId" AND cc."cidadeKey" = c2."cidadeKey"
        WHERE c2."tenantId" = $1
-     ) s
-     WHERE c.id = s.id AND c."tenantId" = $1 AND c."diaCicloAbertura" IS DISTINCT FROM s.dia`,
+     ) AS s
+     WHERE "Client".id = s.id AND "Client"."tenantId" = $1 AND "Client"."diaCicloAbertura" IS NOT s.dia`,
     tenantId
   );
 }

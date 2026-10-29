@@ -2,13 +2,14 @@ import { AppPrismaClient } from "../config/db";
 import { logAudit } from "../middleware/audit";
 import { notify } from "./notifications";
 import { enqueueCampaign, processQueueBatch } from "./campaignQueue";
-import { buildSegmentWhere, ENVIAVEL_WHERE, SALDO_MINIMO_ELEGIVEL } from "./segments";
+import { AVISO_RENDA_IGNORADA, buildSegmentWhere, ENVIAVEL_WHERE, filtrosRendaIgnorados, SALDO_MINIMO_ELEGIVEL } from "./segments";
 import { avaliarFrescor } from "./dataFreshness";
 import { isEtapaUso } from "./etapaUso";
-import { isPerfilRenda } from "./rendaPerfil";
 import { runWithTenantContextAsync, withCrossTenantAccess } from "../config/tenantGuard";
 import { cidadeKey } from "./cidades";
 import { diasAberturaNaFaixa } from "./ciclos";
+import { CONTATO_LIBERADO_WHERE, semSuprimidos } from "./privacy";
+import { baseLegalVigente, SEM_BASE_LEGAL } from "./baseLegal";
 
 /**
  * Motor de automação (Fase 2): avalia periodicamente as AutomationRule ativas de cada tenant
@@ -23,10 +24,14 @@ import { diasAberturaNaFaixa } from "./ciclos";
  *  - ESTIMULO_FAIXA: clientes na faixa condition.faixa (obrigatório).
  *  - CICLO_ABERTO: o ciclo da cidade do cliente abriu há N dias (condition.diasAposAbertura, default 0 = no dia
  *    da abertura, quando o limite renova), opcionalmente só em certas cidades (condition.cidades = chaves de
- *    CicloCidade; vazio = todas as cadastradas), com perfilRenda/etapaUso/comSaldo opcionais. Devolve UM grupo
+ *    CicloCidade; vazio = todas as cadastradas), com etapaUso/comSaldo opcionais. Devolve UM grupo
  *    por cidade: cada cidade vira sua própria campanha (resultado separado) e só dispara no dia dela.
  *  - OPT_OUT_TELEFONE_INVALIDO: inconsistências de opt-out (autorização=true com optOutAt
  *    preenchido) — a ação aqui é sempre "block", corrigindo o dado.
+ *
+ * LGPD 02-03: todo gatilho de contato exclui, além do opt-out do cadastro, o tratamento bloqueado a pedido do
+ * titular (`bloqueadoLgpdAt`) e o telefone/documento suprimido (`semSuprimidos`, pedido feito por outro
+ * cadastro com o mesmo número ou por contato de lista). O envio confere de novo (campaignQueue).
  *
  * Ações suportadas:
  *  - { type: 'campaign', channel, templateId? | messageTemplate?, throttlePerMin?, ... }:
@@ -35,6 +40,10 @@ import { diasAberturaNaFaixa } from "./ciclos";
  *  - { type: 'notification', message? }: cria uma Notification resumindo quantos clientes casaram.
  *  - { type: 'block' }: corrige/bloqueia os clientes casados diretamente (sem campanha).
  */
+
+/** Campos para conferir a supressão por telefone/documento depois da consulta (LGPD 02-03). */
+const CONTATO_SELECT = { id: true, telefone: true, cpfHash: true } as const;
+const ids = (xs: { id: string }[]) => xs.map((c) => c.id);
 
 interface MatchResult {
   clientIds: string[];
@@ -52,13 +61,12 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
           tenantId,
           faixaUso: "SEM_USO",
           createdAt: { lte: cutoff },
-          autorizacaoComunicacao: true,
-          optOutAt: null,
+          ...CONTATO_LIBERADO_WHERE,
           statusConta: "ATIVO",
         },
-        select: { id: true },
+        select: CONTATO_SELECT,
       });
-      return { clientIds: clients.map((c) => c.id) };
+      return { clientIds: ids(await semSuprimidos(prisma, tenantId, clients)) };
     }
 
     case "INATIVO_30_DIAS": {
@@ -68,24 +76,24 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
         where: {
           tenantId,
           OR: [{ dataUltimaUtilizacao: { lte: cutoff } }, { dataUltimaUtilizacao: null, createdAt: { lte: cutoff } }],
-          autorizacaoComunicacao: true,
-          optOutAt: null,
+          ...CONTATO_LIBERADO_WHERE,
           statusConta: "ATIVO",
         },
-        select: { id: true },
+        select: CONTATO_SELECT,
       });
-      return { clientIds: clients.map((c) => c.id) };
+      return { clientIds: ids(await semSuprimidos(prisma, tenantId, clients)) };
     }
 
     case "LIMITE_RENOVADO": {
       const horas = condition?.horasJanela ?? 24;
       const cutoff = new Date(Date.now() - horas * 60 * 60 * 1000);
       const movements = await prisma.movement.findMany({
-        where: { tipo: "renovacao_limite", data: { gte: cutoff }, client: { tenantId, autorizacaoComunicacao: true, optOutAt: null } },
-        select: { clientId: true },
+        where: { tipo: "renovacao_limite", data: { gte: cutoff }, client: { tenantId, ...CONTATO_LIBERADO_WHERE } },
+        select: { clientId: true, client: { select: { telefone: true, cpfHash: true } } },
         distinct: ["clientId"],
       });
-      return { clientIds: movements.map((m) => m.clientId) };
+      const clients = movements.map((m) => ({ id: m.clientId, telefone: m.client?.telefone ?? null, cpfHash: m.client?.cpfHash ?? null }));
+      return { clientIds: ids(await semSuprimidos(prisma, tenantId, clients)) };
     }
 
     case "ESTIMULO_FAIXA": {
@@ -94,45 +102,41 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
         where: {
           tenantId,
           faixaUso: condition.faixa,
-          autorizacaoComunicacao: true,
-          optOutAt: null,
+          ...CONTATO_LIBERADO_WHERE,
           statusConta: "ATIVO",
         },
-        select: { id: true },
+        select: CONTATO_SELECT,
       });
-      return { clientIds: clients.map((c) => c.id) };
+      return { clientIds: ids(await semSuprimidos(prisma, tenantId, clients)) };
     }
 
     case "ETAPA_PERFIL": {
-      // condition: { etapaUso?, perfilRenda?, comSaldo? }. Pelo menos um dos dois filtros é obrigatório
-      // (senão a regra miraria a base inteira). Etapa de uso depende do extrato: com o extrato velho
+      // condition: { etapaUso, comSaldo? }. A etapa é obrigatória (senão a regra miraria a base inteira).
+      // LGPD 01-03: `perfilRenda` (renda estimada) deixou de ser critério de público; regra com ele não dispara
+      // (ver runRule). Etapa de uso depende do extrato: com o extrato velho
       // (ver dataFreshness.ts) a regra não dispara — quem "parou de usar" seria só falta de planilha.
       const etapa = isEtapaUso(condition?.etapaUso) ? condition.etapaUso : undefined;
-      const perfil = isPerfilRenda(condition?.perfilRenda) ? condition.perfilRenda : undefined;
-      if (!etapa && !perfil) return { clientIds: [] };
-      if (etapa) {
-        const ultima = await prisma.purchase.aggregate({ where: { tenantId }, _max: { occurredAt: true } });
-        const frescor = avaliarFrescor(ultima._max.occurredAt);
-        if (frescor.status !== "OK") {
-          console.warn(`[automation] ETAPA_PERFIL ignorada: extrato de compras ${frescor.status} (tenant ${tenantId})`);
-          return { clientIds: [] };
-        }
+      if (!etapa) return { clientIds: [] };
+      const ultima = await prisma.purchase.aggregate({ where: { tenantId }, _max: { occurredAt: true } });
+      const frescor = avaliarFrescor(ultima._max.occurredAt);
+      if (frescor.status !== "OK") {
+        console.warn(`[automation] ETAPA_PERFIL ignorada: extrato de compras ${frescor.status} (tenant ${tenantId})`);
+        return { clientIds: [] };
       }
       const clients = await prisma.client.findMany({
         where: {
           AND: [
             buildSegmentWhere(tenantId, {
-              etapaUso: etapa ? [etapa] : undefined,
-              perfilRenda: perfil ? [perfil] : undefined,
+              etapaUso: [etapa],
               saldoDisponivelMin: condition?.comSaldo ? SALDO_MINIMO_ELEGIVEL : undefined,
             }),
             ENVIAVEL_WHERE,
-            { autorizacaoComunicacao: true, optOutAt: null, statusConta: "ATIVO" },
+            { ...CONTATO_LIBERADO_WHERE, statusConta: "ATIVO" },
           ],
         },
-        select: { id: true },
+        select: CONTATO_SELECT,
       });
-      return { clientIds: clients.map((c) => c.id) };
+      return { clientIds: ids(await semSuprimidos(prisma, tenantId, clients)) };
     }
 
     case "CICLO_ABERTO": {
@@ -140,8 +144,7 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
       const configs = await prisma.cicloCidade.findMany({ where: { tenantId } });
       const escolhidas = Array.isArray(condition?.cidades) && condition.cidades.length ? new Set<string>(condition.cidades) : null;
       const hoje = diasAberturaNaFaixa({ min: apos, max: apos }, "abriuHa");
-      const etapa = isEtapaUso(condition?.etapaUso) ? condition.etapaUso : undefined;
-      const perfil = isPerfilRenda(condition?.perfilRenda) ? condition.perfilRenda : undefined;
+      const etapa = isEtapaUso(condition?.etapaUso) ? condition.etapaUso : undefined; // LGPD 01-03: regra com perfilRenda não chega aqui (runRule)
       if (etapa) {
         const ultima = await prisma.purchase.aggregate({ where: { tenantId }, _max: { occurredAt: true } });
         if (avaliarFrescor(ultima._max.occurredAt).status !== "OK") {
@@ -151,20 +154,20 @@ async function matchClients(prisma: AppPrismaClient, tenantId: string, trigger: 
       }
       const alvo = configs.filter((c) => hoje.includes(c.diaAbertura) && (!escolhidas || escolhidas.has(c.cidadeKey)));
       if (alvo.length === 0) return { clientIds: [] };
-      const clients = await prisma.client.findMany({
+      const encontrados = await prisma.client.findMany({
         where: {
           AND: [
             buildSegmentWhere(tenantId, {
-              perfilRenda: perfil ? [perfil] : undefined,
               etapaUso: etapa ? [etapa] : undefined,
               saldoDisponivelMin: condition?.comSaldo ? SALDO_MINIMO_ELEGIVEL : undefined,
             }),
             ENVIAVEL_WHERE,
-            { diaCicloAbertura: { in: [...new Set(alvo.map((c) => c.diaAbertura))] }, autorizacaoComunicacao: true, optOutAt: null, statusConta: "ATIVO" },
+            { diaCicloAbertura: { in: [...new Set(alvo.map((c) => c.diaAbertura))] }, ...CONTATO_LIBERADO_WHERE, statusConta: "ATIVO" },
           ],
         },
-        select: { id: true, cidade: true },
+        select: { ...CONTATO_SELECT, cidade: true },
       });
+      const clients = await semSuprimidos(prisma, tenantId, encontrados);
       const grupos = alvo
         .map((c) => ({ label: c.cidade, clientIds: clients.filter((cl) => cidadeKey(cl.cidade) === c.cidadeKey).map((cl) => cl.id) }))
         .filter((g) => g.clientIds.length > 0);
@@ -215,6 +218,22 @@ async function executeAction(prisma: AppPrismaClient, tenantId: string, ruleId: 
   }
 
   if (action.type === "campaign") {
+    // LGPD 02-01: sem base legal declarada pelo controlador, a automação nem cria a campanha (a fila também barraria,
+    // mas deixaria um rascunho órfão por dia); avisa quem administra.
+    const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { baseLegalMarketing: true } });
+    const baseLegal = baseLegalVigente(tenant);
+    if (!baseLegal) {
+      await notify(prisma, {
+        tenantId,
+        type: "AUTOMATION_BLOCKED",
+        severity: "AVISO",
+        message: `Regra "${ruleName}" não disparou. ${SEM_BASE_LEGAL}`,
+        relatedType: "AutomationRule",
+        relatedId: ruleId,
+      });
+      return { executed: false, reason: "sem base legal declarada" };
+    }
+
     let messageTemplate = action.messageTemplate as string | undefined;
     if (action.templateId) {
       const template = await prisma.messageTemplate.findFirst({ where: { id: action.templateId, tenantId } });
@@ -252,6 +271,7 @@ async function executeAction(prisma: AppPrismaClient, tenantId: string, ruleId: 
         dedupeWindowHrs: action.dedupeWindowHrs || 72,
         attributionDays: action.attributionDays || 7,
         costPerMessage: action.costPerMessage || 0,
+        baseLegal,
         status: "RASCUNHO",
       },
     });
@@ -300,6 +320,11 @@ export async function runRule(
   opts: { simular?: boolean } = {}
 ): Promise<RuleRunResult> {
   return runWithTenantContextAsync(rule.tenantId, async () => {
+    // LGPD 01-03: regra antiga com perfil de renda não dispara (sem o filtro, miraria mais gente do que o planejado)
+    if (filtrosRendaIgnorados(rule.condition).length) {
+      console.warn(`[automation] regra ${rule.id} usa perfil de renda, que deixou de valer: não dispara (tenant ${rule.tenantId})`);
+      return { matched: 0, executed: false, reason: AVISO_RENDA_IGNORADA, ...(opts.simular ? { simulado: true } : {}) };
+    }
     const { clientIds, grupos } = await matchClients(prisma, rule.tenantId, rule.trigger, rule.condition);
     if (opts.simular) {
       return { matched: clientIds.length, simulado: true, grupos: grupos?.map((g) => ({ label: g.label, total: g.clientIds.length })) };

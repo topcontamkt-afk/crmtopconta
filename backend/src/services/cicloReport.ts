@@ -12,11 +12,11 @@ export const parseDia = (s: string): DiaCivil => {
   return { y, m, d };
 };
 const utcMs = (c: DiaCivil) => Date.UTC(c.y, c.m - 1, c.d);
-const addDias = (c: DiaCivil, n: number): DiaCivil => {
+export const addDias = (c: DiaCivil, n: number): DiaCivil => {
   const t = new Date(utcMs(c) + n * 86400000);
   return { y: t.getUTCFullYear(), m: t.getUTCMonth() + 1, d: t.getUTCDate() };
 };
-const iso = (c: DiaCivil) => `${c.y}-${String(c.m).padStart(2, "0")}-${String(c.d).padStart(2, "0")}`;
+export const isoDia = (c: DiaCivil) => `${c.y}-${String(c.m).padStart(2, "0")}-${String(c.d).padStart(2, "0")}`;
 
 // ---------- 1) Uso por dia do ciclo ----------
 
@@ -158,7 +158,7 @@ export function periodoAnalise(primeiro: string | null, ultimo: string | null, d
   const de0 = addDias(ate, -(dias - 1));
   const p = parseDia(primeiro);
   const de = utcMs(de0) < utcMs(p) ? p : de0;
-  return { de: iso(de), ate: iso(ate) };
+  return { de: isoDia(de), ate: isoDia(ate) };
 }
 
 // ---------- 2) Resultado da campanha por dia do ciclo no envio ----------
@@ -225,4 +225,34 @@ export function breakdownByCiclo(
       significativo95: lift ? lift.significativo95 : null,
     };
   }).filter((r) => r.enviados > 0 || r.controle > 0);
+}
+
+// ---------- Janelas do ciclo (adesão por ciclo) ----------
+
+export interface JanelaCiclo {
+  de: string; // YYYY-MM-DD
+  ate: string;
+}
+
+export interface JanelasDoCiclo {
+  /** último ciclo COMPLETO: da abertura anterior até o dia antes da abertura atual */
+  completo: JanelaCiclo;
+  /** ciclo em andamento: da última abertura até hoje */
+  atual: JanelaCiclo & { diaDoCiclo: number };
+}
+
+export function janelasDoCiclo(diaAbertura: number, hoje: DiaCivil): JanelasDoCiclo {
+  const info = cicloInfo(diaAbertura, hoje);
+  const inicioAtual = info.ultimaAbertura;
+  const diaAntes = addDias(inicioAtual, -1);
+  const anterior = cicloInfo(diaAbertura, diaAntes);
+  return {
+    completo: { de: isoDia(anterior.ultimaAbertura), ate: isoDia(diaAntes) },
+    atual: { de: isoDia(inicioAtual), ate: isoDia(hoje), diaDoCiclo: info.diaDoCiclo },
+  };
+}
+
+/** A janela está inteira dentro do que o extrato cobre? (senão a adesão fica subestimada) */
+export function janelaCoberta(j: JanelaCiclo, extrato: { primeiro: string | null; ultimo: string | null }): boolean {
+  return !!extrato.primeiro && !!extrato.ultimo && extrato.primeiro <= j.de && extrato.ultimo >= j.ate;
 }

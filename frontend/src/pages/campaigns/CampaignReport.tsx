@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useParams, useSearchParams } from "react-router-dom";
 import { api, downloadFile } from "../../api/client";
+import { executarDisparo } from "../../utils/disparo";
+import { useAuth } from "../../context/AuthContext";
 
 type SaldoGroup = "COM_SALDO" | "SEM_SALDO" | "DESCONHECIDO";
 
@@ -70,7 +72,37 @@ interface Cliques {
   taxaUsoQuemNaoClicou: number | null;
 }
 
+interface FunilEtapa {
+  chave: "publico" | "enviadas" | "entregues" | "visualizaram" | "clicaram" | "usaram";
+  rotulo: string;
+  valor: number;
+  pctDoAnterior: number | null;
+  pctDasEnviadas: number | null;
+}
+interface Funil {
+  publico: number;
+  naFila: number;
+  enviadas: number;
+  entregues: number;
+  visualizaram: number;
+  clicaram: number;
+  responderam: number;
+  falhas: number;
+  bloqueadas: number;
+  controle: number;
+  usaram: number | null;
+  etapas: FunilEtapa[];
+}
+interface AoVivo {
+  status: string;
+  emDisparo: boolean;
+  funil: Funil;
+  ultimos: { nome: string; telefone: string; status: string; em: string | null; erro: string | null }[];
+  atualizadoEm: string;
+}
+
 interface Report {
+  funil?: Funil;
   manual?: boolean;
   cliques?: Cliques | null;
   campaignId: string;
@@ -100,6 +132,125 @@ interface Report {
     significant95: boolean;
     insufficientData: boolean;
   } | null;
+}
+
+const STATUS_ROTULO: Record<string, string> = { ENVIADO: "Enviada", ENTREGUE: "Entregue", LIDO: "Lida", RESPONDIDO: "Respondeu", FALHA: "Recusada", BLOQUEADO: "Bloqueada" };
+const fmtPct = (v: number | null) => (v === null ? "—" : `${v.toLocaleString("pt-BR", { maximumFractionDigits: 1 })}%`);
+
+/** Pessoas na campanha, visualizaram, clicaram e a taxa de cada etapa do funil. */
+function FunilCard({ funil, taxaConversao, janela }: { funil: Funil; taxaConversao: string; janela: number }) {
+  const maximo = Math.max(funil.publico, 1);
+  const enviadas = funil.enviadas;
+  const taxaVis = enviadas > 0 ? (funil.visualizaram / enviadas) * 100 : null;
+  const taxaCli = enviadas > 0 ? (funil.clicaram / enviadas) * 100 : null;
+  return (
+    <>
+      <div className="grid-kpi">
+        <div className="card">
+          <div className="kpi-value">{funil.publico}</div>
+          <div className="kpi-label">Pessoas na campanha</div>
+        </div>
+        <div className="card">
+          <div className="kpi-value">{funil.visualizaram}</div>
+          <div className="kpi-label">Visualizaram · {fmtPct(taxaVis)} das enviadas</div>
+        </div>
+        <div className="card">
+          <div className="kpi-value">{funil.clicaram}</div>
+          <div className="kpi-label">Clicaram no link · {fmtPct(taxaCli)} das enviadas</div>
+        </div>
+        <div className="card">
+          <div className="kpi-value">{taxaConversao}%</div>
+          <div className="kpi-label">Taxa de conversão (usaram o limite, {janela}d)</div>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <h3>Funil da campanha</h3>
+        <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
+          Cada barra é uma etapa; os percentuais mostram quantos passaram da etapa anterior e quantos das mensagens enviadas chegaram até ali. Quem clicou no link conta como entregue e visualizou,
+          mesmo quando a pessoa desligou a confirmação de leitura.
+        </p>
+        <div style={{ display: "grid", gap: 10 }}>
+          {funil.etapas.map((e) => (
+            <div key={e.chave}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", fontSize: 13 }}>
+                <strong>{e.rotulo}</strong>
+                <span>
+                  <strong>{e.valor}</strong>
+                  {e.pctDoAnterior !== null && <span style={{ color: "var(--text-muted)" }}> · {fmtPct(e.pctDoAnterior)} da etapa anterior</span>}
+                  {e.pctDasEnviadas !== null && <span style={{ color: "var(--text-muted)" }}> · {fmtPct(e.pctDasEnviadas)} das enviadas</span>}
+                </span>
+              </div>
+              <div style={{ height: 10, background: "var(--border)", borderRadius: 5, marginTop: 4 }}>
+                <div style={{ width: `${Math.min(100, (e.valor / maximo) * 100)}%`, height: 10, borderRadius: 5, background: "var(--success)", transition: "width .4s" }} />
+              </div>
+            </div>
+          ))}
+        </div>
+        <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 10 }}>
+          Na fila: {funil.naFila} · Recusadas pela Meta: {funil.falhas} · Bloqueadas: {funil.bloqueadas} · Responderam: {funil.responderam}
+          {funil.controle > 0 && <> · Grupo de controle: {funil.controle}</>}
+        </p>
+      </div>
+    </>
+  );
+}
+
+/** Andamento do envio ao vivo: barra, últimas mensagens e os botões de parar/continuar. */
+function EnvioAoVivo({ vivo, envio, aviso, onParar, onContinuar }: { vivo: AoVivo | null; envio: { restam: number; total: number; fase: string } | null; aviso: { tipo: "ok" | "erro"; texto: string } | null; onParar: () => void; onContinuar: () => void }) {
+  const naFila = vivo?.funil.naFila ?? 0;
+  const pendente = !!vivo && naFila > 0 && (vivo.status === "AGENDADA" || vivo.status === "EM_EXECUCAO");
+  const concluido = !!vivo && naFila === 0 && vivo.funil.enviadas > 0;
+  const feitas = envio ? Math.max(0, envio.total - envio.restam) : 0;
+  const pctBarra = envio && envio.total > 0 ? Math.min(100, Math.round((feitas / envio.total) * 100)) : 0;
+  if (!envio && !vivo?.emDisparo && !pendente && !concluido && !aviso) return null;
+  return (
+    <div className="card" style={{ marginBottom: 16, borderLeft: `4px solid ${envio || vivo?.emDisparo ? "var(--warning)" : concluido ? "var(--success)" : "var(--border)"}` }}>
+      {envio ? (
+        <>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+            <strong>Enviando… {feitas}/{envio.total}</strong>
+            <button className="btn secondary" onClick={onParar}>Parar envio</button>
+          </div>
+          <div style={{ height: 8, background: "var(--border)", borderRadius: 4, margin: "8px 0" }}>
+            <div style={{ width: `${pctBarra}%`, height: 8, borderRadius: 4, background: "var(--success)", transition: "width .4s" }} />
+          </div>
+          <div className="pd-hint">{envio.fase} Mantenha esta página aberta: o envio roda por ela. Parar não perde nada, dá para continuar depois.</div>
+        </>
+      ) : vivo?.emDisparo ? (
+        <strong>Enviando em outra aba… acompanhando ao vivo.</strong>
+      ) : pendente ? (
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <span>Restam <strong>{naFila}</strong> mensagens na fila.</span>
+          <button className="btn" onClick={onContinuar}>{vivo!.funil.enviadas > 0 ? `Continuar envio (restam ${naFila})` : "Iniciar envio"}</button>
+        </div>
+      ) : concluido ? (
+        <strong>Enviado ✓ {vivo!.funil.enviadas} mensagens.</strong>
+      ) : null}
+      {aviso && <div style={{ marginTop: 8, fontSize: 13, color: aviso.tipo === "ok" ? "var(--success)" : "var(--danger)" }}>{aviso.texto}</div>}
+      {vivo && vivo.ultimos.length > 0 && (
+        <div style={{ marginTop: 10, overflowX: "auto" }}>
+          <div className="pd-hint" style={{ marginBottom: 4 }}>Últimas mensagens (atualiza sozinho)</div>
+          <table>
+            <thead><tr><th>Contato</th><th>Telefone</th><th>Situação</th><th>Hora</th></tr></thead>
+            <tbody>
+              {vivo.ultimos.map((u, i) => (
+                <tr key={i}>
+                  <td>{u.nome}</td>
+                  <td>{u.telefone}</td>
+                  <td>
+                    {STATUS_ROTULO[u.status] ?? u.status}
+                    {u.erro && <div className="pd-hint" style={{ color: "var(--warning)" }}>{u.erro}</div>}
+                  </td>
+                  <td>{u.em ? new Date(u.em).toLocaleTimeString("pt-BR") : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** Curva de uso após o disparo (acumulada), com quem tinha saldo e o grupo de controle. */
@@ -399,7 +550,7 @@ function WhoUsed({ usuarios }: { usuarios: UsuarioQueUsou[] }) {
     <div className="card" style={{ marginTop: 16 }}>
       <h3>Quem usou o limite (50 mais recentes)</h3>
       {usuarios.length === 0 ? (
-        <p style={{ fontSize: 13, color: "var(--text-muted)" }}>Nenhum uso identificado ainda. A lista completa, com telefone, sai em "Exportar CSV".</p>
+        <p style={{ fontSize: 13, color: "var(--text-muted)" }}>Nenhum uso identificado ainda. A lista completa sai em "Exportar CSV" (telefone mascarado; completo só para administradores, com motivo).</p>
       ) : (
         <div style={{ overflowX: "auto" }}>
           <table>
@@ -426,16 +577,120 @@ function WhoUsed({ usuarios }: { usuarios: UsuarioQueUsou[] }) {
   );
 }
 
+/** Etapas ao vivo (envio/entrega/leitura/clique) mais "usaram o limite", que só vem do relatório completo. */
+function juntarEtapas(vivo: Funil, completo?: Funil): FunilEtapa[] {
+  const usaram = completo?.etapas.find((e) => e.chave === "usaram");
+  return usaram ? [...vivo.etapas.filter((e) => e.chave !== "usaram"), { ...usaram, pctDasEnviadas: vivo.enviadas > 0 ? Number(((usaram.valor / vivo.enviadas) * 100).toFixed(1)) : null }] : vivo.etapas;
+}
+
 export default function CampaignReport() {
   const { id } = useParams();
+  const { user } = useAuth();
   const [report, setReport] = useState<Report | null>(null);
+  const [erroExport, setErroExport] = useState<string | null>(null);
+
+  // LGPD 05-01: o CSV sai com o telefone mascarado; completo só para ADMIN, com motivo (no corpo, auditado)
+  async function exportar(completo: boolean) {
+    if (!id) return;
+    setErroExport(null);
+    let motivo = "";
+    if (completo) {
+      motivo = (window.prompt("Motivo para exportar o telefone completo (fica registrado na auditoria):") ?? "").trim();
+      if (motivo.length < 5) {
+        setErroExport("Informe o motivo (ao menos 5 caracteres) para exportar o telefone completo.");
+        return;
+      }
+    }
+    try {
+      await downloadFile(`/campaigns/${id}/report/export.csv`, `campanha-${id}.csv`, { method: "POST", body: completo ? { completo: true, motivo } : {} });
+    } catch (e) {
+      setErroExport(e instanceof Error ? e.message : "Não foi possível exportar.");
+    }
+  }
   const [phones, setPhones] = useState("");
   const [testResult, setTestResult] = useState<string | null>(null);
+
+  const [params, setParams] = useSearchParams();
+  const [vivo, setVivo] = useState<AoVivo | null>(null);
+  const [envio, setEnvio] = useState<{ restam: number; total: number; fase: string } | null>(null);
+  const [avisoEnvio, setAvisoEnvio] = useState<{ tipo: "ok" | "erro"; texto: string } | null>(null);
+  const pararRef = useRef(false);
+  const rodandoRef = useRef(false);
+  const iniciouRef = useRef(false);
 
   function load() {
     if (id) api<Report>(`/campaigns/${id}/report`).then(setReport);
   }
   useEffect(load, [id]);
+
+  const carregarVivo = useCallback(async () => {
+    if (!id) return;
+    try {
+      setVivo(await api<AoVivo>(`/campaigns/${id}/funil`));
+    } catch {
+      /* a próxima consulta tenta de novo */
+    }
+  }, [id]);
+  useEffect(() => void carregarVivo(), [carregarVivo]);
+
+  // Enquanto envia (aqui ou em outra aba) o funil e as últimas mensagens se atualizam a cada poucos segundos
+  const acompanhando = !!envio || !!vivo?.emDisparo;
+  useEffect(() => {
+    if (!acompanhando) return;
+    const t = setInterval(() => void carregarVivo(), 2500);
+    return () => clearInterval(t);
+  }, [acompanhando, carregarVivo]);
+
+  /** Roda o envio nesta página, um lote de cada vez (ver utils/disparo.ts). */
+  async function iniciarEnvio() {
+    if (!id || rodandoRef.current) return;
+    rodandoRef.current = true;
+    pararRef.current = false;
+    setAvisoEnvio(null);
+    try {
+      const atual = await api<AoVivo>(`/campaigns/${id}/funil`);
+      setVivo(atual);
+      const total = atual.funil.naFila;
+      if (total === 0) {
+        setAvisoEnvio({ tipo: "ok", texto: "Não há mensagens na fila para enviar." });
+        return;
+      }
+      setEnvio({ restam: total, total, fase: "Enviando…" });
+      const r = await executarDisparo(id, {
+        deveParar: () => pararRef.current,
+        onRestam: (restam, fase) => {
+          setEnvio((p) => (p ? { ...p, restam: restam < 0 ? p.restam : restam, fase } : p));
+          void carregarVivo(); // o funil acompanha a barra a cada lote
+        },
+      });
+      if (r.concluida) setAvisoEnvio({ tipo: "ok", texto: "Envio concluído." });
+      else if (r.aviso) setAvisoEnvio({ tipo: "erro", texto: r.aviso });
+      else setAvisoEnvio({ tipo: "ok", texto: "Envio parado. Use “Continuar envio” para retomar." });
+    } catch (e) {
+      setAvisoEnvio({ tipo: "erro", texto: `O envio parou: ${e instanceof Error ? e.message : "erro inesperado"}` });
+    } finally {
+      rodandoRef.current = false;
+      setEnvio(null);
+      await carregarVivo();
+      load();
+    }
+  }
+
+  // Vindo do botão de disparar ou do assistente (?enviar=1): começa o envio uma vez e limpa o endereço, para que
+  // recarregar a página não dispare de novo
+  useEffect(() => {
+    if (!id || params.get("enviar") !== "1" || iniciouRef.current) return;
+    iniciouRef.current = true;
+    setParams({}, { replace: true });
+    void iniciarEnvio();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, params]);
+
+  function continuarEnvio() {
+    const restam = vivo?.funil.naFila ?? 0;
+    if (!window.confirm(`Enviar agora as ${restam} mensagens que restam? Quem já recebeu não recebe de novo.`)) return;
+    void iniciarEnvio();
+  }
 
   // Near-real-time (Fase 3 — recorte leve): sem WebSocket, mas a página se atualiza sozinha a
   // cada 20s enquanto a campanha ainda tem envios em andamento (evita ficar apertando F5).
@@ -468,23 +723,26 @@ export default function CampaignReport() {
     <div>
       <div className="topbar">
         <h2>Relatório da campanha {report.isSandbox && <span className="badge warn">Sandbox</span>}</h2>
-        <button className="btn secondary" onClick={() => id && downloadFile(`/campaigns/${id}/report/export.csv`, `campanha-${id}.csv`)}>
-          Exportar CSV
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn secondary" onClick={() => exportar(false)} title="Telefone mascarado">
+            Exportar CSV
+          </button>
+          {user?.role === "ADMIN" && (
+            <button className="btn secondary" onClick={() => exportar(true)} title="Exige motivo; fica na auditoria">
+              CSV com telefone completo
+            </button>
+          )}
+        </div>
       </div>
+      {erroExport && <p className="error-text">{erroExport}</p>}
+
+      <EnvioAoVivo vivo={vivo} envio={envio} aviso={avisoEnvio} onParar={() => (pararRef.current = true)} onContinuar={continuarEnvio} />
+      <FunilCard funil={vivo?.funil ? { ...vivo.funil, usaram: report.funil?.usaram ?? null, etapas: juntarEtapas(vivo.funil, report.funil) } : report.funil!} taxaConversao={report.taxaConversao} janela={report.janelaAtribuicaoDias} />
 
       <div className="grid-kpi">
         <div className="card">
-          <div className="kpi-value">{report.audienceCount ?? "—"}</div>
-          <div className="kpi-label">Público</div>
-        </div>
-        <div className="card">
           <div className="kpi-value">{report.conversoes}</div>
           <div className="kpi-label">Conversões (janela {report.janelaAtribuicaoDias}d)</div>
-        </div>
-        <div className="card">
-          <div className="kpi-value">{report.taxaConversao}%</div>
-          <div className="kpi-label">Taxa de conversão</div>
         </div>
         <div className="card">
           <div className="kpi-value">R$ {Number(report.custoTotal).toFixed(2)}</div>
