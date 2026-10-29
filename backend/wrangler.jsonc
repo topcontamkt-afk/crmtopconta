@@ -61,7 +61,9 @@
         "MESSAGING_MODE": "mock",
         // Números que podem receber envio REAL na homologação (vírgula ou ponto e vírgula). Vazio = nada sai de verdade:
         // a conta da Meta da homologação tem credencial real e já atingiu clientes (incidente de 22/10/2026).
-        "ENVIO_PERMITIDO_PARA": ""
+        // "*" = liberado para qualquer número da base (decisão do operador em 29/10/2026); as travas de base legal, opt-out,
+        // limite, dedupe e lock por empresa continuam valendo. Para voltar a travar, use "" ou uma lista de números.
+        "ENVIO_PERMITIDO_PARA": "*"
       },
       "d1_databases": [
         { "binding": "DB", "database_name": "crmtopconta-hml", "database_id": "9945cc44-3f12-404f-8505-96d68bd21a6e" }

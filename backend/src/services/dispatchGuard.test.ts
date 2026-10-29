@@ -32,6 +32,12 @@ describe("restrição de envio na homologação", () => {
     expect(bloqueioPorRestricao(r, "+5579911112222")).toMatch(/lista de teste/);
     expect(bloqueioPorRestricao(r, null)).toMatch(/lista de teste/);
   });
+  it("em hml o valor * libera qualquer número, e uma lista sem * continua restrita", () => {
+    const liberado = restricaoDeEnvio({ APP_ENV: "hml", ENVIO_PERMITIDO_PARA: "*" } as any);
+    expect(liberado.ativa).toBe(false);
+    expect(bloqueioPorRestricao(liberado, "+5579911112222")).toBeNull();
+    expect(restricaoDeEnvio({ APP_ENV: "hml", ENVIO_PERMITIDO_PARA: "5579999998888" } as any).ativa).toBe(true);
+  });
   it("em hml com a lista vazia nada sai", () => {
     expect(bloqueioPorRestricao(restricaoDeEnvio({ APP_ENV: "hml" } as any), "+5579999998888")).toMatch(/lista de teste/);
   });
