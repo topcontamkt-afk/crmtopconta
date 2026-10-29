@@ -298,44 +298,14 @@ export default function CampaignWizard() {
     try {
       setProgresso({ fase: "Criando a campanha…", enviados: 0, total: validation?.contatos ?? 0 });
       const { id } = await criarCampanha(false);
-      const fila = await api<{ queued: number; control: number }>(`/campaigns/${id}/schedule`, { method: "POST" });
-      const total = fila.queued;
+      await api(`/campaigns/${id}/schedule`, { method: "POST" });
 
       if (quando === "agendar") {
         navigate(`/campaigns/${id}/report`);
         return;
       }
-      // Imediato: manda em lotes pequenos, respeitando o limite por minuto, com a tela aberta.
-      let enviados = 0;
-      for (let guarda = 0; guarda < 2000 && !cancelar.current; guarda++) {
-        setProgresso({ fase: "Enviando as mensagens…", enviados, total });
-        let r: { processed: number; remaining: number; throttled?: boolean; bloqueado?: string };
-        try {
-          r = await api(`/campaigns/${id}/dispatch`, { method: "POST", body: { limit: 25 } });
-        } catch (e) {
-          if (e instanceof ApiError && e.status === 409) {
-            // outro disparo desta campanha em andamento: espera, sem enviar nada
-            setProgresso({ fase: "Outro disparo em andamento… aguardando", enviados, total });
-            await sleep(4000);
-            continue;
-          }
-          throw e;
-        }
-        if (r.bloqueado) {
-          setProgresso({ fase: "Envio bloqueado", enviados, total, aviso: r.bloqueado });
-          setBusy(false);
-          return;
-        }
-        enviados = total - r.remaining;
-        if (r.remaining === 0) break;
-        if (r.throttled) {
-          setProgresso({ fase: "Aguardando o limite de envios por minuto…", enviados, total });
-          await sleep(8000);
-        } else if (r.processed === 0) {
-          await sleep(3000);
-        }
-      }
-      navigate(`/campaigns/${id}/report`);
+      // Imediato: o relatório da campanha roda o envio em lotes e mostra o funil ao vivo.
+      navigate(`/campaigns/${id}/report?enviar=1`);
     } catch (e) {
       setProgresso(null);
       setErro(textoErro(e));

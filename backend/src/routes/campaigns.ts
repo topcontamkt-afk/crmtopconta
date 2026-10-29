@@ -20,6 +20,7 @@ import {
 import { computeABSignificance } from "../services/statistics";
 import { linkRecipients, prepareManual } from "../services/manualCampaign";
 import { validateWizard } from "../services/campaignWizard";
+import { Funil, montarFunil } from "../services/campaignFunil";
 import { trackedButtons } from "../services/trackedLinks";
 import { costConfigFrom, DEFAULT_COSTS } from "../services/messageCost";
 import { maskPhone } from "../services/masking";
@@ -538,6 +539,51 @@ router.post("/:id/test-send", requireRole("ADMIN", "OPERATOR"), async (req, res)
   res.json(result);
 });
 
+/** Contagens do funil (por status e só dos que clicaram), em duas consultas leves. */
+async function contagensDoFunil(campaignId: string) {
+  const [porStatus, cliques] = await Promise.all([
+    prisma.messageEvent.groupBy({ by: ["status"], where: { campaignId }, _count: { _all: true } }),
+    prisma.messageEvent.groupBy({ by: ["status"], where: { campaignId, clickedAt: { not: null } }, _count: { _all: true } }),
+  ]);
+  const mapa = (g: { status: string; _count: { _all: number } }[]) => Object.fromEntries(g.map((x) => [x.status, x._count._all])) as Record<string, number>;
+  return { porStatus: mapa(porStatus), cliquesPorStatus: mapa(cliques) };
+}
+
+/**
+ * GET /api/campaigns/:id/funil — acompanhamento ao vivo do envio: funil, se há disparo em andamento e as últimas
+ * mensagens. Leve de propósito (a tela consulta a cada poucos segundos enquanto envia); o relatório completo
+ * (uso do limite, ROI) continua em /report.
+ */
+router.get("/:id/funil", async (req, res) => {
+  const { tenantId } = req.user!;
+  const campaign = await prisma.campaign.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
+  const [contagens, trava, ultimos] = await Promise.all([
+    contagensDoFunil(campaign.id),
+    prisma.tenant.findUnique({ where: { id: tenantId }, select: { dispatchUntil: true, dispatchCampaignId: true } }),
+    prisma.messageEvent.findMany({
+      where: { campaignId: campaign.id, status: { notIn: ["FILA", "CONTROLE"] } },
+      orderBy: [{ sentAt: "desc" }, { queuedAt: "desc" }],
+      take: 8,
+      select: { status: true, sentAt: true, error: true, client: { select: { nome: true, telefone: true } }, recipient: { select: { nome: true, telefone: true } } },
+    }),
+  ]);
+  const funil: Funil = montarFunil({ ...contagens, audienceCount: campaign.audienceCount });
+  res.json({
+    status: campaign.status,
+    emDisparo: !!trava?.dispatchUntil && trava.dispatchUntil.getTime() > Date.now() && trava.dispatchCampaignId === campaign.id,
+    funil,
+    ultimos: ultimos.map((e) => ({
+      nome: e.recipient?.nome ?? e.client?.nome ?? "—",
+      telefone: maskPhone(e.recipient?.telefone ?? e.client?.telefone ?? ""),
+      status: e.status,
+      em: (e.sentAt ?? null)?.toISOString() ?? null,
+      erro: e.status === "FALHA" || e.status === "BLOQUEADO" ? e.error : null,
+    })),
+    atualizadoEm: new Date().toISOString(),
+  });
+});
+
 /**
  * GET /api/campaigns/:id/report — resultado pelo USO REAL do cliente (transações): curva de
  * conversão D0 a D30, separação de quem tinha saldo no envio, grupo de controle (se houver),
@@ -549,10 +595,11 @@ router.get("/:id/report", async (req, res) => {
   if (!campaign) return res.status(404).json({ error: "Campanha não encontrada" });
 
   if (campaign.manual) await linkRecipients(prisma, tenantId, campaign.id);
-  const [grouped, costAgg, evals] = await Promise.all([
+  const [grouped, costAgg, evals, contagensFunil] = await Promise.all([
     prisma.messageEvent.groupBy({ by: ["status"], where: { campaignId: campaign.id }, _count: true }),
     prisma.messageEvent.aggregate({ where: { campaignId: campaign.id, status: { in: ENVIADOS as any } }, _sum: { cost: true } }),
     loadCampaignEvaluations(prisma, tenantId, campaign.id),
+    contagensDoFunil(campaign.id),
   ]);
 
   const treated = evals.filter((e) => e.cohort === "TRATADO");
@@ -668,9 +715,12 @@ router.get("/:id/report", async (req, res) => {
   // Quebra pelo dia do ciclo da cidade em que o cliente estava ao receber (ver services/cicloReport.ts).
   const porCiclo = breakdownByCiclo(treated, control, (id) => aberturas.get(id), janelaDias).map((p) => ({ ...p, taxaConversao: (p.taxa * 100).toFixed(2) }));
 
+  const funil = montarFunil({ ...contagensFunil, audienceCount: campaign.audienceCount, usaram: headline.convertidos });
+
   res.json({
     campaignId: campaign.id,
     manual: campaign.manual,
+    funil,
     cliques,
     porPerfil,
     porCiclo,

@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
-import { api, ApiError } from "../../api/client";
+import { useCallback, useEffect, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { api } from "../../api/client";
 
 interface Contagem {
   fila: number;
@@ -23,27 +23,16 @@ interface Campaign {
   contagem?: Contagem | null;
 }
 
-interface Progresso {
-  enviadas: number;
-  total: number;
-  fase: string;
-}
-
-const LOTE = 25;
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 export default function CampaignList() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
-  const [progresso, setProgresso] = useState<Record<string, Progresso>>({});
   const [aviso, setAviso] = useState<{ tipo: "ok" | "erro"; texto: string } | null>(null);
-  // ids com disparo em curso NESTA tela: o botão fica desabilitado já no clique (clique duplo não dispara duas vezes)
-  const emCurso = useRef<Set<string>>(new Set());
+  const navigate = useNavigate();
 
   const load = useCallback(() => api<Campaign[]>("/campaigns").then(setCampaigns), []);
   useEffect(() => void load(), [load]);
 
   // Disparo em andamento em outra aba/usuário: a lista se atualiza sozinha até terminar
-  const haDisparoRemoto = campaigns.some((c) => c.emDisparo && !emCurso.current.has(c.id));
+  const haDisparoRemoto = campaigns.some((c) => c.emDisparo);
   useEffect(() => {
     if (!haDisparoRemoto) return;
     const t = setInterval(() => void load(), 5000);
@@ -66,67 +55,11 @@ export default function CampaignList() {
     load();
   }
 
-  async function disparar(c: Campaign) {
-    if (emCurso.current.has(c.id)) return;
+  /** Confirma e abre o relatório da campanha, que roda o envio e mostra o funil ao vivo. */
+  function disparar(c: Campaign) {
     const fila = c.contagem?.fila ?? c.audienceCount ?? 0;
     if (!window.confirm(`Enviar agora a campanha “${c.name}” para ${fila} contato(s)? Depois de enviada não dá para repetir o envio.`)) return;
-    emCurso.current.add(c.id);
-    const total = fila;
-    const marcar = (enviadas: number, fase: string) => setProgresso((p) => ({ ...p, [c.id]: { enviadas, total, fase } }));
-    marcar(0, "Enviando…");
-    setAviso(null);
-    let enviadas = 0;
-    let semProgresso = 0;
-    let concluida = false;
-    try {
-      for (let guarda = 0; guarda < 2000; guarda++) {
-        let r: { processed: number; remaining: number; throttled?: boolean; bloqueado?: string; parcial?: string | null };
-        try {
-          r = await api(`/campaigns/${c.id}/dispatch`, { method: "POST", body: { limit: LOTE } });
-        } catch (e) {
-          if (e instanceof ApiError && e.status === 409) {
-            // outro disparo desta campanha em andamento: espera, sem enviar nada
-            marcar(enviadas, "Outro disparo em andamento… aguardando");
-            await sleep(4000);
-            continue;
-          }
-          throw e;
-        }
-        if (r.bloqueado) {
-          setAviso({ tipo: "erro", texto: r.bloqueado });
-          break;
-        }
-        enviadas = Math.max(0, total - r.remaining);
-        marcar(enviadas, r.throttled ? "Aguardando o limite de envios por minuto…" : "Enviando…");
-        if (r.remaining === 0) {
-          concluida = true;
-          break;
-        }
-        if (r.throttled) {
-          await sleep(8000);
-        } else if (r.processed === 0 && !r.parcial) {
-          // nada saiu e nada explica: não insiste para sempre
-          if (++semProgresso >= 5) {
-            setAviso({ tipo: "erro", texto: "O envio parou sem avançar. Veja o relatório da campanha e tente de novo." });
-            break;
-          }
-          await sleep(3000);
-        } else {
-          semProgresso = 0;
-          if (r.parcial) await sleep(500);
-        }
-      }
-      if (concluida) setAviso({ tipo: "ok", texto: `Envio concluído: “${c.name}”.` });
-    } catch (e) {
-      setAviso({ tipo: "erro", texto: `O envio parou: ${textoErro(e)}` });
-    } finally {
-      emCurso.current.delete(c.id);
-      setProgresso((p) => {
-        const { [c.id]: _feito, ...resto } = p;
-        return resto;
-      });
-      load();
-    }
+    navigate(`/campaigns/${c.id}/report?enviar=1`);
   }
 
   return (
@@ -169,7 +102,6 @@ export default function CampaignList() {
                 <td>
                   <Acoes
                     c={c}
-                    progresso={progresso[c.id]}
                     onAgendar={() => schedule(c.id)}
                     onDisparar={() => disparar(c)}
                     onPausar={() => pausar(c)}
@@ -188,23 +120,11 @@ export default function CampaignList() {
   );
 }
 
-function Acoes({ c, progresso, onAgendar, onDisparar, onPausar, onRetomar }: { c: Campaign; progresso?: Progresso; onAgendar: () => void; onDisparar: () => void; onPausar: () => void; onRetomar: () => void }) {
+function Acoes({ c, onAgendar, onDisparar, onPausar, onRetomar }: { c: Campaign; onAgendar: () => void; onDisparar: () => void; onPausar: () => void; onRetomar: () => void }) {
   if (c.status === "RASCUNHO") return <button className="btn secondary" onClick={onAgendar}>Agendar/Enfileirar</button>;
   if (c.status === "PAUSADA") return <button className="btn secondary" onClick={onRetomar}>Retomar</button>;
 
-  if (progresso) {
-    const pct = progresso.total > 0 ? Math.min(100, Math.round((progresso.enviadas / progresso.total) * 100)) : 0;
-    return (
-      <div style={{ minWidth: 180 }}>
-        <button className="btn secondary" disabled>Enviando… {progresso.enviadas}/{progresso.total}</button>
-        <div style={{ height: 4, background: "var(--border)", borderRadius: 2, marginTop: 6 }}>
-          <div style={{ width: `${pct}%`, height: 4, background: "var(--success)", borderRadius: 2 }} />
-        </div>
-        <div className="pd-hint">{progresso.fase} Mantenha esta tela aberta.</div>
-      </div>
-    );
-  }
-  if (c.emDisparo) return <button className="btn secondary" disabled>Enviando em outra aba…</button>;
+  if (c.emDisparo) return <Link className="btn secondary" to={`/campaigns/${c.id}/report`}>Enviando… acompanhar</Link>;
 
   const enviadas = c.contagem?.enviadas ?? 0;
   const fila = c.contagem?.fila ?? 0;

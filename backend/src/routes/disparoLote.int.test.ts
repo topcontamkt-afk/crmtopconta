@@ -71,7 +71,12 @@ beforeAll(async () => {
   });
 });
 
-beforeEach(() => {
+/** O limite global da empresa (maxMsgsPerMinute) conta os envios do último minuto; cada teste começa com a janela limpa. */
+const limparJanelaDeTaxa = () =>
+  runWithTenantContextAsync(tenantId, () => prisma.messageEvent.updateMany({ where: { sentAt: { gte: new Date(Date.now() - 90_000) } }, data: { sentAt: new Date(Date.now() - 10 * 60_000) } }));
+
+beforeEach(async () => {
+  await limparJanelaDeTaxa();
   enviados.length = 0;
   envio.mockRestore();
   envio = jest.spyOn(MockWhatsAppAdapter.prototype, "send").mockImplementation(async (to: string) => {
@@ -282,3 +287,31 @@ it("CAOS: falhas aleatórias (limite do Worker, recusa da Meta, exceção) com 8
   expect((c.ENVIADO ?? 0)).toBe(enviados.length); // o que foi enviado está registrado como enviado
   expect((c.ENVIADO ?? 0) + (c.FALHA ?? 0) + (c.FILA ?? 0)).toBe(120); // nada perdido
 }, 120_000);
+
+it("o funil ao vivo e o relatório trazem pessoas, visualizaram, clicaram e as taxas", async () => {
+  const id = await novaCampanha(10, "funil");
+  await dispatch(id);
+  // simula os recibos da Meta e cliques: 3 só enviadas→entregues, 4 lidas (1 respondeu), 2 clicaram (1 sem recibo de leitura)
+  const eventos = await runWithTenantContextAsync(tenantId, () => prisma.messageEvent.findMany({ where: { campaignId: id }, orderBy: { id: "asc" } }));
+  const mudar = (i: number, data: object) => runWithTenantContextAsync(tenantId, () => prisma.messageEvent.update({ where: { id: eventos[i].id }, data }));
+  for (const i of [0, 1, 2]) await mudar(i, { status: "ENTREGUE" });
+  for (const i of [3, 4, 5]) await mudar(i, { status: "LIDO" });
+  await mudar(6, { status: "RESPONDIDO" });
+  await mudar(4, { clickedAt: new Date(), clickCount: 2 }); // lida e clicou
+  await mudar(7, { clickedAt: new Date(), clickCount: 1 }); // ficou só ENVIADO, mas clicou: conta como entregue e visualizou
+
+  const r = await request(app).get(`/api/campaigns/${id}/funil`).set("authorization", `Bearer ${token}`);
+  expect(r.status).toBe(200);
+  expect(r.body.funil).toMatchObject({ publico: 10, naFila: 0, enviadas: 10, entregues: 8, visualizaram: 5, clicaram: 2 });
+  expect(r.body.funil.etapas.map((e: any) => e.chave)).toEqual(["publico", "enviadas", "entregues", "visualizaram", "clicaram"]);
+  expect(r.body.emDisparo).toBe(false);
+  expect(r.body.ultimos.length).toBeGreaterThan(0);
+  expect(r.body.ultimos[0].telefone).toMatch(/\*/); // telefone sempre mascarado
+  expect(JSON.stringify(r.body)).not.toContain(telefone(0)); // nenhum telefone completo
+
+  const rel = await request(app).get(`/api/campaigns/${id}/report`).set("authorization", `Bearer ${token}`);
+  expect(rel.status).toBe(200);
+  expect(rel.body.funil).toMatchObject({ publico: 10, enviadas: 10, entregues: 8, visualizaram: 5, clicaram: 2 });
+  expect(rel.body.funil.usaram).toBe(rel.body.conversoes);
+  expect((await request(app).get("/api/campaigns/inexistente/funil").set("authorization", `Bearer ${token}`)).status).toBe(404);
+});
