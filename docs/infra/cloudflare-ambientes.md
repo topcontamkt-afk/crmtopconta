@@ -230,3 +230,20 @@ Hoje tudo roda no grátis. O plano é da conta (compartilhada): vale para todos 
   (1 tenant, 3 usuários, 40 clientes), crons, limites do D1 no código, placement e fila do sync. Smoke na
   homologação: login, dashboard, clientes, campanhas, cadeia do AuditLog válida, importação de 100 linhas, crons
   por `/api/cron/*`, cabeçalho de template no R2 e a fila do sync. 1.020 testes passando.
+
+## Deploy da homologação pelo painel da Cloudflare (Workers Builds)
+
+O upload dos arquivos da tela (assets) não funciona a partir do ambiente do Claude Code na nuvem (o proxy troca o token temporário do
+upload e a Cloudflare devolve 401), então a homologação também pode ser publicada pela própria Cloudflare, a cada push na branch
+configurada (29/10/2026). No painel: Workers e Pages → `crmtopconta-hml` → Configurações → Compilações → Conectar ao Git
+(`topcontamkt-afk/crmtopconta`).
+
+| Campo | Valor |
+|---|---|
+| Ramificação de produção | a branch que a homologação deve seguir (hoje `claude/disparo-sem-duplicidade`) |
+| Diretório raiz | `backend` |
+| Comando da build | `npm ci && npm --prefix ../frontend ci && npm run cf:build-front` |
+| Comando de implantação | `npx wrangler deploy --env hml` (**com `--env hml`**: sem ele o wrangler usa a configuração de produção) |
+
+Não precisa de segredo na build (os segredos do Worker continuam no próprio Worker). Migrations do D1 NÃO rodam na build: aplicar antes
+(`npx wrangler d1 migrations apply crmtopconta-hml --env hml --remote`) quando a mudança tiver migration nova.
