@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Megaphone } from "lucide-react";
+import { ArrowDownRight, ArrowUpRight, Megaphone, Minus } from "lucide-react";
 import { api } from "../api/client";
+
+interface Tendencia {
+  dias: number;
+  anterior: number;
+  atual: number;
+  abs: number;
+  pct: number | null;
+  direcao: "subiu" | "caiu" | "estavel";
+  efeito: "melhora" | "piora" | "neutro";
+  leitura: string;
+}
 
 interface Banda {
   key: string;
@@ -12,6 +23,7 @@ interface Banda {
   mensagem: string;
   cor: string;
   n: number;
+  tendencia: Tendencia | null;
 }
 
 interface Item {
@@ -25,10 +37,12 @@ interface Item {
   destino?: string;
   destinoLabel?: string;
   motivo?: string;
+  tendencia: Tendencia | null;
 }
 
 interface Oportunidades {
   totalClientes: number;
+  historicoDisponivel: boolean;
   comLimite: number;
   faixas: Banda[];
   itens: Item[];
@@ -39,6 +53,19 @@ const IMPACTO_COR: Record<string, string> = { Alto: "#e15b5b", "Médio": "#e0a23
 const BLUE = "#4f7cff";
 const AMBER = "#e0a233";
 const GREY = "#6f7b96";
+
+/** Seta com a variação contra o início da janela; a cor vem do efeito (problema crescendo = vermelho), nunca só da direção. */
+function TendenciaPill({ t }: { t: Tendencia }) {
+  const classe = t.efeito === "melhora" ? "up" : t.efeito === "piora" ? "down" : "flat";
+  const texto =
+    t.direcao === "estavel" ? "estável" : `${t.abs > 0 ? "+" : "−"}${t.pct !== null ? `${Math.abs(Math.round(t.pct))}%` : intFmt.format(Math.abs(t.abs))}`;
+  const Icone = t.direcao === "subiu" ? ArrowUpRight : t.direcao === "caiu" ? ArrowDownRight : Minus;
+  return (
+    <span className={`pd-delta ${classe}`} title={`${intFmt.format(t.anterior)} → ${intFmt.format(t.atual)} em ${t.dias} dias`}>
+      <Icone size={12} /> {texto}
+    </span>
+  );
+}
 
 /** A faixa 0% é a mesma oportunidade "semUso" (cartão com limite que nunca foi usado). */
 const tipoDaFaixa = (key: string) => (key === "uso_0" ? "semUso" : key);
@@ -112,6 +139,13 @@ export default function OpportunityQueue({ cidade, convenio }: { cidade: string;
       <h3>Fila de oportunidades</h3>
       <p className="pd-card-sub">Do dado à ação: cada item abre o assistente de campanha com o público e uma mensagem sugerida.</p>
       {error && <div className="error-text" style={{ marginBottom: 10 }}>{error}</div>}
+      {!data.historicoDisponivel && (
+        <p className="pd-note" style={{ margin: "0 0 10px" }}>
+          {cidade || convenio
+            ? "Com filtro de cidade ou convênio a tendência não está disponível: o histórico é da base inteira."
+            : "Tendência disponível em alguns dias: o sistema começou a guardar o tamanho de cada público e o histórico não pode ser reconstruído."}
+        </p>
+      )}
 
       <div className="pd-label">Faixas de uso do limite · {intFmt.format(data.comLimite)} clientes com limite cadastrado</div>
       <div className="pd-band-bar" role="img" aria-label="Distribuição dos clientes com limite por faixa de uso">
@@ -133,6 +167,11 @@ export default function OpportunityQueue({ cidade, convenio }: { cidade: string;
           <strong style={{ fontSize: 15 }}>
             {atual.titulo} · {intFmt.format(atual.n)} {atual.n === 1 ? "cliente" : "clientes"}
           </strong>
+          {atual.tendencia && (
+            <p className="pd-hint" style={{ margin: "4px 0 0", display: "flex", gap: 8, alignItems: "center" }}>
+              <TendenciaPill t={atual.tendencia} /> {atual.tendencia.leitura}
+            </p>
+          )}
           <p className="pd-card-sub" style={{ margin: "6px 0 4px" }}>{atual.acao}</p>
           <p className="pd-hint" style={{ fontStyle: "italic", margin: 0 }}>{atual.mensagem}</p>
         </div>
@@ -167,7 +206,9 @@ export default function OpportunityQueue({ cidade, convenio }: { cidade: string;
                   <span className="pd-tag" style={{ color: tag.c, background: `${tag.c}1f` }}>{tag.t}</span>
                 </span>
                 <span>{o.status === "historico" ? `${o.desc} ${o.motivo ?? ""}` : o.desc}</span>
+                {o.tendencia && <span className="pd-hint">{o.tendencia.leitura}</span>}
               </div>
+              {o.tendencia && <TendenciaPill t={o.tendencia} />}
               {o.status === "campanha" ? (
                 <button className="btn" disabled={criando !== null} onClick={() => criarCampanha(o.key, o.titulo)}>
                   <Megaphone size={14} /> {criando === o.key ? "Carregando..." : "Criar campanha"}

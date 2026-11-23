@@ -1,4 +1,5 @@
 import { buildMelhorouCaiu } from "../services/insights";
+import { JANELA_PADRAO_DIAS, tendenciaDe } from "../services/oportunidadeTendencia";
 import { USO_TIPO_SQL } from "../services/usageRefresh";
 import { avaliarFrescor, mensagemFrescor } from "../services/dataFreshness";
 import { ETAPA_CASE_SQL } from "../services/etapaUso";
@@ -952,7 +953,35 @@ router.get("/perfis-renda/:perfil", async (req, res) => {
 router.get("/oportunidades", async (req, res) => {
   const parsed = filtersQuerySchema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
-  res.json(await computeOpportunities(prisma, req.user!.tenantId, parsed.data));
+  const { tenantId } = req.user!;
+  const filters = parsed.data;
+  const result = await computeOpportunities(prisma, tenantId, filters);
+
+  // Tendência só para a base inteira: as fotos diárias não têm recorte por cidade/convênio.
+  const temFiltro = !!(filters.cidade || filters.empresaConveniada);
+  const hoje = todayBrt();
+  const historico = temFiltro
+    ? []
+    : (
+        await prisma.dashboardSnapshot
+          .findMany({
+            where: { tenantId, day: { gte: addDays(hoje, -JANELA_PADRAO_DIAS), lt: hoje } },
+            select: { day: true, oportunidades: true },
+            orderBy: { day: "asc" },
+          })
+          // A fila não pode cair por causa do histórico (ex.: coluna ainda não criada no banco).
+          .catch((e) => {
+            console.error("[oportunidades] histórico indisponível:", e);
+            return [];
+          })
+      ).map((s) => ({ day: s.day, valores: s.oportunidades as Record<string, number> | null }));
+
+  res.json({
+    ...result,
+    historicoDisponivel: historico.some((h) => h.valores),
+    faixas: result.faixas.map((b) => ({ ...b, tendencia: tendenciaDe(b.key, b.n, historico, hoje) })),
+    itens: result.itens.map((i) => ({ ...i, tendencia: i.n === null ? null : tendenciaDe(i.key, i.n, historico, hoje) })),
+  });
 });
 
 /**
