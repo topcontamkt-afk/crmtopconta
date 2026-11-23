@@ -102,6 +102,9 @@ export default function CampaignWizard() {
   const [dataAg, setDataAg] = useState("");
   const [horaAg, setHoraAg] = useState("09:00");
 
+  // horário sugerido (pico de uso dos clientes, pelo extrato; ver /campaigns/horarios)
+  const [horarioSugerido, setHorarioSugerido] = useState<{ horario: string; picoHora: number; antecedenciaMin: number; confianca: string } | null>(null);
+
   // envio
   const [erro, setErro] = useState("");
   const [busy, setBusy] = useState(false);
@@ -159,6 +162,25 @@ export default function CampaignWizard() {
     return null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publico, rows, segmentId, filtrosApi, temFiltro]);
+
+  useEffect(() => {
+    if (step !== 3 || quando !== "agendar" || horarioSugerido) return;
+    api<{ disponivel: boolean; total?: { sugestao: { horario: string; picoHora: number; antecedenciaMin: number; confianca: string } | null } }>("/dashboard/horarios?tipo=todos&por=nenhum")
+      .then((r) => r.disponivel && r.total?.sugestao && setHorarioSugerido(r.total.sugestao))
+      .catch(() => undefined); // dica opcional: falhar não atrapalha o agendamento
+  }, [step, quando, horarioSugerido]);
+
+  function usarHorarioSugerido() {
+    if (!horarioSugerido) return;
+    const agora = new Date();
+    const [h, m] = horarioSugerido.horario.split(":").map(Number);
+    const alvo = new Date(agora);
+    alvo.setHours(h, m, 0, 0);
+    if (alvo <= agora) alvo.setDate(alvo.getDate() + 1); // horário de hoje já passou: amanhã
+    const pad = (n: number) => String(n).padStart(2, "0");
+    setDataAg(`${alvo.getFullYear()}-${pad(alvo.getMonth() + 1)}-${pad(alvo.getDate())}`);
+    setHoraAg(horarioSugerido.horario);
+  }
 
   const agendadoPara = quando === "agendar" && dataAg ? new Date(`${dataAg}T${horaAg || "09:00"}:00`) : null;
 
@@ -540,6 +562,16 @@ export default function CampaignWizard() {
                       <input type="time" value={horaAg} onChange={(e) => setHoraAg(e.target.value)} />
                     </div>
                   </div>
+                  {horarioSugerido && (
+                    <div className="pd-opp" style={{ marginTop: 10 }}>
+                      <span className="pd-opp-n" style={{ color: "var(--accent)", background: "var(--accent-soft)" }}>{horarioSugerido.horario}</span>
+                      <div className="pd-opp-text">
+                        <strong>Horário sugerido</strong>
+                        <span>Pico de uso às {horarioSugerido.picoHora}h, com {horarioSugerido.antecedenciaMin} min de antecedência. Confiança {horarioSugerido.confianca}: estimativa pelo extrato. <Link to="/campaigns/horarios">Ver detalhes</Link></span>
+                      </div>
+                      <button type="button" className="btn secondary" onClick={usarHorarioSugerido}>Usar sugestão</button>
+                    </div>
+                  )}
                   <p className="pd-hint">
                     Fuso do navegador: {Intl.DateTimeFormat().resolvedOptions().timeZone}. No plano atual o envio automático roda uma vez por dia (por volta das 06h de Brasília): a campanha sai nesse ciclo,
                     depois do horário marcado. Para enviar na hora, use "Imediato".

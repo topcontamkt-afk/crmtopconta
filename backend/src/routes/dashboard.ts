@@ -1,5 +1,6 @@
 import { buildMelhorouCaiu } from "../services/insights";
 import { avaliarCidades } from "../services/cidadeDesempenho";
+import { construirHorarios, estimarAntecedencia, sugerirHorario } from "../services/horarioUso";
 import { cidadeKeySql, SEM_CIDADE } from "../services/cidades";
 import { cicloInfo } from "../services/ciclos";
 
@@ -1053,6 +1054,114 @@ router.get("/cidades-desempenho", async (req, res) => {
   );
   const frescor = avaliarFrescor(new Date(`${ultimo}T12:00:00-03:00`));
   res.json({ disponivel: true, motivo: null, ultimoDiaExtrato: ultimo, diasDefasagem: frescor.diasDefasagem, extratoEmDia: frescor.status === "OK", ...resultado });
+});
+
+/**
+ * GET /api/dashboard/horarios — quando os clientes usam o cartão (hora de Brasília, pelo extrato) e o
+ * horário de envio sugerido por segmento (ver services/horarioUso.ts). `tipo`: antecipacao (saque),
+ * compra ou todos; `por`: perfil (PF1–PF4), cidade ou nenhum. A janela termina no último dia do extrato.
+ * A antecedência é medida pelo tempo entre o envio e o 1º uso; sem amostra, usa o padrão e avisa.
+ */
+const horariosQuerySchema = z.object({
+  dias: z.coerce.number().int().min(7).max(365).default(90),
+  tipo: z.enum(["antecipacao", "compra", "todos"]).default("todos"),
+  por: z.enum(["perfil", "cidade", "nenhum"]).default("perfil"),
+});
+const TIPO_USO_SQL = {
+  antecipacao: `p."tipo" ~* '^\\s*d[eé]bito\\s+pix'`,
+  compra: `p."tipo" ~* '^\\s*compra\\s+[àa]\\s+vista'`,
+  todos: USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"'),
+} as const;
+router.get("/horarios", async (req, res) => {
+  const parsed = horariosQuerySchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  const { dias, tipo, por } = parsed.data;
+  const { tenantId } = req.user!;
+
+  const [cobertura] = await tenantRaw.query<{ ultimo: string | null }[]>(
+    `SELECT to_char(max(("occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date), 'YYYY-MM-DD') AS ultimo FROM "Purchase" WHERE "tenantId" = $1`,
+    tenantId
+  );
+  const ultimo = cobertura?.ultimo ?? null;
+  if (!ultimo) return res.json({ disponivel: false, motivo: "SEM_EXTRATO" });
+
+  // Segmento de cada compra: perfil de renda pelo limite do cliente (mesmos cortes de rendaPerfil.ts),
+  // cidade (mesma regra de cidades.ts) ou todos juntos. Constantes do código, nunca entrada do usuário.
+  const segExpr =
+    por === "perfil"
+      ? `(CASE WHEN c."limiteTotal" <= 0 THEN 'SEM_LIMITE' WHEN c."limiteTotal" <= ${LIMITE_MAXIMO.PF1} THEN 'PF1' WHEN c."limiteTotal" <= ${LIMITE_MAXIMO.PF2} THEN 'PF2' WHEN c."limiteTotal" <= ${LIMITE_MAXIMO.PF3} THEN 'PF3' ELSE 'PF4' END)`
+      : por === "cidade"
+        ? cidadeKeySql('c."cidade"')
+        : `'todos'`;
+  const segClientes = segExpr.replace(/c\."/g, '"');
+  const cond = TIPO_USO_SQL[tipo];
+
+  const [linhas, clientes, atrasos, envios] = await Promise.all([
+    tenantRaw.query<{ hora: number; segmento: string; usos: number }[]>(
+      `SELECT EXTRACT(HOUR FROM (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo'))::int AS hora, ${segExpr} AS segmento, COUNT(*)::int AS usos
+       FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
+       WHERE p."tenantId" = $1 AND (${cond})
+         AND (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date BETWEEN $2::date - ($3::int - 1) AND $2::date
+       GROUP BY 1, 2`,
+      tenantId,
+      ultimo,
+      dias
+    ),
+    tenantRaw.query<{ key: string; label: string; clientes: number }[]>(
+      `SELECT ${segClientes} AS key, mode() WITHIN GROUP (ORDER BY "cidade") AS label, COUNT(*)::int AS clientes
+       FROM "Client" WHERE "tenantId" = $1 GROUP BY 1`,
+      tenantId
+    ),
+    // Minutos entre cada envio real e o 1º uso do cliente nas 24h seguintes (qualquer tipo de uso).
+    tenantRaw.query<{ minutos: number }[]>(
+      `SELECT EXTRACT(EPOCH FROM (u.primeiro - m."sentAt")) / 60.0 AS minutos
+       FROM "MessageEvent" m
+       JOIN "Campaign" cp ON cp.id = m."campaignId" AND cp."tenantId" = $1 AND cp."isSandbox" = false
+       JOIN LATERAL (
+         SELECT min(p."occurredAt") AS primeiro FROM "Purchase" p
+         WHERE p."tenantId" = $1 AND p."clientId" = m."clientId" AND ${TIPO_USO_SQL.todos}
+           AND p."occurredAt" > m."sentAt" AND p."occurredAt" <= m."sentAt" + interval '24 hours'
+       ) u ON u.primeiro IS NOT NULL
+       WHERE m."clientId" IS NOT NULL AND m."sentAt" IS NOT NULL AND m.status::text <> 'CONTROLE'
+       LIMIT 5000`,
+      tenantId
+    ),
+    tenantRaw.query<{ hora: number; n: number }[]>(
+      `SELECT EXTRACT(HOUR FROM (m."sentAt" AT TIME ZONE 'America/Sao_Paulo'))::int AS hora, COUNT(*)::int AS n
+       FROM "MessageEvent" m JOIN "Campaign" cp ON cp.id = m."campaignId" AND cp."tenantId" = $1 AND cp."isSandbox" = false
+       WHERE m."sentAt" IS NOT NULL AND m.status::text <> 'CONTROLE' GROUP BY 1`,
+      tenantId
+    ),
+  ]);
+
+  const rotulo = (key: string, label: string) => {
+    if (por === "perfil") return key === "SEM_LIMITE" ? "Sem limite (comércio)" : PERFIL_LABELS[key as keyof typeof PERFIL_LABELS] ?? key;
+    if (por === "cidade") return key === SEM_CIDADE ? "Sem cidade" : label;
+    return "Todos os clientes";
+  };
+  const segmentosBase = clientes
+    .filter((c) => !(por === "perfil" && c.key === "SEM_LIMITE") && !(por === "cidade" && c.key === SEM_CIDADE))
+    .map((c) => ({ key: c.key, label: rotulo(c.key, c.label), clientes: c.clientes }))
+    .sort((a, b) => b.clientes - a.clientes);
+  const { total, usosTotal, segmentos } = construirHorarios(linhas, segmentosBase);
+  const antecedencia = estimarAntecedencia(atrasos.map((a) => Number(a.minutos)));
+  const enviosPorHora = new Array<number>(24).fill(0);
+  for (const e of envios) if (e.hora >= 0 && e.hora < 24) enviosPorHora[e.hora] = e.n;
+  const frescor = avaliarFrescor(new Date(`${ultimo}T12:00:00-03:00`));
+  const picoGeral = usosTotal >= 30 ? total.indexOf(Math.max(...total)) : null;
+
+  res.json({
+    disponivel: true,
+    periodo: { ate: ultimo, dias },
+    tipo,
+    por,
+    extratoEmDia: frescor.status === "OK",
+    diasDefasagem: frescor.diasDefasagem,
+    total: { usos: usosTotal, porHora: total, picoHora: picoGeral, sugestao: picoGeral === null ? null : sugerirHorario(picoGeral, antecedencia, usosTotal) },
+    segmentos: segmentos.map((sg) => ({ ...sg, sugestao: sg.picoHora === null ? null : sugerirHorario(sg.picoHora, antecedencia, sg.usos) })),
+    antecedencia,
+    envios: { total: enviosPorHora.reduce((a, b) => a + b, 0), porHora: enviosPorHora },
+  });
 });
 
 /**

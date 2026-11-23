@@ -175,7 +175,13 @@ antecipação ou compra à vista, ÷ clientes com limite) nos 30 dias contra os 
 Atenção = queda ≥ 5 p.p. ou taxa < metade da mediana; destaque = alta ≥ 3 p.p. e acima da mediana; < 30 clientes ou < 30 usos = poucos dados (nunca destaque/atenção). `GET /api/dashboard/cidades-desempenho`
 (SQL via `tenantRaw`, "Sem cidade" fora) devolve cidades, `emDestaque`, `precisaAtencao` (maior número de clientes em jogo), mediana e o frescor do extrato; a atenção com ciclo abrindo em ≤ 7 dias ganha o botão de
 campanha de abertura (`/ciclos/audiencia`). Tela: `CidadesDesempenhoCard.tsx` (só sem filtro de cidade/convênio).
-Plano: 4 uso por hora e horário sugerido, 5 financeiro/metas, convênios, frescor e risco.
+**Fase 4 (horário de disparo):** `services/horarioUso.ts` (puro, testado) agrupa os usos do extrato (antecipação e/ou compra à vista) por **hora de Brasília** e por segmento (perfil PF1–PF4 pelo limite, cidade ou todos),
+acha o pico (empate: a hora mais cedo; segmento com < 30 usos = "poucos dados") e sugere o envio = início da hora de pico − antecedência, arredondado a 5 min e mantido na **janela de 7h às 21h** (`ajustadoPelaJanela`).
+A **antecedência** é medida: minutos entre cada envio real (sem sandbox/controle) e o 1º uso do cliente nas 24h seguintes; com menos de 30 amostras cai no padrão de 30 min e a confiança nunca passa de "baixa" — sem
+envios em horários variados não há como saber o melhor horário de ENVIO, só o de uso (a tela avisa e recomenda dividir o público em 2–3 horários com grupo de controle). `GET /api/dashboard/horarios?dias=&tipo=&por=`
+(janela termina no último dia do extrato). Tela `/campaigns/horarios` (`HorariosEnvio.tsx`, botão "Melhor horário" em Campanhas) e dica "Usar sugestão" no passo Agendamento do assistente. Observação: no plano Hobby o disparo
+roda 1x/dia (~06h), então o horário sugerido só vale à risca com cron mais frequente ou disparo manual. As consultas SQL das fases 3 e 4 foram validadas contra um Postgres local descartável com dados de teste.
+Plano: 5 financeiro/metas, convênios, frescor e risco.
 
 ### Campanha manual (lista de planilha)
 
