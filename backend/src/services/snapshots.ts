@@ -4,6 +4,7 @@ import { loadRealHealth } from "./healthData";
 import { refreshUsageColumns } from "./usageRefresh";
 import { refreshCicloColumns } from "./cicloRefresh";
 import { addDays, computeKpis, todayBrt } from "./dashboardMetrics";
+import { computeOpportunities } from "./opportunities";
 
 /**
  * Histórico diário dos KPIs (DashboardSnapshot). Sem ele o dashboard só sabe o "agora" — com ele
@@ -26,7 +27,17 @@ export async function captureSnapshot(prisma: AppPrismaClient, tenantId: string,
 
   const real = await loadRealHealth(prisma, tenantId, {}, kpis.bloqueados, kpis.totalClientes).catch(() => null);
 
+  // Contagem de cada oportunidade do dia: sem isso a fila não tem como mostrar tendência (o passado
+  // não é reconstruível). Falha aqui não pode impedir a foto dos KPIs.
+  const oportunidades = await computeOpportunities(prisma, tenantId)
+    .then((o) => Object.fromEntries(o.itens.filter((i) => i.n !== null).map((i) => [i.key, i.n as number])))
+    .catch((e) => {
+      console.error(`[snapshots] oportunidades do tenant ${tenantId}:`, e);
+      return null;
+    });
+
   const data = {
+    oportunidades: oportunidades ?? undefined,
     healthScore: real?.real?.score ?? null,
     totalClientes: kpis.totalClientes,
     ativos: kpis.ativos,

@@ -158,6 +158,16 @@ que a tabela foi criada e não é reconstruível. Com filtro de cidade/convênio
 ficam indisponíveis (a foto é da base inteira). A nota de saúde (`services/health.ts`) tem pesos e
 metas fixos e é testada em `health.test.ts`. O SQL da tabela está em `backend/prisma/sql/`.
 
+### Insights: o que melhorou e o que caiu (fase 1)
+
+`services/insights.ts` (puro, testado em `insights.test.ts`) compara a foto de hoje com a mais antiga da janela e devolve `melhorou`/`caiu`, cada item com variação,
+leitura, ação sugerida, prioridade (1–5) e confiança (histórico + tamanho da base). Taxas (ativos, inativos, nunca usaram, sem limite) são comparadas em **pontos percentuais
+sobre o total**, nunca em contagem bruta; cada métrica tem variação mínima e a base precisa de 30+ clientes. "Uso do limite" exige 3 p.p. porque oscila com o ciclo da folha; a nota só entra
+quando os dois lados têm o mesmo modelo. `GET /api/dashboard/overview` devolve `melhorouCaiu` (null com filtro de cidade/convênio ou sem histórico anterior a hoje);
+tela: `components/MelhorouCaiuCard.tsx`. `DashboardSnapshot.oportunidades` (JSON `{chave: contagem}`) passa a ser gravado por dia para a tendência da fila de oportunidades (fase 2);
+o histórico começa no dia em que a coluna existir. SQL: `backend/prisma/sql/2026-11-insights-oportunidades.sql` (rodar antes do deploy: o upsert do snapshot escreve a coluna).
+Plano: fase 2 oportunidades com tendência, 3 cidades em destaque/atenção, 4 uso por hora e horário sugerido, 5 financeiro/metas, convênios, frescor e risco.
+
 ### Campanha manual (lista de planilha)
 
 Tela `/campaigns/manual` (botão "Campanha por planilha"): sobe `.xlsx`/`.csv` (lido no navegador com `read-excel-file`, linhas vão em JSON, até 5000) com nome,
