@@ -212,7 +212,11 @@ sobre o total**, nunca em contagem bruta; cada métrica tem variação mínima e
 quando os dois lados têm o mesmo modelo. `GET /api/dashboard/overview` devolve `melhorouCaiu` (null com filtro de cidade/convênio ou sem histórico anterior a hoje);
 tela: `components/MelhorouCaiuCard.tsx`. `DashboardSnapshot.oportunidades` (JSON `{chave: contagem}`) passa a ser gravado por dia para a tendência da fila de oportunidades (fase 2);
 o histórico começa no dia em que a coluna existir. SQL: `backend/prisma/sql/2026-11-insights-oportunidades.sql` (rodar antes do deploy: o upsert do snapshot escreve a coluna).
-Plano: fase 2 oportunidades com tendência, 3 cidades em destaque/atenção, 4 uso por hora e horário sugerido, 5 financeiro/metas, convênios, frescor e risco.
+**Fase 2 (tendência da fila):** `services/oportunidadeTendencia.ts` (puro, testado) compara o público de cada oportunidade e de cada faixa de uso com a foto mais antiga da janela de 30 dias
+(`DashboardSnapshot.oportunidades`, que agora guarda também as faixas `uso_*`). Estável = menos de 3% ou 5 clientes. O **efeito** (melhora/piora/neutro) vem do tipo do público: crescer só é "piora" em
+problema (inativos, nunca usaram, uso muito baixo, sem limite/cidade, validade); públicos de potencial (uso alto, comércio, aniversariantes) são neutros. `GET /api/dashboard/oportunidades` devolve `tendencia`
+em cada item/faixa (null sem histórico ou com filtro de cidade/convênio) e `historicoDisponivel`; falha ao ler o histórico não derruba a fila. Tela: `TendenciaPill` em `OpportunityQueue.tsx`.
+Plano: 3 cidades em destaque/atenção, 4 uso por hora e horário sugerido, 5 financeiro/metas, convênios, frescor e risco.
 
 ### Campanha manual (lista de planilha)
 

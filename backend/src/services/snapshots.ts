@@ -30,7 +30,7 @@ export async function captureSnapshot(prisma: AppPrismaClient, tenantId: string,
   // Contagem de cada oportunidade do dia: sem isso a fila não tem como mostrar tendência (o passado
   // não é reconstruível). Falha aqui não pode impedir a foto dos KPIs.
   const oportunidades = await computeOpportunities(prisma, tenantId)
-    .then((o) => Object.fromEntries(o.itens.filter((i) => i.n !== null).map((i) => [i.key, i.n as number])))
+    .then((o) => Object.fromEntries([...o.itens.filter((i) => i.n !== null).map((i) => [i.key, i.n as number]), ...o.faixas.map((b) => [b.key, b.n])]))
     .catch((e) => {
       console.error(`[snapshots] oportunidades do tenant ${tenantId}:`, e);
       return null;
