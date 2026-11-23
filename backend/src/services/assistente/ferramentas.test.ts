@@ -83,7 +83,9 @@ describe("executarFerramenta", () => {
     expect(out.total).toBe(42);
     expect(out.grupos).toEqual([{ valor: "Natal", clientes: 30 }, { valor: "(vazio)", clientes: 12 }]);
     expect(out.linkLista).toBe("/clients?cidade=Natal&statusConta=INATIVO");
-    expect(((prisma.client.count as jest.Mock).mock.calls[0][0] as any).where.tenantId).toBe("t1");
+    const where = ((prisma.client.count as jest.Mock).mock.calls[0][0] as any).where;
+    expect(where.AND[0].tenantId).toBe("t1");
+    expect(where.AND[1]).toEqual({ anonymizedAt: null }); // LGPD: anonimizados ficam fora de toda contagem
   });
 
   it("contar_clientes: filtro composto não gera link de lista", async () => {

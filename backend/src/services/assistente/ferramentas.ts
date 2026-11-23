@@ -156,7 +156,7 @@ export async function dadosCampanhas(tenantId: string, limite: number) {
       for (const g of porStatus) if (g.campaignId === c.id) s[String(g.status).toLowerCase()] = g._count._all;
       const enviados = (s.enviado ?? 0) + (s.entregue ?? 0) + (s.lido ?? 0) + (s.respondido ?? 0);
       return {
-        nome: c.name, canal: c.channel, situacao: c.status, criadaEm: c.createdAt.toISOString().slice(0, 10), publico: c.audienceCount,
+        campanha: c.name, canal: c.channel, situacao: c.status, criadaEm: c.createdAt.toISOString().slice(0, 10), publico: c.audienceCount,
         mensagensPorSituacao: s, enviadasOuAlem: enviados, convertidas: conv.get(c.id) ?? 0,
       };
     }),
@@ -200,7 +200,8 @@ export const FERRAMENTAS: Ferramenta[] = [
     entrada: entradaContar,
     executar: async (ctx, e: z.infer<typeof entradaContar>) => {
       const { agruparPor, ...filtros } = e;
-      const where = buildSegmentWhere(ctx.tenantId, filtros as SegmentFilters);
+      // LGPD: cliente anonimizado fica fora de toda contagem (como no dashboard).
+      const where = { AND: [buildSegmentWhere(ctx.tenantId, filtros as SegmentFilters), { anonymizedAt: null }] };
       const total = await prisma.client.count({ where });
       const grupos = agruparPor
         ? (
