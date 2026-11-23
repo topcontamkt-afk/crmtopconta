@@ -69,6 +69,54 @@ describe("parametrosDaChamada", () => {
   });
 });
 
+describe("plano B quando a API recusa parâmetros opcionais", () => {
+  it("parâmetros simples não levam cache, esforço nem fallback, mas mantêm ferramentas e instruções", () => {
+    const p: any = parametrosDaChamada("claude-opus-5-5", [], false, true);
+    expect(p).not.toHaveProperty("cache_control");
+    expect(p).not.toHaveProperty("output_config");
+    expect(p).not.toHaveProperty("fallbacks");
+    expect(p).not.toHaveProperty("betas");
+    expect(p.tools.length).toBeGreaterThan(5);
+    expect(p.system).toBe(INSTRUCOES_ASSISTENTE);
+  });
+
+  it("erro 400 na 1ª chamada: repete sem os opcionais, responde, e segue simples nas chamadas seguintes", async () => {
+    exec.mockResolvedValue({ ok: true, conteudo: "{}" });
+    const chamadas: any[] = [];
+    const respostas: any[] = [usaFerramenta("a", "resumo_base"), texto("Resposta final.")];
+    const create = jest.fn(async (params: any) => {
+      chamadas.push(JSON.parse(JSON.stringify(params)));
+      if (chamadas.length === 1) throw Object.assign(new Error("400 fallbacks: Extra inputs are not permitted"), { status: 400 });
+      return respostas.shift();
+    });
+    jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    const r = await responder({ mensagens: [{ role: "user", content: "x" }], ctx, cliente: { beta: { messages: { create } } } });
+    expect(r.resposta).toBe("Resposta final.");
+    expect(chamadas).toHaveLength(3);
+    expect(chamadas[0]).toHaveProperty("fallbacks");
+    expect(chamadas[1]).not.toHaveProperty("fallbacks");
+    expect(chamadas[2]).not.toHaveProperty("fallbacks"); // continua simples
+    expect(console.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("se a versão simples também for recusada, o erro sobe (não fica em laço)", async () => {
+    const create = jest.fn(async () => {
+      throw Object.assign(new Error("400 mensagens inválidas"), { status: 400 });
+    });
+    jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    await expect(responder({ mensagens: [{ role: "user", content: "x" }], ctx, cliente: { beta: { messages: { create } } } })).rejects.toThrow(/400/);
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it("erros que não são 400 (rede, limite) não disparam o plano B", async () => {
+    const create = jest.fn(async () => {
+      throw Object.assign(new Error("429"), { status: 429 });
+    });
+    await expect(responder({ mensagens: [{ role: "user", content: "x" }], ctx, cliente: { beta: { messages: { create } } } })).rejects.toThrow("429");
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("responder", () => {
   it("pergunta -> ferramenta -> resposta; resultados num só turno e histórico só anexado", async () => {
     exec.mockResolvedValue({ ok: true, conteudo: '{"total":42}' });

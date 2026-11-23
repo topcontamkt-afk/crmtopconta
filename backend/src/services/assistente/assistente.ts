@@ -41,19 +41,22 @@ export interface ClienteIA {
 /** Modelos com `fallbacks` do lado do servidor (recusa por classificador de segurança cai num modelo de reserva). */
 const COM_FALLBACK = /^claude-(opus-5|sonnet-5-5|fable|mythos)/;
 
-export function parametrosDaChamada(modelo: string, messages: unknown[], ultimoPasso: boolean): Record<string, unknown> {
+/**
+ * Parâmetros da chamada. `simples` tira os recursos opcionais (cache de prompt, fallback do servidor, esforço): é o plano B
+ * quando a API recusa algum deles, para o assistente continuar respondendo.
+ */
+export function parametrosDaChamada(modelo: string, messages: unknown[], ultimoPasso: boolean, simples = false): Record<string, unknown> {
   return {
     model: modelo,
     max_tokens: MAX_TOKENS_RESPOSTA,
     // Sem `thinking`: nos modelos atuais o raciocínio adaptativo já vem ligado. Sem temperature/top_p (removidos).
-    output_config: { effort: "medium" },
-    cache_control: { type: "ephemeral" },
+    ...(simples ? {} : { output_config: { effort: "medium" }, cache_control: { type: "ephemeral" } }),
     system: INSTRUCOES_ASSISTENTE,
     tools: FERRAMENTAS.map((f) => ({ name: f.nome, description: f.descricao, input_schema: f.inputSchema })),
     // No último passo permitido, sem ferramentas: o modelo tem de responder com o que já reuniu.
     ...(ultimoPasso ? { tool_choice: { type: "none" } } : {}),
     messages,
-    ...(COM_FALLBACK.test(modelo) ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" } : {}),
+    ...(!simples && COM_FALLBACK.test(modelo) ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" } : {}),
   };
 }
 
@@ -85,9 +88,22 @@ export async function responder(params: {
     return { resposta, ferramentas: chamadas, uso, modelo, fim, avisos };
   };
 
+  // Se a API recusar (400) os recursos opcionais, repete uma vez sem eles e segue assim até o fim da conversa.
+  let simples = false;
+  const chamar = async (ultimo: boolean) => {
+    try {
+      return await cliente.beta.messages.create(parametrosDaChamada(modelo, messages, ultimo, simples));
+    } catch (e: any) {
+      if (simples || e?.status !== 400) throw e;
+      simples = true;
+      console.warn("[assistente] a API recusou parâmetros opcionais; repetindo sem eles:", String(e?.message ?? e).slice(0, 300));
+      return await cliente.beta.messages.create(parametrosDaChamada(modelo, messages, ultimo, true));
+    }
+  };
+
   for (let passo = 0; passo < MAX_PASSOS; passo++) {
     const ultimo = passo === MAX_PASSOS - 1;
-    const resp = await cliente.beta.messages.create(parametrosDaChamada(modelo, messages, ultimo));
+    const resp = await chamar(ultimo);
     uso.entrada += resp.usage?.input_tokens ?? 0;
     uso.saida += resp.usage?.output_tokens ?? 0;
     uso.cacheLeitura += resp.usage?.cache_read_input_tokens ?? 0;
