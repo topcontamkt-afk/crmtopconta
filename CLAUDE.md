@@ -216,7 +216,12 @@ o histórico começa no dia em que a coluna existir. SQL: `backend/prisma/sql/20
 (`DashboardSnapshot.oportunidades`, que agora guarda também as faixas `uso_*`). Estável = menos de 3% ou 5 clientes. O **efeito** (melhora/piora/neutro) vem do tipo do público: crescer só é "piora" em
 problema (inativos, nunca usaram, uso muito baixo, sem limite/cidade, validade); públicos de potencial (uso alto, comércio, aniversariantes) são neutros. `GET /api/dashboard/oportunidades` devolve `tendencia`
 em cada item/faixa (null sem histórico ou com filtro de cidade/convênio) e `historicoDisponivel`; falha ao ler o histórico não derruba a fila. Tela: `TendenciaPill` em `OpportunityQueue.tsx`.
-Plano: 3 cidades em destaque/atenção, 4 uso por hora e horário sugerido, 5 financeiro/metas, convênios, frescor e risco.
+**Fase 3 (cidades):** `services/cidadeDesempenho.ts` (puro, testado) classifica cada cidade em destaque/estável/observar/atenção/poucos dados pela **taxa de uso** (clientes distintos que usaram,
+antecipação ou compra à vista, ÷ clientes com limite) nos 30 dias contra os 30 anteriores, com as janelas terminando no **último dia do extrato** (não em hoje: extrato parado faria todas parecerem em queda).
+Atenção = queda ≥ 5 p.p. ou taxa < metade da mediana; destaque = alta ≥ 3 p.p. e acima da mediana; < 30 clientes ou < 30 usos = poucos dados (nunca destaque/atenção). `GET /api/dashboard/cidades-desempenho`
+(SQL via `tenantRaw`, "Sem cidade" fora) devolve cidades, `emDestaque`, `precisaAtencao` (maior número de clientes em jogo), mediana e o frescor do extrato; a atenção com ciclo abrindo em ≤ 7 dias ganha o botão de
+campanha de abertura (`/ciclos/audiencia`). Tela: `CidadesDesempenhoCard.tsx` (só sem filtro de cidade/convênio).
+Plano: 4 uso por hora e horário sugerido, 5 financeiro/metas, convênios, frescor e risco.
 
 ### Campanha manual (lista de planilha)
 

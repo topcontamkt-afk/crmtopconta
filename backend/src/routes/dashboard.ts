@@ -4,6 +4,10 @@ import { janelaCoberta, janelasDoCiclo } from "../services/cicloReport";
 import { antecipacaoSql, diaBrt, usoRealSql } from "../config/sql";
 import { faixaAdesao, faltamParaMeta, META_ADESAO, periodoAnterior, preencheDias, resolvePeriodo, taxaAdesao, variacaoPct, variacaoPontos } from "../services/usoPeriodo";
 import { buildMelhorouCaiu } from "../services/insights";
+import { avaliarCidades } from "../services/cidadeDesempenho";
+import { cidadeKeySql, SEM_CIDADE } from "../services/cidades";
+import { cicloInfo } from "../services/ciclos";
+
 import { JANELA_PADRAO_DIAS, tendenciaDe } from "../services/oportunidadeTendencia";
 import { avaliarFrescor, mensagemFrescor } from "../services/dataFreshness";
 import { ETAPA_CASE_SQL } from "../services/etapaUso";
@@ -1281,6 +1285,73 @@ router.get("/oportunidades", async (req, res) => {
     faixas: result.faixas.map((b) => ({ ...b, tendencia: tendenciaDe(b.key, b.n, historico, hoje) })),
     itens: result.itens.map((i) => ({ ...i, tendencia: i.n === null ? null : tendenciaDe(i.key, i.n, historico, hoje) })),
   });
+});
+
+/**
+ * GET /api/dashboard/cidades-desempenho — qual cidade se destaca e qual precisa de atenção (ver
+ * services/cidadeDesempenho.ts). Uso pelo extrato (antecipação + compra à vista) nos últimos 30 dias
+ * contra os 30 anteriores, com as janelas terminando no último dia do extrato.
+ */
+router.get("/cidades-desempenho", async (req, res) => {
+  const { tenantId } = req.user!;
+  const [cobertura] = await tenantRaw.query<{ ultimo: string | null }[]>(
+    `SELECT to_char(max(("occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date), 'YYYY-MM-DD') AS ultimo FROM "Purchase" WHERE "tenantId" = $1`,
+    tenantId
+  );
+  const ultimo = cobertura?.ultimo ?? null;
+  if (!ultimo) return res.json({ disponivel: false, motivo: "SEM_EXTRATO", ultimoDiaExtrato: null, diasDefasagem: null, cidades: [], emDestaque: null, precisaAtencao: null, mediana: null });
+
+  const tipo = USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"');
+  const [uso, clientes, ciclos] = await Promise.all([
+    tenantRaw.query<{ key: string; usaramAtual: number; usosAtual: number; usaramAnterior: number; usosAnterior: number }[]>(
+      `SELECT x.key,
+              COUNT(DISTINCT x."clientId") FILTER (WHERE x.d BETWEEN $2::date - 29 AND $2::date)::int AS "usaramAtual",
+              COUNT(*) FILTER (WHERE x.d BETWEEN $2::date - 29 AND $2::date)::int AS "usosAtual",
+              COUNT(DISTINCT x."clientId") FILTER (WHERE x.d BETWEEN $2::date - 59 AND $2::date - 30)::int AS "usaramAnterior",
+              COUNT(*) FILTER (WHERE x.d BETWEEN $2::date - 59 AND $2::date - 30)::int AS "usosAnterior"
+       FROM (
+         SELECT ${cidadeKeySql('c."cidade"')} AS key, p."clientId", (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d
+         FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
+         WHERE p."tenantId" = $1 AND ${tipo}
+       ) x
+       WHERE x.d BETWEEN $2::date - 59 AND $2::date
+       GROUP BY 1`,
+      tenantId,
+      ultimo
+    ),
+    tenantRaw.query<{ key: string; cidade: string; clientes: number; inativos: number }[]>(
+      `SELECT t.key, mode() WITHIN GROUP (ORDER BY t."cidade") AS cidade, COUNT(*)::int AS clientes,
+              COUNT(*) FILTER (WHERE t."statusConta"::text = 'INATIVO')::int AS inativos
+       FROM (SELECT ${cidadeKeySql('"cidade"')} AS key, "cidade", "statusConta" FROM "Client" WHERE "tenantId" = $1 AND "limiteTotal" > 0) t
+       GROUP BY 1`,
+      tenantId
+    ),
+    prisma.cicloCidade.findMany({ where: { tenantId }, select: { cidadeKey: true, diaAbertura: true } }),
+  ]);
+
+  const usoPorCidade = new Map(uso.map((u) => [u.key, u]));
+  const diaPorCidade = new Map(ciclos.map((c) => [c.cidadeKey, c.diaAbertura]));
+  const resultado = avaliarCidades(
+    clientes
+      .filter((c) => c.key !== SEM_CIDADE)
+      .map((c) => {
+        const u = usoPorCidade.get(c.key);
+        const dia = diaPorCidade.get(c.key);
+        return {
+          cidadeKey: c.key,
+          cidade: c.cidade,
+          clientes: c.clientes,
+          inativos: c.inativos,
+          usaramAtual: u?.usaramAtual ?? 0,
+          usaramAnterior: u?.usaramAnterior ?? 0,
+          usosAtual: u?.usosAtual ?? 0,
+          usosAnterior: u?.usosAnterior ?? 0,
+          abreEmDias: dia ? cicloInfo(dia).diasParaAbrir : null,
+        };
+      })
+  );
+  const frescor = avaliarFrescor(new Date(`${ultimo}T12:00:00-03:00`));
+  res.json({ disponivel: true, motivo: null, ultimoDiaExtrato: ultimo, diasDefasagem: frescor.diasDefasagem, extratoEmDia: frescor.status === "OK", ...resultado });
 });
 
 /**

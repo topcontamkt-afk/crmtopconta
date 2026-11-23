@@ -30,6 +30,7 @@ import OpportunityQueue from "../components/OpportunityQueue";
 import FrescorExtrato from "../components/FrescorExtrato";
 import PerfisRendaCard from "../components/PerfisRendaCard";
 import MelhorouCaiuCard, { MelhorouCaiu } from "../components/MelhorouCaiuCard";
+import CidadesDesempenhoCard from "../components/CidadesDesempenhoCard";
 import CiclosCard from "../components/CiclosCard";
 import UsoPeriodoCard from "../components/UsoPeriodoCard";
 import AdesaoCicloCard from "../components/AdesaoCicloCard";
@@ -324,6 +325,12 @@ export default function Dashboard() {
       <div className="pd-row">
         <OpportunityQueue cidade={cidade} convenio={convenio} />
       </div>
+
+      {!temFiltro && (
+        <div className="pd-row">
+          <CidadesDesempenhoCard />
+        </div>
+      )}
 
       <div className="pd-row">
         <CiclosCard />
