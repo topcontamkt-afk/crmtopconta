@@ -48,6 +48,7 @@ const RULES: Rule[] = [
   // Públicos / de uso geral: sem área (o papel e o login já protegem)
   { prefix: "/auth", areas: [] },
   { prefix: "/notifications", areas: [] },
+  { prefix: "/assistente", areas: [] }, // cada ferramenta do assistente confere a área do usuário (services/assistente/ferramentas.ts)
   { prefix: "/tenant", areas: [] },
   { prefix: "/users", areas: [] }, // só ADMIN (requireRole na rota)
   { prefix: "/cron", areas: [] },

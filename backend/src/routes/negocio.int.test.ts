@@ -282,6 +282,110 @@ describe("histórico: melhorou/caiu e tendência da fila (fases 1 e 2)", () => {
   });
 });
 
+describe("assistente de dados (pela API inteira, com o modelo simulado)", () => {
+  /** Modelo falso: no 1º passo pede TODAS as ferramentas de uma vez; no 2º responde. Guarda o que recebeu. */
+  function modeloQueUsaTodas(entradas: Record<string, object> = {}) {
+    const enviados: any[] = [];
+    let passo = 0;
+    const create = async (p: any) => {
+      enviados.push(JSON.parse(JSON.stringify(p)));
+      if (passo++ === 0) {
+        return {
+          stop_reason: "tool_use",
+          content: NOMES_FERRAMENTAS.map((nome, i) => ({ type: "tool_use", id: `t${i}`, name: nome, input: entradas[nome] ?? {} })),
+          usage: { input_tokens: 10, output_tokens: 5 },
+        };
+      }
+      return { stop_reason: "end_turn", content: [{ type: "text", text: "Resumo dos dados." }], usage: { input_tokens: 20, output_tokens: 8 } };
+    };
+    return { enviados, cliente: { beta: { messages: { create } } } };
+  }
+  const perguntar = (token: string) =>
+    request(app).post("/api/assistente").set("authorization", `Bearer ${token}`).send({ mensagens: [{ role: "user", content: "Faça um relatório do mês" }] });
+
+  // importados depois de definir o ambiente (o módulo de configuração falha sem JWT_SECRET)
+  let NOMES_FERRAMENTAS: string[] = [];
+  let _definirFabricaDeCliente: (f: () => any) => void = () => undefined;
+  beforeAll(async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-teste";
+    NOMES_FERRAMENTAS = (await import("../services/assistente/ferramentas")).NOMES_FERRAMENTAS;
+    _definirFabricaDeCliente = (await import("./assistente"))._definirFabricaDeCliente;
+  });
+
+  it("todas as ferramentas rodam no SQLite, e o modelo só recebe fatos: sem projeção, sem estimativa, sem dado pessoal", async () => {
+    const m = modeloQueUsaTodas({ contar_clientes: { cidade: ["Natal"], agruparPor: "statusConta" }, uso_por_hora: { tipo: "antecipacao", por: "cidade" } });
+    _definirFabricaDeCliente(() => m.cliente);
+    const r = await perguntar(admin);
+    expect(r.status).toBe(200);
+    expect(r.body.resposta).toBe("Resumo dos dados.");
+    expect(r.body.ferramentas).toHaveLength(NOMES_FERRAMENTAS.length);
+    expect(r.body.ferramentas.filter((c: any) => !c.ok)).toEqual([]);
+
+    const resultados: { tool_use_id: string; content: string; is_error: boolean }[] = m.enviados[1].messages[2].content;
+    expect(resultados).toHaveLength(NOMES_FERRAMENTAS.length);
+    expect(resultados.some((x) => x.is_error)).toBe(false);
+    const tudo = resultados.map((x) => x.content).join("\n");
+    // nada de projeção, estimativa, risco ou horário sugerido
+    expect(tudo).not.toMatch(/projecao|potencial10pct|clientesEmJogo|sugestao|lucroMensalEmRisco|"nota"|"nivel"/i);
+    // nada de dado pessoal: nomes e telefones semeados não aparecem
+    expect(tudo).not.toMatch(/Natal \d|Lagarto \d|Parado \d|Anonimizado|Sem Convenio|\+55849/);
+    // mas os fatos estão lá
+    const por = Object.fromEntries(resultados.map((x, i) => [NOMES_FERRAMENTAS[i], JSON.parse(x.content)]));
+    expect(por.resumo_base.totalClientes).toBeGreaterThan(100);
+    expect(por.contar_clientes).toMatchObject({ agrupadoPor: "statusConta" });
+    expect(por.contar_clientes.total).toBe(41); // Natal: 40 + "Sem Convenio"; o anonimizado fica de fora
+    expect(por.desempenho_cidades.cidades.find((c: any) => c.cidade === "Natal")).toMatchObject({ taxaUsoPct: expect.any(Number), variacaoPp: expect.any(Number) });
+    expect(por.desempenho_convenios.convenios.find((c: any) => c.convenio === "Prefeitura de Natal").lucroAtual).toBe(300);
+    expect(por.financeiro_mes.atual.lucro).toBeGreaterThanOrEqual(0);
+    expect(por.financeiro_mes.projecao).toBeUndefined();
+    expect(por.uso_por_hora.total.picoHora).toBe(10); // os 100 parados dominam o total (10h BRT)
+    expect(por.uso_por_hora.segmentos.find((x: any) => x.chave === "natal").picoHora).toBe(12);
+    expect(por.uso_por_hora.tempoMedidoEnvioAtePrimeiroUso).toMatchObject({ mediana_min: 40 });
+    expect(por.fontes_de_dados.fontes.length).toBeGreaterThan(3);
+    expect(por.campanhas_recentes.campanhas[0]).toMatchObject({ campanha: "Medição", enviadasOuAlem: 30 });
+    expect(JSON.stringify(por.campanhas_recentes)).not.toMatch(/Oi|messageTemplate/);
+  });
+
+  it("a pergunta só é auditada como metadado, sem o texto", async () => {
+    const m = modeloQueUsaTodas();
+    _definirFabricaDeCliente(() => m.cliente);
+    await perguntar(admin);
+    const logs = await runWithTenantContextAsync(tenantId, () => prisma.auditLog.findMany({ where: { action: "ASSISTENTE_PERGUNTA" } }));
+    expect(logs.length).toBeGreaterThan(0);
+    expect(JSON.stringify(logs)).not.toContain("relatório do mês");
+  });
+
+  it("acesso por área: quem só vê Base de clientes não recebe dados do Dashboard nem de Campanhas", async () => {
+    const { signToken } = await import("../middleware/auth");
+    const restrito = await runWithTenantContextAsync(tenantId, () =>
+      prisma.user.create({ data: { tenantId, name: "Restrito", email: "restrito@negocio.test", passwordHash: "x", role: "OPERATOR", areasRestritas: true, areas: ["clients"] } })
+    );
+    const m = modeloQueUsaTodas();
+    _definirFabricaDeCliente(() => m.cliente);
+    const r = await perguntar(signToken({ id: restrito.id, tenantId, role: "OPERATOR", email: restrito.email }));
+    expect(r.status).toBe(200);
+    const porNome = Object.fromEntries(r.body.ferramentas.map((c: any) => [c.nome, c.ok]));
+    expect(porNome.contar_clientes).toBe(true);
+    expect(porNome.financeiro_mes).toBe(false);
+    expect(porNome.desempenho_cidades).toBe(false);
+    expect(porNome.campanhas_recentes).toBe(false);
+    const negados = m.enviados[1].messages[2].content.filter((x: any) => x.is_error).map((x: any) => x.content);
+    expect(negados.every((t: string) => /perfil de acesso/.test(t))).toBe(true);
+  });
+
+  it("outro tenant só recebe os próprios números", async () => {
+    const { signToken } = await import("../middleware/auth");
+    const ou = await withCrossTenantAccess(() => prisma.user.create({ data: { tenantId: outroTenantId, name: "O2", email: "o2@negocio.test", passwordHash: "x", role: "ADMIN" } }));
+    const token = signToken({ id: ou.id, tenantId: outroTenantId, role: "ADMIN", email: ou.email });
+    const m = modeloQueUsaTodas();
+    _definirFabricaDeCliente(() => m.cliente);
+    await perguntar(token);
+    const resultados = m.enviados[1].messages[2].content;
+    const resumo = JSON.parse(resultados[NOMES_FERRAMENTAS.indexOf("resumo_base")].content);
+    expect(resumo.totalClientes).toBe(0);
+  });
+});
+
 describe("acesso por área e isolamento", () => {
   it("rotas novas exigem login e outro tenant não enxerga estes números", async () => {
     expect((await request(app).get("/api/negocio/convenios")).status).toBe(401);

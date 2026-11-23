@@ -37,6 +37,7 @@ import zapiWebhookRoutes from "./routes/zapiWebhook";
 import tenantWhatsappRoutes from "./routes/tenantWhatsapp";
 import titularRoutes from "./routes/titular";
 import negocioRoutes from "./routes/negocio";
+import assistenteRoutes from "./routes/assistente";
 
 /**
  * Criação do Express app, sem app.listen() nem inicialização do scheduler — para poder ser
@@ -103,6 +104,7 @@ app.use("/api/ciclos", cicloRoutes);
 app.use("/api/voice", voiceWebhook); // público (Twilio): só /twilio-status, validado por assinatura
 app.use("/api/voice", voiceRoutes);
 app.use("/api/negocio", negocioRoutes);
+app.use("/api/assistente", assistenteRoutes);
 // Equivalente HTTP do scheduler, para disparo via Vercel Cron Jobs em produção serverless
 // (ver src/services/scheduler.ts e routes/cron.ts).
 app.use("/api/cron", cronRoutes);

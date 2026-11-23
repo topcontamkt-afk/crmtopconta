@@ -1255,11 +1255,7 @@ router.get("/perfis-renda/:perfil", async (req, res) => {
  * comércio, relacionamento, qualidade dos dados e itens que dependem de histórico). Ver
  * services/opportunities.ts. Aceita os mesmos filtros de cidade/convênio do overview.
  */
-router.get("/oportunidades", async (req, res) => {
-  const parsed = filtersQuerySchema.safeParse(req.query);
-  if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
-  const { tenantId } = req.user!;
-  const filters = parsed.data;
+export async function dadosOportunidades(tenantId: string, filters: DashboardFilters) {
   const result = await computeOpportunities(prisma, tenantId, filters);
 
   // Tendência só para a base inteira: as fotos diárias não têm recorte por cidade/convênio.
@@ -1281,12 +1277,18 @@ router.get("/oportunidades", async (req, res) => {
           })
       ).map((s) => ({ day: s.day, valores: s.oportunidades as Record<string, number> | null }));
 
-  res.json({
+  return {
     ...result,
     historicoDisponivel: historico.some((h) => h.valores),
     faixas: result.faixas.map((b) => ({ ...b, tendencia: tendenciaDe(b.key, b.n, historico, hoje) })),
     itens: result.itens.map((i) => ({ ...i, tendencia: i.n === null ? null : tendenciaDe(i.key, i.n, historico, hoje) })),
-  });
+  };
+}
+
+router.get("/oportunidades", async (req, res) => {
+  const parsed = filtersQuerySchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  res.json(await dadosOportunidades(req.user!.tenantId, parsed.data));
 });
 
 /**
@@ -1295,14 +1297,13 @@ router.get("/oportunidades", async (req, res) => {
  * contra os 30 anteriores, com as janelas terminando no último dia do extrato. Dialeto do SQLite/D1:
  * dias de Brasília em texto, uso pela coluna `usoTipo` e a cidade pela chave gravada em `Client.cidadeKey`.
  */
-router.get("/cidades-desempenho", async (req, res) => {
-  const { tenantId } = req.user!;
+export async function dadosCidadesDesempenho(tenantId: string) {
   const [cobertura] = await tenantRaw.query<{ ultimo: string | null }[]>(
     `SELECT max(${diaBrt('"occurredAt"')}) AS ultimo FROM "Purchase" WHERE "tenantId" = $1`,
     tenantId
   );
   const ultimo = cobertura?.ultimo ?? null;
-  if (!ultimo) return res.json({ disponivel: false, motivo: "SEM_EXTRATO", ultimoDiaExtrato: null, diasDefasagem: null, cidades: [], emDestaque: null, precisaAtencao: null, mediana: null });
+  if (!ultimo) return ({ disponivel: false, motivo: "SEM_EXTRATO", ultimoDiaExtrato: null, diasDefasagem: null, cidades: [], emDestaque: null, precisaAtencao: null, mediana: null });
 
   const [uso, clientes, ciclos] = await Promise.all([
     tenantRaw.query<{ chave: string; usaramAtual: number; usosAtual: number; usaramAnterior: number; usosAnterior: number }[]>(
@@ -1356,8 +1357,10 @@ router.get("/cidades-desempenho", async (req, res) => {
       })
   );
   const frescor = avaliarFrescor(new Date(`${ultimo}T12:00:00-03:00`));
-  res.json({ disponivel: true, motivo: null, ultimoDiaExtrato: ultimo, diasDefasagem: frescor.diasDefasagem, extratoEmDia: frescor.status === "OK", ...resultado });
-});
+  return ({ disponivel: true, motivo: null, ultimoDiaExtrato: ultimo, diasDefasagem: frescor.diasDefasagem, extratoEmDia: frescor.status === "OK", ...resultado });
+}
+
+router.get("/cidades-desempenho", async (req, res) => res.json(await dadosCidadesDesempenho(req.user!.tenantId)));
 
 /**
  * GET /api/dashboard/horarios — quando os clientes usam o cartão (hora de Brasília, pelo extrato) e o
@@ -1375,18 +1378,14 @@ const TIPO_USO_SQL = {
   compra: `p."usoTipo" = 'COMPRA'`,
   todos: usoRealSql("p"),
 } as const;
-router.get("/horarios", async (req, res) => {
-  const parsed = horariosQuerySchema.safeParse(req.query);
-  if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
-  const { dias, tipo, por } = parsed.data;
-  const { tenantId } = req.user!;
-
+export type ParametrosHorarios = z.infer<typeof horariosQuerySchema>;
+export async function dadosHorarios(tenantId: string, { dias, tipo, por }: ParametrosHorarios) {
   const [cobertura] = await tenantRaw.query<{ ultimo: string | null }[]>(
     `SELECT max(${diaBrt('"occurredAt"')}) AS ultimo FROM "Purchase" WHERE "tenantId" = $1`,
     tenantId
   );
   const ultimo = cobertura?.ultimo ?? null;
-  if (!ultimo) return res.json({ disponivel: false, motivo: "SEM_EXTRATO" });
+  if (!ultimo) return ({ disponivel: false, motivo: "SEM_EXTRATO" });
 
   // Segmento: perfil de renda pelo limite do cliente (mesmos cortes de rendaPerfil.ts), cidade (chave gravada) ou todos.
   // `a` é o prefixo da coluna ("c." na consulta de compras, "" na de clientes). Constantes do código, nunca entrada do usuário.
@@ -1453,7 +1452,7 @@ router.get("/horarios", async (req, res) => {
   const frescor = avaliarFrescor(new Date(`${ultimo}T12:00:00-03:00`));
   const picoGeral = usosTotal >= 30 ? total.indexOf(Math.max(...total)) : null;
 
-  res.json({
+  return ({
     disponivel: true,
     periodo: { ate: ultimo, dias },
     tipo,
@@ -1465,6 +1464,12 @@ router.get("/horarios", async (req, res) => {
     antecedencia,
     envios: { total: enviosPorHora.reduce((a, b) => a + b, 0), porHora: enviosPorHora },
   });
+}
+
+router.get("/horarios", async (req, res) => {
+  const parsed = horariosQuerySchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "Parâmetros inválidos" });
+  res.json(await dadosHorarios(req.user!.tenantId, parsed.data));
 });
 
 /**

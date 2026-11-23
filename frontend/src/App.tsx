@@ -23,6 +23,7 @@ import {
   Building2,
   PiggyBank,
   ShieldAlert,
+  Bot,
 } from "lucide-react";
 import { useAuth, type AuthUser } from "./context/AuthContext";
 import Login from "./pages/Login";
@@ -39,6 +40,7 @@ import HorariosEnvio from "./pages/campaigns/HorariosEnvio";
 import Convenios from "./pages/Convenios";
 import Financeiro from "./pages/Financeiro";
 import Risco from "./pages/Risco";
+import Assistente from "./pages/Assistente";
 import Integrations from "./pages/Integrations";
 import Automations from "./pages/Automations";
 import AuditLog from "./pages/AuditLog";
@@ -132,6 +134,7 @@ function Layout({ children }: { children: JSX.Element }) {
       items: [
         { id: "dashboard", title: "Dashboard", icon: LayoutDashboard, path: "/" },
         { id: "search", title: "Buscar", icon: Search, shortcut: "⌘K" },
+        { id: "assistente", title: "Assistente IA", icon: Bot, path: "/assistente" },
       ],
     },
     {
@@ -277,6 +280,7 @@ export default function App() {
                 <Route path="/convenios" element={<Convenios />} />
                 <Route path="/financeiro" element={<Financeiro />} />
                 <Route path="/risco" element={<Risco />} />
+                <Route path="/assistente" element={<Assistente />} />
                 <Route path="/inbox" element={<Inbox />} />
                 <Route path="/perfis-renda/:perfil?" element={<PerfisRenda />} />
                 <Route
