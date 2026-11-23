@@ -31,6 +31,7 @@ import tenantRoutes from "./routes/tenant";
 import cronRoutes from "./routes/cron";
 import purchaseRoutes from "./routes/purchases";
 import cicloRoutes from "./routes/ciclos";
+import negocioRoutes from "./routes/negocio";
 
 /**
  * Criação do Express app, sem app.listen() nem inicialização do scheduler — para poder ser
@@ -89,6 +90,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/tenant", tenantRoutes);
 app.use("/api/purchases", purchaseRoutes);
 app.use("/api/ciclos", cicloRoutes);
+app.use("/api/negocio", negocioRoutes);
 // Equivalente HTTP do scheduler, para disparo via Vercel Cron Jobs em produção serverless
 // (ver src/services/scheduler.ts e routes/cron.ts).
 app.use("/api/cron", cronRoutes);

@@ -20,6 +20,9 @@ import {
   Search,
   Store,
   CalendarClock,
+  Building2,
+  PiggyBank,
+  ShieldAlert,
 } from "lucide-react";
 import { useAuth, type AuthUser } from "./context/AuthContext";
 import Login from "./pages/Login";
@@ -32,6 +35,9 @@ import CampaignWizard from "./pages/campaigns/CampaignWizard";
 import CampaignReport from "./pages/campaigns/CampaignReport";
 import CampaignWizardClassic from "./pages/campaigns/CampaignWizardClassic";
 import HorariosEnvio from "./pages/campaigns/HorariosEnvio";
+import Convenios from "./pages/Convenios";
+import Financeiro from "./pages/Financeiro";
+import Risco from "./pages/Risco";
 import Integrations from "./pages/Integrations";
 import Automations from "./pages/Automations";
 import AuditLog from "./pages/AuditLog";
@@ -111,6 +117,9 @@ function Layout({ children }: { children: JSX.Element }) {
         { id: "segments", title: "Segmentos", icon: Layers, path: "/segments" },
         { id: "commerce", title: "Comércio credenciado", icon: Store, path: "/commerce" },
         { id: "ciclos", title: "Ciclos das cidades", icon: CalendarClock, path: "/ciclos" },
+        { id: "convenios", title: "Convênios", icon: Building2, path: "/convenios" },
+        { id: "financeiro", title: "Financeiro", icon: PiggyBank, path: "/financeiro" },
+        { id: "risco", title: "Risco de abandono", icon: ShieldAlert, path: "/risco" },
       ],
     },
     {
@@ -232,6 +241,9 @@ export default function App() {
                 <Route path="/clients/:id" element={<ClientProfile />} />
                 <Route path="/segments" element={<Segments />} />
                 <Route path="/ciclos" element={<Ciclos />} />
+                <Route path="/convenios" element={<Convenios />} />
+                <Route path="/financeiro" element={<Financeiro />} />
+                <Route path="/risco" element={<Risco />} />
                 <Route path="/inbox" element={<Inbox />} />
                 <Route path="/perfis-renda/:perfil?" element={<PerfisRenda />} />
                 <Route

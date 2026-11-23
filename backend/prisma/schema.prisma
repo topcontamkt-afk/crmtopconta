@@ -103,6 +103,8 @@ model Tenant {
   custoMarketingUsd Decimal? @db.Decimal(10, 6)
   custoUtilidadeUsd Decimal? @db.Decimal(10, 6)
   cambioUsdBrl      Decimal? @db.Decimal(10, 4)
+  // Metas mensais da tela Financeiro: { lucro?: number (R$), usos?: number }. Nulo = sem meta.
+  metas             Json?
   createdAt         DateTime @default(now())
 
   users              User[]
