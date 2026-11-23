@@ -227,7 +227,15 @@ A **antecedência** é medida: minutos entre cada envio real (sem sandbox/contro
 envios em horários variados não há como saber o melhor horário de ENVIO, só o de uso (a tela avisa e recomenda dividir o público em 2–3 horários com grupo de controle). `GET /api/dashboard/horarios?dias=&tipo=&por=`
 (janela termina no último dia do extrato). Tela `/campaigns/horarios` (`HorariosEnvio.tsx`, botão "Melhor horário" em Campanhas) e dica "Usar sugestão" no passo Agendamento do assistente. Observação: no plano Hobby o disparo
 roda 1x/dia (~06h), então o horário sugerido só vale à risca com cron mais frequente ou disparo manual. As consultas SQL das fases 3 e 4 foram validadas contra um Postgres local descartável com dados de teste.
-Plano: 5 financeiro/metas, convênios, frescor e risco.
+**Fase 5 (visão de negócio, `routes/negocio.ts`, montada em `/api/negocio`):** (a) **Convênios** — `services/convenioDesempenho.ts` reaproveita a classificação das cidades (`cidadeDesempenho.ts`) por `empresaConveniada` (taxa de uso 30 dias contra os 30
+anteriores, janelas até o último dia do extrato) e soma o lucro (juros das antecipações) e o potencial = lucro por cliente que usou × 10% dos inativos (null com menos de 10 usuários). `GET /convenios`, tela `/convenios`. **Frescor das fontes** —
+`services/fontesFrescor.ts`: extrato (> 3 dias = desatualizado), planilha de contas (> 7 atenção, > 14 desatualizado), foto diária (> 1 atenção, > 3 desatualizado); último disparo e última mensagem recebida são só informativos (não ter campanha não é problema
+de dado). `GET /fontes`. (b) **Financeiro e metas** — `services/financeiro.ts`: o "mês" é o do **último dia do extrato**, comparado ao mês anterior **até o mesmo dia**; lucro = só juros de antecipação (compra à vista fica de fora, nunca
+conta como zero); semanas 1–7/8–14/15–21/22+; projeção linear do fechamento com confiança que cai com poucos dias de mês e com extrato parado (ignora que o uso se concentra na abertura do ciclo). Metas (lucro R$ e usos) em `Tenant.metas` (JSON),
+`PUT /metas` só ADMIN; `GET /financeiro`, tela `/financeiro`. SQL: `backend/prisma/sql/2026-11-metas.sql` (sem a coluna a tela mostra "metas indisponíveis"). O ROI por campanha continua só no relatório da própria campanha. (c) **Risco de abandono** —
+`services/riscoAbandono.ts`: nota 0–100 **por regras** (não é modelo estatístico) com cinco sinais e pesos fixos — atraso contra o intervalo normal do cliente (35; intervalo = 90 dias ÷ usos, padrão 30 sem 2 usos), queda de frequência (25), saldo parado já
+atrasado (15), ciclo da cidade aberto sem uso (15), campanhas sem resposta (10); cortes: alto ≥ 60, médio ≥ 35. Só pontua quem já usou e tem limite; "agora" = último dia do extrato; confiança baixa com extrato parado. `GET /risco` (telefone mascarado),
+`GET /risco/audiencia` (ids autorizados, até 5000, alimenta "Criar campanha com esta lista"); tela `/risco`. As consultas SQL desta fase foram validadas contra um Postgres local descartável com dados de teste.
 
 ### Campanha manual (lista de planilha)
 

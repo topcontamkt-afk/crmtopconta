@@ -99,6 +99,8 @@ model Tenant {
   custoMarketingUsd Decimal?
   custoUtilidadeUsd Decimal?
   cambioUsdBrl      Decimal?
+  // Metas mensais da tela Financeiro: { lucro?: number (R$), usos?: number }. Nulo = sem meta.
+  metas             Json?
   // Qual conexão de WhatsApp o sistema usa para ENVIAR (campanhas): META (oficial, com template) ou ZAPI
   // (não oficial, texto livre). Receber vale para as duas conectadas. Configurações → WhatsApp.
   whatsappProvider  String   @default("META")
