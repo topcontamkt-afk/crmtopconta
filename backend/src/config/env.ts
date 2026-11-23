@@ -40,6 +40,7 @@ const OPTIONAL_WARN_KEYS = [
   "TWILIO_AUTH_TOKEN",
   "TWILIO_FROM_NUMBER",
   "ANTHROPIC_API_KEY", // assistente de IA (services/assistente)
+  "OPENAI_API_KEY", // assistente de IA com GPT (opcional)
 ] as const;
 
 for (const key of OPTIONAL_WARN_KEYS) {

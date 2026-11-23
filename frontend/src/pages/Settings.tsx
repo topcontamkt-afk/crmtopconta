@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import WhatsAppProviderCard from "../components/WhatsAppProviderCard";
 import LgpdSettingsCard from "../components/LgpdSettingsCard";
+import AssistenteConfigCard from "../components/AssistenteConfigCard";
 
 interface TenantSettings {
   id: string;
@@ -64,6 +65,8 @@ export default function Settings() {
   return (
     <div>
       <h2>Configurações</h2>
+
+      {user?.role === "ADMIN" && <AssistenteConfigCard />}
 
       {user?.role === "ADMIN" && <WhatsAppProviderCard />}
 

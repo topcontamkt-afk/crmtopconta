@@ -126,6 +126,9 @@ model Tenant {
   mediaRetentionDays        Int       @default(90) // prazo das cópias de mídia do WhatsApp (04-02)
   correcaoManualVence       Boolean   @default(true) // correção feita no CRM não é sobrescrita pela planilha (03-03)
 
+  // Assistente de IA: { provedor: "anthropic" | "openai", modelo: string } escolhido em Configurações. Nulo = padrão do ambiente.
+  assistente        Json?
+
   createdAt DateTime @default(now())
 
   users              User[]

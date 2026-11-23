@@ -283,54 +283,55 @@ describe("histórico: melhorou/caiu e tendência da fila (fases 1 e 2)", () => {
 });
 
 describe("assistente de dados (pela API inteira, com o modelo simulado)", () => {
-  /** Modelo falso: no 1º passo pede TODAS as ferramentas de uma vez; no 2º responde. Guarda o que recebeu. */
+  /** Provedor falso: no 1º passo pede TODAS as ferramentas de uma vez; no 2º responde. Guarda o que recebeu. */
   function modeloQueUsaTodas(entradas: Record<string, object> = {}) {
-    const enviados: any[] = [];
+    const pedidos: any[] = [];
     let passo = 0;
-    const create = async (p: any) => {
-      enviados.push(JSON.parse(JSON.stringify(p)));
-      if (passo++ === 0) {
-        return {
-          stop_reason: "tool_use",
-          content: NOMES_FERRAMENTAS.map((nome, i) => ({ type: "tool_use", id: `t${i}`, name: nome, input: entradas[nome] ?? {} })),
-          usage: { input_tokens: 10, output_tokens: 5 },
-        };
-      }
-      return { stop_reason: "end_turn", content: [{ type: "text", text: "Resumo dos dados." }], usage: { input_tokens: 20, output_tokens: 8 } };
+    const uso = { entrada: 10, saida: 5, cacheLeitura: 0 };
+    const provedor = {
+      nome: "anthropic" as const,
+      responder: async (p: any) => {
+        pedidos.push(JSON.parse(JSON.stringify(p)));
+        if (passo++ === 0) {
+          return { texto: "", parou: "ferramentas", uso, chamadas: NOMES_FERRAMENTAS.map((nome, i) => ({ id: `t${i}`, nome, entrada: entradas[nome] ?? {} })) };
+        }
+        return { texto: "Resumo dos dados.", chamadas: [], parou: "fim", uso };
+      },
     };
-    return { enviados, cliente: { beta: { messages: { create } } } };
+    return { pedidos, provedor };
   }
   const perguntar = (token: string) =>
     request(app).post("/api/assistente").set("authorization", `Bearer ${token}`).send({ mensagens: [{ role: "user", content: "Faça um relatório do mês" }] });
 
   // importados depois de definir o ambiente (o módulo de configuração falha sem JWT_SECRET)
   let NOMES_FERRAMENTAS: string[] = [];
-  let _definirFabricaDeCliente: (f: () => any) => void = () => undefined;
+  let _definirFabricaDeProvedor: (f: (nome: string, apiKey: string) => any) => void = () => undefined;
   beforeAll(async () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-teste";
+    process.env.OPENAI_API_KEY = "sk-openai-teste";
     NOMES_FERRAMENTAS = (await import("../services/assistente/ferramentas")).NOMES_FERRAMENTAS;
-    _definirFabricaDeCliente = (await import("./assistente"))._definirFabricaDeCliente;
+    _definirFabricaDeProvedor = (await import("./assistente"))._definirFabricaDeProvedor;
   });
 
   it("todas as ferramentas rodam no SQLite, e o modelo só recebe fatos: sem projeção, sem estimativa, sem dado pessoal", async () => {
     const m = modeloQueUsaTodas({ contar_clientes: { cidade: ["Natal"], agruparPor: "statusConta" }, uso_por_hora: { tipo: "antecipacao", por: "cidade" } });
-    _definirFabricaDeCliente(() => m.cliente);
+    _definirFabricaDeProvedor(() => m.provedor);
     const r = await perguntar(admin);
     expect(r.status).toBe(200);
     expect(r.body.resposta).toBe("Resumo dos dados.");
     expect(r.body.ferramentas).toHaveLength(NOMES_FERRAMENTAS.length);
     expect(r.body.ferramentas.filter((c: any) => !c.ok)).toEqual([]);
 
-    const resultados: { tool_use_id: string; content: string; is_error: boolean }[] = m.enviados[1].messages[2].content;
+    const resultados: { id: string; conteudo: string; erro: boolean }[] = m.pedidos[1].turnos[2].itens;
     expect(resultados).toHaveLength(NOMES_FERRAMENTAS.length);
-    expect(resultados.some((x) => x.is_error)).toBe(false);
-    const tudo = resultados.map((x) => x.content).join("\n");
+    expect(resultados.some((x) => x.erro)).toBe(false);
+    const tudo = resultados.map((x) => x.conteudo).join("\n");
     // nada de projeção, estimativa, risco ou horário sugerido
     expect(tudo).not.toMatch(/projecao|potencial10pct|clientesEmJogo|sugestao|lucroMensalEmRisco|"nota"|"nivel"/i);
     // nada de dado pessoal: nomes e telefones semeados não aparecem
     expect(tudo).not.toMatch(/Natal \d|Lagarto \d|Parado \d|Anonimizado|Sem Convenio|\+55849/);
     // mas os fatos estão lá
-    const por = Object.fromEntries(resultados.map((x, i) => [NOMES_FERRAMENTAS[i], JSON.parse(x.content)]));
+    const por = Object.fromEntries(resultados.map((x, i) => [NOMES_FERRAMENTAS[i], JSON.parse(x.conteudo)]));
     expect(por.resumo_base.totalClientes).toBeGreaterThan(100);
     expect(por.contar_clientes).toMatchObject({ agrupadoPor: "statusConta" });
     expect(por.contar_clientes.total).toBe(41); // Natal: 40 + "Sem Convenio"; o anonimizado fica de fora
@@ -348,7 +349,7 @@ describe("assistente de dados (pela API inteira, com o modelo simulado)", () => 
 
   it("a pergunta só é auditada como metadado, sem o texto", async () => {
     const m = modeloQueUsaTodas();
-    _definirFabricaDeCliente(() => m.cliente);
+    _definirFabricaDeProvedor(() => m.provedor);
     await perguntar(admin);
     const logs = await runWithTenantContextAsync(tenantId, () => prisma.auditLog.findMany({ where: { action: "ASSISTENTE_PERGUNTA" } }));
     expect(logs.length).toBeGreaterThan(0);
@@ -361,7 +362,7 @@ describe("assistente de dados (pela API inteira, com o modelo simulado)", () => 
       prisma.user.create({ data: { tenantId, name: "Restrito", email: "restrito@negocio.test", passwordHash: "x", role: "OPERATOR", areasRestritas: true, areas: ["clients"] } })
     );
     const m = modeloQueUsaTodas();
-    _definirFabricaDeCliente(() => m.cliente);
+    _definirFabricaDeProvedor(() => m.provedor);
     const r = await perguntar(signToken({ id: restrito.id, tenantId, role: "OPERATOR", email: restrito.email }));
     expect(r.status).toBe(200);
     const porNome = Object.fromEntries(r.body.ferramentas.map((c: any) => [c.nome, c.ok]));
@@ -369,8 +370,59 @@ describe("assistente de dados (pela API inteira, com o modelo simulado)", () => 
     expect(porNome.financeiro_mes).toBe(false);
     expect(porNome.desempenho_cidades).toBe(false);
     expect(porNome.campanhas_recentes).toBe(false);
-    const negados = m.enviados[1].messages[2].content.filter((x: any) => x.is_error).map((x: any) => x.content);
+    const negados = m.pedidos[1].turnos[2].itens.filter((x: any) => x.erro).map((x: any) => x.conteudo);
     expect(negados.every((t: string) => /perfil de acesso/.test(t))).toBe(true);
+  });
+
+  it("provedor e modelo escolhidos em Configurações: só ADMIN grava, ficam na conta (SQLite) e a próxima pergunta usa a escolha", async () => {
+    const { signToken } = await import("../middleware/auth");
+    const usados: string[] = [];
+    const m = modeloQueUsaTodas();
+    _definirFabricaDeProvedor((nome: string) => {
+      usados.push(nome);
+      return m.provedor as any;
+    });
+    // VIEWER não enxerga nem altera
+    const putViewer = await request(app).put("/api/assistente/config").set("authorization", `Bearer ${viewer}`).send({ provedor: "openai", modelo: "gpt-4.1" });
+    expect(putViewer.status).toBe(403);
+    expect((await request(app).get("/api/assistente/config").set("authorization", `Bearer ${viewer}`)).status).toBe(403);
+    // ADMIN: sem escolha vale o padrão; depois grava
+    const antes = await request(app).get("/api/assistente/config").set("authorization", `Bearer ${admin}`);
+    expect(antes.body).toMatchObject({ provedor: "anthropic", origem: "padrao" });
+    expect(antes.body.provedores.map((p: any) => [p.nome, p.chaveConfigurada])).toEqual([["anthropic", true], ["openai", true]]);
+    expect(JSON.stringify(antes.body)).not.toMatch(/sk-ant|sk-openai/);
+    const put = await request(app).put("/api/assistente/config").set("authorization", `Bearer ${admin}`).send({ provedor: "openai", modelo: "gpt-4.1-mini" });
+    expect(put.status).toBe(200);
+    expect((await request(app).put("/api/assistente/config").set("authorization", `Bearer ${admin}`).send({ provedor: "openai", modelo: "gpt 4" })).status).toBe(400);
+    const guardado = await runWithTenantContextAsync(tenantId, () => prisma.tenant.findUnique({ where: { id: tenantId }, select: { assistente: true } }));
+    expect(guardado?.assistente).toEqual({ provedor: "openai", modelo: "gpt-4.1-mini" });
+    const status = await request(app).get("/api/assistente/status").set("authorization", `Bearer ${admin}`);
+    expect(status.body).toMatchObject({ provedor: "openai", modelo: "gpt-4.1-mini", configurado: true });
+    // qualquer usuário da conta pergunta com a escolha da conta
+    const r = await perguntar(admin);
+    expect(r.status).toBe(200);
+    expect(usados).toEqual(["openai"]);
+    expect(m.pedidos[0].modelo).toBe("gpt-4.1-mini");
+    expect(r.body).toMatchObject({ provedor: "anthropic" }); // o falso se declara anthropic; o que vale é o que a fábrica recebeu
+    // outro tenant não herda a escolha
+    const ou = await withCrossTenantAccess(() => prisma.user.create({ data: { tenantId: outroTenantId, name: "O3", email: "o3@negocio.test", passwordHash: "x", role: "ADMIN" } }));
+    const outro = await request(app).get("/api/assistente/config").set("authorization", `Bearer ${signToken({ id: ou.id, tenantId: outroTenantId, role: "ADMIN", email: ou.email })}`);
+    expect(outro.body).toMatchObject({ provedor: "anthropic", origem: "padrao" });
+  });
+
+  it("sem a chave do provedor escolhido a pergunta volta 503 e nada é consultado", async () => {
+    const guarda = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    let chamou = false;
+    _definirFabricaDeProvedor(() => {
+      chamou = true;
+      return modeloQueUsaTodas().provedor as any;
+    });
+    const r = await perguntar(admin); // a conta escolheu openai no teste anterior
+    expect(r.status).toBe(503);
+    expect(r.body.codigo).toBe("NAO_CONFIGURADO");
+    expect(chamou).toBe(false);
+    process.env.OPENAI_API_KEY = guarda;
   });
 
   it("outro tenant só recebe os próprios números", async () => {
@@ -378,10 +430,10 @@ describe("assistente de dados (pela API inteira, com o modelo simulado)", () => 
     const ou = await withCrossTenantAccess(() => prisma.user.create({ data: { tenantId: outroTenantId, name: "O2", email: "o2@negocio.test", passwordHash: "x", role: "ADMIN" } }));
     const token = signToken({ id: ou.id, tenantId: outroTenantId, role: "ADMIN", email: ou.email });
     const m = modeloQueUsaTodas();
-    _definirFabricaDeCliente(() => m.cliente);
+    _definirFabricaDeProvedor(() => m.provedor);
     await perguntar(token);
-    const resultados = m.enviados[1].messages[2].content;
-    const resumo = JSON.parse(resultados[NOMES_FERRAMENTAS.indexOf("resumo_base")].content);
+    const resultados = m.pedidos[1].turnos[2].itens;
+    const resumo = JSON.parse(resultados[NOMES_FERRAMENTAS.indexOf("resumo_base")].conteudo);
     expect(resumo.totalClientes).toBe(0);
   });
 });
