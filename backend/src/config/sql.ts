@@ -39,3 +39,8 @@ export function usoRealSql(alias?: string): string {
 export function antecipacaoSql(alias?: string): string {
   return `${alias ? `${alias}.` : ""}"usoTipo" = 'ANTECIPACAO'`;
 }
+
+/** Hora do dia (0–23) em Brasília de uma coluna DateTime. */
+export function horaBrt(col: string): string {
+  return `CAST(strftime('%H', ${col}, '-3 hours') AS INTEGER)`;
+}

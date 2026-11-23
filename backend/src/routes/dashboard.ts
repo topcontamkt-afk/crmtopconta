@@ -1,12 +1,13 @@
 import { cidadeKey } from "../services/cidades";
 import { hojeBrasilia } from "../services/ciclos";
 import { janelaCoberta, janelasDoCiclo } from "../services/cicloReport";
-import { antecipacaoSql, diaBrt, usoRealSql } from "../config/sql";
+import { antecipacaoSql, diaBrt, horaBrt, usoRealSql } from "../config/sql";
 import { faixaAdesao, faltamParaMeta, META_ADESAO, periodoAnterior, preencheDias, resolvePeriodo, taxaAdesao, variacaoPct, variacaoPontos } from "../services/usoPeriodo";
 import { buildMelhorouCaiu } from "../services/insights";
 import { avaliarCidades } from "../services/cidadeDesempenho";
 import { construirHorarios, estimarAntecedencia, sugerirHorario } from "../services/horarioUso";
-import { cidadeKeySql, SEM_CIDADE } from "../services/cidades";
+import { SEM_CIDADE } from "../services/cidades";
+import { addDiasIso } from "../services/diasIso";
 import { cicloInfo } from "../services/ciclos";
 
 import { JANELA_PADRAO_DIAS, tendenciaDe } from "../services/oportunidadeTendencia";
@@ -1291,58 +1292,61 @@ router.get("/oportunidades", async (req, res) => {
 /**
  * GET /api/dashboard/cidades-desempenho — qual cidade se destaca e qual precisa de atenção (ver
  * services/cidadeDesempenho.ts). Uso pelo extrato (antecipação + compra à vista) nos últimos 30 dias
- * contra os 30 anteriores, com as janelas terminando no último dia do extrato.
+ * contra os 30 anteriores, com as janelas terminando no último dia do extrato. Dialeto do SQLite/D1:
+ * dias de Brasília em texto, uso pela coluna `usoTipo` e a cidade pela chave gravada em `Client.cidadeKey`.
  */
 router.get("/cidades-desempenho", async (req, res) => {
   const { tenantId } = req.user!;
   const [cobertura] = await tenantRaw.query<{ ultimo: string | null }[]>(
-    `SELECT to_char(max(("occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date), 'YYYY-MM-DD') AS ultimo FROM "Purchase" WHERE "tenantId" = $1`,
+    `SELECT max(${diaBrt('"occurredAt"')}) AS ultimo FROM "Purchase" WHERE "tenantId" = $1`,
     tenantId
   );
   const ultimo = cobertura?.ultimo ?? null;
   if (!ultimo) return res.json({ disponivel: false, motivo: "SEM_EXTRATO", ultimoDiaExtrato: null, diasDefasagem: null, cidades: [], emDestaque: null, precisaAtencao: null, mediana: null });
 
-  const tipo = USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"');
   const [uso, clientes, ciclos] = await Promise.all([
-    tenantRaw.query<{ key: string; usaramAtual: number; usosAtual: number; usaramAnterior: number; usosAnterior: number }[]>(
-      `SELECT x.key,
-              COUNT(DISTINCT x."clientId") FILTER (WHERE x.d BETWEEN $2::date - 29 AND $2::date)::int AS "usaramAtual",
-              COUNT(*) FILTER (WHERE x.d BETWEEN $2::date - 29 AND $2::date)::int AS "usosAtual",
-              COUNT(DISTINCT x."clientId") FILTER (WHERE x.d BETWEEN $2::date - 59 AND $2::date - 30)::int AS "usaramAnterior",
-              COUNT(*) FILTER (WHERE x.d BETWEEN $2::date - 59 AND $2::date - 30)::int AS "usosAnterior"
+    tenantRaw.query<{ chave: string; usaramAtual: number; usosAtual: number; usaramAnterior: number; usosAnterior: number }[]>(
+      `SELECT x.chave,
+              COUNT(DISTINCT x."clientId") FILTER (WHERE x.d BETWEEN $2 AND $3) AS "usaramAtual",
+              COUNT(*) FILTER (WHERE x.d BETWEEN $2 AND $3) AS "usosAtual",
+              COUNT(DISTINCT x."clientId") FILTER (WHERE x.d BETWEEN $4 AND $5) AS "usaramAnterior",
+              COUNT(*) FILTER (WHERE x.d BETWEEN $4 AND $5) AS "usosAnterior"
        FROM (
-         SELECT ${cidadeKeySql('c."cidade"')} AS key, p."clientId", (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d
+         SELECT c."cidadeKey" AS chave, p."clientId", ${diaBrt('p."occurredAt"')} AS d
          FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
-         WHERE p."tenantId" = $1 AND ${tipo}
+         WHERE p."tenantId" = $1 AND ${usoRealSql("p")} AND c."anonymizedAt" IS NULL AND c."bloqueadoLgpdAt" IS NULL
        ) x
-       WHERE x.d BETWEEN $2::date - 59 AND $2::date
+       WHERE x.d BETWEEN $4 AND $3
        GROUP BY 1`,
       tenantId,
-      ultimo
+      addDiasIso(ultimo, -29),
+      ultimo,
+      addDiasIso(ultimo, -59),
+      addDiasIso(ultimo, -30)
     ),
-    tenantRaw.query<{ key: string; cidade: string; clientes: number; inativos: number }[]>(
-      `SELECT t.key, mode() WITHIN GROUP (ORDER BY t."cidade") AS cidade, COUNT(*)::int AS clientes,
-              COUNT(*) FILTER (WHERE t."statusConta"::text = 'INATIVO')::int AS inativos
-       FROM (SELECT ${cidadeKeySql('"cidade"')} AS key, "cidade", "statusConta" FROM "Client" WHERE "tenantId" = $1 AND "limiteTotal" > 0) t
+    tenantRaw.query<{ chave: string; cidade: string; clientes: number; inativos: number }[]>(
+      `SELECT "cidadeKey" AS chave, MIN(trim("cidade")) AS cidade, COUNT(*) AS clientes,
+              SUM(CASE WHEN "statusConta" = 'INATIVO' THEN 1 ELSE 0 END) AS inativos
+       FROM "Client" WHERE "tenantId" = $1 AND "limiteTotal" > 0 ${SO_TRATAVEL}
        GROUP BY 1`,
       tenantId
     ),
     prisma.cicloCidade.findMany({ where: { tenantId }, select: { cidadeKey: true, diaAbertura: true } }),
   ]);
 
-  const usoPorCidade = new Map(uso.map((u) => [u.key, u]));
+  const usoPorCidade = new Map(uso.map((u) => [u.chave, u]));
   const diaPorCidade = new Map(ciclos.map((c) => [c.cidadeKey, c.diaAbertura]));
   const resultado = avaliarCidades(
     clientes
-      .filter((c) => c.key !== SEM_CIDADE)
+      .filter((c) => c.chave !== SEM_CIDADE)
       .map((c) => {
-        const u = usoPorCidade.get(c.key);
-        const dia = diaPorCidade.get(c.key);
+        const u = usoPorCidade.get(c.chave);
+        const dia = diaPorCidade.get(c.chave);
         return {
-          cidadeKey: c.key,
+          cidadeKey: c.chave,
           cidade: c.cidade,
           clientes: c.clientes,
-          inativos: c.inativos,
+          inativos: c.inativos ?? 0,
           usaramAtual: u?.usaramAtual ?? 0,
           usaramAnterior: u?.usaramAnterior ?? 0,
           usosAtual: u?.usosAtual ?? 0,
@@ -1367,9 +1371,9 @@ const horariosQuerySchema = z.object({
   por: z.enum(["perfil", "cidade", "nenhum"]).default("perfil"),
 });
 const TIPO_USO_SQL = {
-  antecipacao: `p."tipo" ~* '^\\s*d[eé]bito\\s+pix'`,
-  compra: `p."tipo" ~* '^\\s*compra\\s+[àa]\\s+vista'`,
-  todos: USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"'),
+  antecipacao: antecipacaoSql("p"),
+  compra: `p."usoTipo" = 'COMPRA'`,
+  todos: usoRealSql("p"),
 } as const;
 router.get("/horarios", async (req, res) => {
   const parsed = horariosQuerySchema.safeParse(req.query);
@@ -1378,57 +1382,57 @@ router.get("/horarios", async (req, res) => {
   const { tenantId } = req.user!;
 
   const [cobertura] = await tenantRaw.query<{ ultimo: string | null }[]>(
-    `SELECT to_char(max(("occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date), 'YYYY-MM-DD') AS ultimo FROM "Purchase" WHERE "tenantId" = $1`,
+    `SELECT max(${diaBrt('"occurredAt"')}) AS ultimo FROM "Purchase" WHERE "tenantId" = $1`,
     tenantId
   );
   const ultimo = cobertura?.ultimo ?? null;
   if (!ultimo) return res.json({ disponivel: false, motivo: "SEM_EXTRATO" });
 
-  // Segmento de cada compra: perfil de renda pelo limite do cliente (mesmos cortes de rendaPerfil.ts),
-  // cidade (mesma regra de cidades.ts) ou todos juntos. Constantes do código, nunca entrada do usuário.
-  const segExpr =
+  // Segmento: perfil de renda pelo limite do cliente (mesmos cortes de rendaPerfil.ts), cidade (chave gravada) ou todos.
+  // `a` é o prefixo da coluna ("c." na consulta de compras, "" na de clientes). Constantes do código, nunca entrada do usuário.
+  const segExpr = (a: string) =>
     por === "perfil"
-      ? `(CASE WHEN c."limiteTotal" <= 0 THEN 'SEM_LIMITE' WHEN c."limiteTotal" <= ${LIMITE_MAXIMO.PF1} THEN 'PF1' WHEN c."limiteTotal" <= ${LIMITE_MAXIMO.PF2} THEN 'PF2' WHEN c."limiteTotal" <= ${LIMITE_MAXIMO.PF3} THEN 'PF3' ELSE 'PF4' END)`
+      ? `(CASE WHEN ${a}"limiteTotal" <= 0 THEN 'SEM_LIMITE' WHEN ${a}"limiteTotal" <= ${LIMITE_MAXIMO.PF1} THEN 'PF1' WHEN ${a}"limiteTotal" <= ${LIMITE_MAXIMO.PF2} THEN 'PF2' WHEN ${a}"limiteTotal" <= ${LIMITE_MAXIMO.PF3} THEN 'PF3' ELSE 'PF4' END)`
       : por === "cidade"
-        ? cidadeKeySql('c."cidade"')
+        ? `${a}"cidadeKey"`
         : `'todos'`;
-  const segClientes = segExpr.replace(/c\."/g, '"');
   const cond = TIPO_USO_SQL[tipo];
 
   const [linhas, clientes, atrasos, envios] = await Promise.all([
     tenantRaw.query<{ hora: number; segmento: string; usos: number }[]>(
-      `SELECT EXTRACT(HOUR FROM (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo'))::int AS hora, ${segExpr} AS segmento, COUNT(*)::int AS usos
+      `SELECT ${horaBrt('p."occurredAt"')} AS hora, ${segExpr("c.")} AS segmento, COUNT(*) AS usos
        FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
-       WHERE p."tenantId" = $1 AND (${cond})
-         AND (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date BETWEEN $2::date - ($3::int - 1) AND $2::date
+       WHERE p."tenantId" = $1 AND ${cond} AND c."anonymizedAt" IS NULL AND c."bloqueadoLgpdAt" IS NULL
+         AND ${diaBrt('p."occurredAt"')} BETWEEN $2 AND $3
        GROUP BY 1, 2`,
       tenantId,
-      ultimo,
-      dias
+      addDiasIso(ultimo, -(dias - 1)),
+      ultimo
     ),
-    tenantRaw.query<{ key: string; label: string; clientes: number }[]>(
-      `SELECT ${segClientes} AS key, mode() WITHIN GROUP (ORDER BY "cidade") AS label, COUNT(*)::int AS clientes
-       FROM "Client" WHERE "tenantId" = $1 GROUP BY 1`,
+    tenantRaw.query<{ chave: string; label: string; clientes: number }[]>(
+      `SELECT ${segExpr("")} AS chave, MIN(trim("cidade")) AS label, COUNT(*) AS clientes
+       FROM "Client" WHERE "tenantId" = $1 ${SO_TRATAVEL} GROUP BY 1`,
       tenantId
     ),
     // Minutos entre cada envio real e o 1º uso do cliente nas 24h seguintes (qualquer tipo de uso).
     tenantRaw.query<{ minutos: number }[]>(
-      `SELECT EXTRACT(EPOCH FROM (u.primeiro - m."sentAt")) / 60.0 AS minutos
-       FROM "MessageEvent" m
-       JOIN "Campaign" cp ON cp.id = m."campaignId" AND cp."tenantId" = $1 AND cp."isSandbox" = false
-       JOIN LATERAL (
-         SELECT min(p."occurredAt") AS primeiro FROM "Purchase" p
-         WHERE p."tenantId" = $1 AND p."clientId" = m."clientId" AND ${TIPO_USO_SQL.todos}
-           AND p."occurredAt" > m."sentAt" AND p."occurredAt" <= m."sentAt" + interval '24 hours'
-       ) u ON u.primeiro IS NOT NULL
-       WHERE m."clientId" IS NOT NULL AND m."sentAt" IS NOT NULL AND m.status::text <> 'CONTROLE'
-       LIMIT 5000`,
+      `SELECT (julianday(u.primeiro) - julianday(u."sentAt")) * 1440.0 AS minutos
+       FROM (
+         SELECT m."sentAt" AS "sentAt",
+                (SELECT MIN(p."occurredAt") FROM "Purchase" p
+                 WHERE p."tenantId" = $1 AND p."clientId" = m."clientId" AND ${usoRealSql("p")}
+                   AND p."occurredAt" > m."sentAt"
+                   AND p."occurredAt" <= strftime('%Y-%m-%dT%H:%M:%f+00:00', m."sentAt", '+24 hours')) AS primeiro
+         FROM "MessageEvent" m JOIN "Campaign" cp ON cp.id = m."campaignId" AND cp."tenantId" = m."tenantId" AND cp."isSandbox" = 0
+         WHERE m."tenantId" = $1 AND m."clientId" IS NOT NULL AND m."sentAt" IS NOT NULL AND m."status" <> 'CONTROLE'
+         LIMIT 5000
+       ) u WHERE u.primeiro IS NOT NULL`,
       tenantId
     ),
     tenantRaw.query<{ hora: number; n: number }[]>(
-      `SELECT EXTRACT(HOUR FROM (m."sentAt" AT TIME ZONE 'America/Sao_Paulo'))::int AS hora, COUNT(*)::int AS n
-       FROM "MessageEvent" m JOIN "Campaign" cp ON cp.id = m."campaignId" AND cp."tenantId" = $1 AND cp."isSandbox" = false
-       WHERE m."sentAt" IS NOT NULL AND m.status::text <> 'CONTROLE' GROUP BY 1`,
+      `SELECT ${horaBrt('m."sentAt"')} AS hora, COUNT(*) AS n
+       FROM "MessageEvent" m JOIN "Campaign" cp ON cp.id = m."campaignId" AND cp."tenantId" = m."tenantId" AND cp."isSandbox" = 0
+       WHERE m."tenantId" = $1 AND m."sentAt" IS NOT NULL AND m."status" <> 'CONTROLE' GROUP BY 1`,
       tenantId
     ),
   ]);
@@ -1439,8 +1443,8 @@ router.get("/horarios", async (req, res) => {
     return "Todos os clientes";
   };
   const segmentosBase = clientes
-    .filter((c) => !(por === "perfil" && c.key === "SEM_LIMITE") && !(por === "cidade" && c.key === SEM_CIDADE))
-    .map((c) => ({ key: c.key, label: rotulo(c.key, c.label), clientes: c.clientes }))
+    .filter((c) => !(por === "perfil" && c.chave === "SEM_LIMITE") && !(por === "cidade" && c.chave === SEM_CIDADE))
+    .map((c) => ({ key: c.chave, label: rotulo(c.chave, c.label), clientes: c.clientes }))
     .sort((a, b) => b.clientes - a.clientes);
   const { total, usosTotal, segmentos } = construirHorarios(linhas, segmentosBase);
   const antecedencia = estimarAntecedencia(atrasos.map((a) => Number(a.minutos)));

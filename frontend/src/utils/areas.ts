@@ -47,6 +47,7 @@ export const podeVer = (areas: Area[] | null | undefined, area: Area) => !areas 
 /** Área de uma tela, pelo endereço; null para telas livres (Configurações, Minha conta, Usuários). */
 export function areaDoCaminho(pathname: string): Area | null {
   if (pathname === "/" || pathname.startsWith("/perfis-renda")) return "dashboard";
+  if (["/convenios", "/financeiro", "/risco"].some((p) => pathname === p || pathname.startsWith(p + "/"))) return "dashboard";
   for (const a of AREAS) {
     const p = AREA_PATH[a];
     if (p !== "/" && (pathname === p || pathname.startsWith(p + "/"))) return a;

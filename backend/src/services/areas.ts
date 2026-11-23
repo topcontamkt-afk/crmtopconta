@@ -56,7 +56,9 @@ const RULES: Rule[] = [
   { prefix: "/voice/twilio-status", areas: [] },
   { prefix: "/voice/inbound", areas: [] },
 
+  { prefix: "/dashboard/horarios", areas: ["dashboard", "campaigns"] }, // sugestão de horário no agendamento da campanha
   { prefix: "/dashboard", areas: ["dashboard"] },
+  { prefix: "/negocio", areas: ["dashboard"] }, // convênios, financeiro, frescor das fontes e risco de abandono
   { prefix: "/clients/purge", areas: ["imports"] },
   { prefix: "/clients", areas: ["clients"] },
   { prefix: "/titular", areas: ["clients"] }, // LGPD 03-05: pedidos de titular ficam com a Base de clientes

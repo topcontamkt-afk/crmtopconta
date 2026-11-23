@@ -1,14 +1,16 @@
 import { Router } from "express";
 import { z } from "zod";
 import { prisma, tenantRaw } from "../config/db";
+import { buscarEmPartes } from "../config/d1Partes";
+import { antecipacaoSql, diaBrt, usoRealSql } from "../config/sql";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { logAudit } from "../middleware/audit";
 import { avaliarConvenios } from "../services/convenioDesempenho";
 import { avaliarFontes } from "../services/fontesFrescor";
 import { avaliarFrescor } from "../services/dataFreshness";
-import { USO_TIPO_SQL } from "../services/usageRefresh";
 import { todayBrt } from "../services/dashboardMetrics";
-import { cidadeKeySql, SEM_CIDADE } from "../services/cidades";
+import { addDiasIso } from "../services/diasIso";
+import { SEM_CIDADE } from "../services/cidades";
 import { LIMITE_MAXIMO, PERFIL_LABELS } from "../services/rendaPerfil";
 import { lerMetas, periodoDoMes, progressoMeta, projetarMes, variacaoPct } from "../services/financeiro";
 import { intervaloNormal, NIVEL_ALTO, NIVEL_MEDIO, pontuarRisco, ResultadoRisco } from "../services/riscoAbandono";
@@ -18,19 +20,21 @@ import { ENVIAVEL_WHERE } from "../services/segments";
 import { suggestedMessage } from "../services/opportunities";
 
 /**
- * Visão de negócio: desempenho por convênio, frescor das fontes de dados e (nas próximas rotas)
- * financeiro e risco. Tudo calculado de dados reais; o que não tem base volta marcado, não inventado.
+ * Visão de negócio: desempenho por convênio, frescor das fontes de dados, financeiro com metas e risco de
+ * abandono. Tudo calculado de dados reais; o que não tem base volta marcado, não inventado. Dialeto do
+ * SQLite/D1: dias de Brasília em texto ("YYYY-MM-DD", ver config/sql.ts), uso pela coluna `usoTipo` e a cidade
+ * pela chave gravada em `Client.cidadeKey`. Cliente anonimizado ou com tratamento bloqueado (LGPD) fica fora de
+ * toda estatística e lista, como no resto do dashboard.
  */
 const router = Router();
 router.use(requireAuth);
 
-const ANTECIPACAO_SQL = `p."tipo" ~* '^\\s*d[eé]bito\\s+pix'`;
-const USO_SQL = USO_TIPO_SQL.replace(/"tipo"/g, 'p."tipo"');
-const CONVENIO_KEY = (col: string) => `lower(btrim(${col}))`;
+const SO_TRATAVEL = 'AND "anonymizedAt" IS NULL AND "bloqueadoLgpdAt" IS NULL';
+const C_TRATAVEL = 'AND c."anonymizedAt" IS NULL AND c."bloqueadoLgpdAt" IS NULL';
 
 async function ultimoDiaExtrato(tenantId: string): Promise<string | null> {
   const [r] = await tenantRaw.query<{ ultimo: string | null }[]>(
-    `SELECT to_char(max(("occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date), 'YYYY-MM-DD') AS ultimo FROM "Purchase" WHERE "tenantId" = $1`,
+    `SELECT max(${diaBrt('"occurredAt"')}) AS ultimo FROM "Purchase" WHERE "tenantId" = $1`,
     tenantId
   );
   return r?.ultimo ?? null;
@@ -40,60 +44,63 @@ async function ultimoDiaExtrato(tenantId: string): Promise<string | null> {
  * GET /api/negocio/convenios — ranking de convênios (empresa conveniada): clientes, taxa de uso nos
  * 30 dias até o último dia do extrato contra os 30 anteriores, inativos, lucro (juros das antecipações)
  * e o potencial de reativar 10% dos inativos. Ver services/convenioDesempenho.ts.
+ * O SQLite só baixa a caixa de letras ASCII: "EDUCAÇÃO" e "Educação" podem aparecer como dois convênios.
  */
 router.get("/convenios", async (req, res) => {
   const { tenantId } = req.user!;
   const ultimo = await ultimoDiaExtrato(tenantId);
 
   const [clientes, semConv, uso] = await Promise.all([
-    tenantRaw.query<{ key: string; convenio: string; clientes: number; inativos: number }[]>(
-      `SELECT ${CONVENIO_KEY('"empresaConveniada"')} AS key,
-              mode() WITHIN GROUP (ORDER BY btrim("empresaConveniada")) AS convenio,
-              COUNT(*) FILTER (WHERE "limiteTotal" > 0)::int AS clientes,
-              COUNT(*) FILTER (WHERE "limiteTotal" > 0 AND "statusConta"::text = 'INATIVO')::int AS inativos
-       FROM "Client" WHERE "tenantId" = $1 AND "empresaConveniada" IS NOT NULL AND btrim("empresaConveniada") <> ''
+    tenantRaw.query<{ chave: string; convenio: string; clientes: number; inativos: number }[]>(
+      `SELECT lower(trim("empresaConveniada")) AS chave, MIN(trim("empresaConveniada")) AS convenio,
+              SUM(CASE WHEN "limiteTotal" > 0 THEN 1 ELSE 0 END) AS clientes,
+              SUM(CASE WHEN "limiteTotal" > 0 AND "statusConta" = 'INATIVO' THEN 1 ELSE 0 END) AS inativos
+       FROM "Client" WHERE "tenantId" = $1 AND "empresaConveniada" IS NOT NULL AND trim("empresaConveniada") <> '' ${SO_TRATAVEL}
        GROUP BY 1`,
       tenantId
     ),
     tenantRaw.query<{ sem: number; total: number }[]>(
-      `SELECT COUNT(*) FILTER (WHERE "empresaConveniada" IS NULL OR btrim("empresaConveniada") = '')::int AS sem, COUNT(*)::int AS total
-       FROM "Client" WHERE "tenantId" = $1`,
+      `SELECT SUM(CASE WHEN "empresaConveniada" IS NULL OR trim("empresaConveniada") = '' THEN 1 ELSE 0 END) AS sem, COUNT(*) AS total
+       FROM "Client" WHERE "tenantId" = $1 ${SO_TRATAVEL}`,
       tenantId
     ),
     ultimo
       ? tenantRaw.query<
-          { key: string; usaramAtual: number; usosAtual: number; usaramAnterior: number; usosAnterior: number; lucroAtual: number; lucroAnterior: number }[]
+          { chave: string; usaramAtual: number; usosAtual: number; usaramAnterior: number; usosAnterior: number; lucroAtual: number; lucroAnterior: number }[]
         >(
-          `SELECT x.key,
-                  COUNT(DISTINCT x."clientId") FILTER (WHERE x.d BETWEEN $2::date - 29 AND $2::date)::int AS "usaramAtual",
-                  COUNT(*) FILTER (WHERE x.d BETWEEN $2::date - 29 AND $2::date)::int AS "usosAtual",
-                  COUNT(DISTINCT x."clientId") FILTER (WHERE x.d BETWEEN $2::date - 59 AND $2::date - 30)::int AS "usaramAnterior",
-                  COUNT(*) FILTER (WHERE x.d BETWEEN $2::date - 59 AND $2::date - 30)::int AS "usosAnterior",
-                  COALESCE(SUM(x.juros) FILTER (WHERE x.antec AND x.d BETWEEN $2::date - 29 AND $2::date), 0)::float AS "lucroAtual",
-                  COALESCE(SUM(x.juros) FILTER (WHERE x.antec AND x.d BETWEEN $2::date - 59 AND $2::date - 30), 0)::float AS "lucroAnterior"
+          `SELECT x.chave,
+                  COUNT(DISTINCT x."clientId") FILTER (WHERE x.d BETWEEN $2 AND $3) AS "usaramAtual",
+                  COUNT(*) FILTER (WHERE x.d BETWEEN $2 AND $3) AS "usosAtual",
+                  COUNT(DISTINCT x."clientId") FILTER (WHERE x.d BETWEEN $4 AND $5) AS "usaramAnterior",
+                  COUNT(*) FILTER (WHERE x.d BETWEEN $4 AND $5) AS "usosAnterior",
+                  COALESCE(SUM(x.juros) FILTER (WHERE x.antec AND x.d BETWEEN $2 AND $3), 0) AS "lucroAtual",
+                  COALESCE(SUM(x.juros) FILTER (WHERE x.antec AND x.d BETWEEN $4 AND $5), 0) AS "lucroAnterior"
            FROM (
-             SELECT ${CONVENIO_KEY('c."empresaConveniada"')} AS key, p."clientId", COALESCE(p."juros", 0) AS juros,
-                    (${ANTECIPACAO_SQL}) AS antec, (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d
+             SELECT lower(trim(c."empresaConveniada")) AS chave, p."clientId", COALESCE(p."juros", 0) AS juros,
+                    (p."usoTipo" = 'ANTECIPACAO') AS antec, ${diaBrt('p."occurredAt"')} AS d
              FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
-             WHERE p."tenantId" = $1 AND (${USO_SQL}) AND c."empresaConveniada" IS NOT NULL AND btrim(c."empresaConveniada") <> ''
+             WHERE p."tenantId" = $1 AND ${usoRealSql("p")} AND c."empresaConveniada" IS NOT NULL AND trim(c."empresaConveniada") <> '' ${C_TRATAVEL}
            ) x
-           WHERE x.d BETWEEN $2::date - 59 AND $2::date
+           WHERE x.d BETWEEN $4 AND $3
            GROUP BY 1`,
           tenantId,
-          ultimo
+          addDiasIso(ultimo, -29),
+          ultimo,
+          addDiasIso(ultimo, -59),
+          addDiasIso(ultimo, -30)
         )
       : Promise.resolve([]),
   ]);
 
-  const usoPor = new Map(uso.map((u) => [u.key, u]));
+  const usoPor = new Map(uso.map((u) => [u.chave, u]));
   const resultado = avaliarConvenios(
     clientes.map((c) => {
-      const u = usoPor.get(c.key);
+      const u = usoPor.get(c.chave);
       return {
-        chave: c.key,
+        chave: c.chave,
         convenio: c.convenio,
-        clientes: c.clientes,
-        inativos: c.inativos,
+        clientes: c.clientes ?? 0,
+        inativos: c.inativos ?? 0,
         usaramAtual: u?.usaramAtual ?? 0,
         usaramAnterior: u?.usaramAnterior ?? 0,
         usosAtual: u?.usosAtual ?? 0,
@@ -104,7 +111,8 @@ router.get("/convenios", async (req, res) => {
     })
   );
   const frescor = ultimo ? avaliarFrescor(new Date(`${ultimo}T12:00:00-03:00`)) : null;
-  const { sem = 0, total = 0 } = semConv[0] ?? {};
+  const sem = semConv[0]?.sem ?? 0;
+  const total = semConv[0]?.total ?? 0;
   res.json({
     disponivel: !!ultimo,
     ultimoDiaExtrato: ultimo,
@@ -123,31 +131,28 @@ router.get("/fontes", async (req, res) => {
   const { tenantId } = req.user!;
   const [extrato, contas, disparo, mensagem, snapshot] = await Promise.all([
     tenantRaw
-      .query<{ ultima: Date | null }[]>(`SELECT max("occurredAt") AS ultima FROM "Purchase" WHERE "tenantId" = $1`, tenantId)
-      .then((r) => r[0]?.ultima ?? null),
+      .query<{ ultima: string | null }[]>(`SELECT max("occurredAt") AS ultima FROM "Purchase" WHERE "tenantId" = $1`, tenantId)
+      .then((r) => (r[0]?.ultima ? new Date(r[0].ultima) : null)),
     prisma.importJob
       .findFirst({
-        where: { tenantId, status: { in: ["CONCLUIDO", "CONCLUIDO_COM_ERROS"] }, desfeitaEm: null, NOT: { formato: "compras" } },
+        where: { status: { in: ["CONCLUIDO", "CONCLUIDO_COM_ERROS"] }, desfeitaEm: null, NOT: { formato: "compras" } },
         orderBy: { finishedAt: "desc" },
         select: { finishedAt: true },
       })
       .then((j) => j?.finishedAt ?? null),
     prisma.messageEvent
       .findFirst({
-        where: { campaign: { tenantId, isSandbox: false }, sentAt: { not: null }, status: { not: "CONTROLE" } },
+        where: { campaign: { isSandbox: false }, sentAt: { not: null }, status: { not: "CONTROLE" } },
         orderBy: { sentAt: "desc" },
         select: { sentAt: true },
       })
       .then((m) => m?.sentAt ?? null),
     prisma.conversation
-      .findFirst({ where: { tenantId, lastInboundAt: { not: null } }, orderBy: { lastInboundAt: "desc" }, select: { lastInboundAt: true } })
+      .findFirst({ where: { lastInboundAt: { not: null } }, orderBy: { lastInboundAt: "desc" }, select: { lastInboundAt: true } })
       .then((c) => c?.lastInboundAt ?? null),
-    prisma.dashboardSnapshot
-      .findFirst({ where: { tenantId }, orderBy: { day: "desc" }, select: { day: true } })
-      .then((s) => s?.day ?? null),
+    prisma.dashboardSnapshot.findFirst({ orderBy: { day: "desc" }, select: { day: true } }).then((s) => s?.day ?? null),
   ]);
 
-  const agora = new Date();
   res.json({
     hoje: todayBrt().toISOString().slice(0, 10),
     fontes: avaliarFontes(
@@ -158,42 +163,42 @@ router.get("/fontes", async (req, res) => {
         { key: "disparo", label: "Último disparo de campanha", descricao: "Informativo: depende de haver campanhas", ultima: disparo, atencaoDias: null, desatualizadoDias: null },
         { key: "webhook", label: "Última mensagem recebida", descricao: "Informativo: WhatsApp (webhook da Meta)", ultima: mensagem, atencaoDias: null, desatualizadoDias: null },
       ],
-      agora
+      new Date()
     ),
   });
 });
 
-/** Compras de uso (antecipação e compra à vista) dos dois meses comparados, já marcadas como 'atual' ou 'anterior'. */
+/** Compras de uso (antecipação e compra à vista) dos dois meses comparados, já marcadas como 'atual' ou 'anterior' ($2–$3 e $4–$5). */
 const BASE_FINANCEIRO = `(
-  SELECT p."clientId", c."cidade", c."limiteTotal", COALESCE(p."juros", 0) AS juros, p."valorPrincipal" AS valor,
-         (${ANTECIPACAO_SQL}) AS antec,
-         (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
-         CASE WHEN (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date BETWEEN $2::date AND $3::date THEN 'atual'
-              WHEN (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date BETWEEN $4::date AND $5::date THEN 'anterior' END AS mes
-  FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
-  WHERE p."tenantId" = $1 AND (${USO_SQL})
+  SELECT y.*, CASE WHEN y.d BETWEEN $2 AND $3 THEN 'atual' WHEN y.d BETWEEN $4 AND $5 THEN 'anterior' END AS mes
+  FROM (
+    SELECT p."clientId", c."cidade", c."cidadeKey", c."limiteTotal", COALESCE(p."juros", 0) AS juros, p."valorPrincipal" AS valor,
+           (p."usoTipo" = 'ANTECIPACAO') AS antec, ${diaBrt('p."occurredAt"')} AS d
+    FROM "Purchase" p JOIN "Client" c ON c.id = p."clientId" AND c."tenantId" = p."tenantId"
+    WHERE p."tenantId" = $1 AND ${usoRealSql("p")} ${C_TRATAVEL}
+  ) y
 ) x`;
 
 const sufixo = (m: "Atual" | "Anterior") => {
   const mes = m === "Atual" ? "atual" : "anterior";
-  return `COUNT(*) FILTER (WHERE x.mes = '${mes}')::int AS "usos${m}",
-          COUNT(*) FILTER (WHERE x.mes = '${mes}' AND x.antec)::int AS "antec${m}",
-          COALESCE(SUM(x.juros) FILTER (WHERE x.mes = '${mes}' AND x.antec), 0)::float AS "lucro${m}",
-          COALESCE(SUM(x.valor) FILTER (WHERE x.mes = '${mes}' AND x.antec), 0)::float AS "valor${m}",
-          COUNT(DISTINCT x."clientId") FILTER (WHERE x.mes = '${mes}')::int AS "usaram${m}"`;
+  return `COUNT(*) FILTER (WHERE x.mes = '${mes}') AS "usos${m}",
+          COUNT(*) FILTER (WHERE x.mes = '${mes}' AND x.antec) AS "antec${m}",
+          COALESCE(SUM(x.juros) FILTER (WHERE x.mes = '${mes}' AND x.antec), 0) AS "lucro${m}",
+          COALESCE(SUM(x.valor) FILTER (WHERE x.mes = '${mes}' AND x.antec), 0) AS "valor${m}",
+          COUNT(DISTINCT x."clientId") FILTER (WHERE x.mes = '${mes}') AS "usaram${m}"`;
 };
 
 type Totais = Record<`${"usos" | "antec" | "lucro" | "valor" | "usaram"}${"Atual" | "Anterior"}`, number>;
 const resumo = (t: Totais, m: "Atual" | "Anterior") => {
-  const lucro = t[`lucro${m}`];
-  const antec = t[`antec${m}`];
-  const usaram = t[`usaram${m}`];
+  const lucro = Number(t[`lucro${m}`] ?? 0);
+  const antec = Number(t[`antec${m}`] ?? 0);
+  const usaram = Number(t[`usaram${m}`] ?? 0);
   return {
     lucro: Math.round(lucro * 100) / 100,
     antecipacoes: antec,
-    usos: t[`usos${m}`],
+    usos: Number(t[`usos${m}`] ?? 0),
     usaram,
-    ticketMedio: antec > 0 ? Math.round((t[`valor${m}`] / antec) * 100) / 100 : null,
+    ticketMedio: antec > 0 ? Math.round((Number(t[`valor${m}`] ?? 0) / antec) * 100) / 100 : null,
     lucroPorUsuario: usaram > 0 ? Math.round((lucro / usaram) * 100) / 100 : null,
   };
 };
@@ -215,26 +220,25 @@ router.get("/financeiro", async (req, res) => {
   const [totais, semanas, cidades, perfis, tenant] = await Promise.all([
     tenantRaw.query<Totais[]>(`SELECT ${sufixo("Atual")}, ${sufixo("Anterior")} FROM ${BASE_FINANCEIRO} WHERE x.mes IS NOT NULL`, ...params),
     tenantRaw.query<{ mes: string; semana: number; lucro: number }[]>(
-      `SELECT x.mes, LEAST(4, (EXTRACT(DAY FROM x.d)::int - 1) / 7 + 1)::int AS semana,
-              COALESCE(SUM(x.juros) FILTER (WHERE x.antec), 0)::float AS lucro
+      `SELECT x.mes, MIN(4, (CAST(strftime('%d', x.d) AS INTEGER) - 1) / 7 + 1) AS semana,
+              COALESCE(SUM(x.juros) FILTER (WHERE x.antec), 0) AS lucro
        FROM ${BASE_FINANCEIRO} WHERE x.mes IS NOT NULL GROUP BY 1, 2`,
       ...params
     ),
-    tenantRaw.query<{ key: string; cidade: string; lucro: number }[]>(
-      `SELECT ${cidadeKeySql('x."cidade"')} AS key, mode() WITHIN GROUP (ORDER BY x."cidade") AS cidade,
-              COALESCE(SUM(x.juros) FILTER (WHERE x.antec), 0)::float AS lucro
+    tenantRaw.query<{ chave: string; cidade: string; lucro: number }[]>(
+      `SELECT x."cidadeKey" AS chave, MIN(trim(x."cidade")) AS cidade, COALESCE(SUM(x.juros) FILTER (WHERE x.antec), 0) AS lucro
        FROM ${BASE_FINANCEIRO} WHERE x.mes = 'atual' GROUP BY 1`,
       ...params
     ),
-    tenantRaw.query<{ key: string; lucro: number }[]>(
-      `SELECT ${perfilExpr} AS key, COALESCE(SUM(x.juros) FILTER (WHERE x.antec), 0)::float AS lucro
+    tenantRaw.query<{ chave: string; lucro: number }[]>(
+      `SELECT ${perfilExpr} AS chave, COALESCE(SUM(x.juros) FILTER (WHERE x.antec), 0) AS lucro
        FROM ${BASE_FINANCEIRO} WHERE x.mes = 'atual' GROUP BY 1`,
       ...params
     ),
     prisma.tenant.findUnique({ where: { id: tenantId }, select: { metas: true } }).catch(() => null),
   ]);
 
-  const t = totais[0];
+  const t = totais[0] ?? ({} as Totais);
   const atual = resumo(t, "Atual");
   const anterior = resumo(t, "Anterior");
   const frescor = avaliarFrescor(new Date(`${ultimo}T12:00:00-03:00`));
@@ -243,7 +247,7 @@ router.get("/financeiro", async (req, res) => {
 
   const pesoLucro = atual.lucro > 0 ? atual.lucro : 0;
   const fatia = (v: number) => (pesoLucro > 0 ? Math.round((v / pesoLucro) * 1000) / 10 : 0);
-  const semanaDe = (mes: "atual" | "anterior", n: number) => semanas.find((s) => s.mes === mes && s.semana === n)?.lucro ?? 0;
+  const semanaDe = (mes: "atual" | "anterior", n: number) => Number(semanas.find((s) => s.mes === mes && Number(s.semana) === n)?.lucro ?? 0);
 
   res.json({
     disponivel: true,
@@ -262,14 +266,14 @@ router.get("/financeiro", async (req, res) => {
     },
     semanas: [1, 2, 3, 4].map((n) => ({ semana: n, atual: Math.round(semanaDe("atual", n) * 100) / 100, anterior: Math.round(semanaDe("anterior", n) * 100) / 100 })),
     porCidade: cidades
-      .filter((c) => c.key !== SEM_CIDADE && c.lucro > 0)
-      .sort((a, b) => b.lucro - a.lucro)
+      .filter((c) => c.chave !== SEM_CIDADE && Number(c.lucro) > 0)
+      .sort((a, b) => Number(b.lucro) - Number(a.lucro))
       .slice(0, 8)
-      .map((c) => ({ key: c.key, cidade: c.cidade, lucro: Math.round(c.lucro * 100) / 100, pct: fatia(c.lucro) })),
+      .map((c) => ({ key: c.chave, cidade: c.cidade, lucro: Math.round(Number(c.lucro) * 100) / 100, pct: fatia(Number(c.lucro)) })),
     porPerfil: perfis
-      .filter((p) => p.key !== "SEM_LIMITE")
-      .sort((a, b) => a.key.localeCompare(b.key))
-      .map((p) => ({ key: p.key, label: PERFIL_LABELS[p.key as keyof typeof PERFIL_LABELS] ?? p.key, lucro: Math.round(p.lucro * 100) / 100, pct: fatia(p.lucro) })),
+      .filter((p) => p.chave !== "SEM_LIMITE")
+      .sort((a, b) => a.chave.localeCompare(b.chave))
+      .map((p) => ({ key: p.chave, label: PERFIL_LABELS[p.chave as keyof typeof PERFIL_LABELS] ?? p.chave, lucro: Math.round(Number(p.lucro) * 100) / 100, pct: fatia(Number(p.lucro)) })),
     metas: { ...metas, disponivel: tenant !== null },
     progresso: { lucro: progressoMeta(atual.lucro, metas.lucro), usos: progressoMeta(atual.usos, metas.usos) },
     projecao: { lucro: projetarMes(atual.lucro, periodo.diaAtual, periodo.diasNoMes, extratoEmDia), usos: projetarMes(atual.usos, periodo.diaAtual, periodo.diasNoMes, extratoEmDia) },
@@ -317,35 +321,37 @@ const iso = (d: DiaCivil) => `${d.y}-${String(d.m).padStart(2, "0")}-${String(d.
 /** Pontua todos os clientes elegíveis (já usaram, têm limite) com o "agora" no último dia do extrato. */
 async function carregarRisco(tenantId: string, ultimo: string, extratoEmDia: boolean) {
   const linhas = await tenantRaw.query<LinhaRisco[]>(
-    `SELECT c.id, c."nome", c."telefone", c."cidade", c."limiteTotal"::float AS "limiteTotal", c."saldoDisponivel"::float AS "saldoDisponivel",
+    `SELECT c.id, c."nome", c."telefone", c."cidade", c."limiteTotal" AS "limiteTotal", c."saldoDisponivel" AS "saldoDisponivel",
             c."diaCicloAbertura", c."usosTotal", c."usosUltimos90d",
-            ($2::date - (c."ultimoUsoReal" AT TIME ZONE 'America/Sao_Paulo')::date)::int AS "diasSemUso",
-            to_char((c."ultimoUsoReal" AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS "ultimoUso",
-            COALESCE(u.u30, 0)::int AS usos30, COALESCE(u.u60, 0)::int AS "usos60Anteriores", COALESCE(u.lucro90, 0)::float AS lucro90,
-            COALESCE(m.enviadas, 0)::int AS enviadas, COALESCE(m.respondeu, 0)::int AS respondeu
+            CAST(julianday($2) - julianday(${diaBrt('c."ultimoUsoReal"')}) AS INTEGER) AS "diasSemUso",
+            ${diaBrt('c."ultimoUsoReal"')} AS "ultimoUso",
+            COALESCE(u.u30, 0) AS usos30, COALESCE(u.u60, 0) AS "usos60Anteriores", COALESCE(u.lucro90, 0) AS lucro90,
+            COALESCE(mm.enviadas, 0) AS enviadas, COALESCE(mm.respondeu, 0) AS respondeu
      FROM "Client" c
      LEFT JOIN (
        SELECT x."clientId",
-              COUNT(*) FILTER (WHERE x.d BETWEEN $2::date - 29 AND $2::date) AS u30,
-              COUNT(*) FILTER (WHERE x.d BETWEEN $2::date - 89 AND $2::date - 30) AS u60,
-              SUM(x.juros) FILTER (WHERE x.antec AND x.d BETWEEN $2::date - 89 AND $2::date) AS lucro90
+              SUM(CASE WHEN x.d BETWEEN $3 AND $2 THEN 1 ELSE 0 END) AS u30,
+              SUM(CASE WHEN x.d BETWEEN $4 AND $5 THEN 1 ELSE 0 END) AS u60,
+              SUM(CASE WHEN x.antec THEN x.juros ELSE 0 END) AS lucro90
        FROM (
-         SELECT p."clientId", COALESCE(p."juros", 0) AS juros, (${ANTECIPACAO_SQL}) AS antec,
-                (p."occurredAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d
-         FROM "Purchase" p WHERE p."tenantId" = $1 AND (${USO_SQL})
-       ) x WHERE x.d BETWEEN $2::date - 89 AND $2::date GROUP BY 1
+         SELECT p."clientId", COALESCE(p."juros", 0) AS juros, (p."usoTipo" = 'ANTECIPACAO') AS antec, ${diaBrt('p."occurredAt"')} AS d
+         FROM "Purchase" p WHERE p."tenantId" = $1 AND ${usoRealSql("p")}
+       ) x WHERE x.d BETWEEN $4 AND $2 GROUP BY 1
      ) u ON u."clientId" = c.id
      LEFT JOIN (
        SELECT m."clientId", COUNT(*) AS enviadas,
-              COUNT(*) FILTER (WHERE m."respondedAt" IS NOT NULL OR m."convertedAt" IS NOT NULL) AS respondeu
-       FROM "MessageEvent" m JOIN "Campaign" cp ON cp.id = m."campaignId" AND cp."tenantId" = $1 AND cp."isSandbox" = false
-       WHERE m."clientId" IS NOT NULL AND m."sentAt" IS NOT NULL AND m.status::text <> 'CONTROLE'
-         AND (m."sentAt" AT TIME ZONE 'America/Sao_Paulo')::date >= $2::date - 89
+              SUM(CASE WHEN m."respondedAt" IS NOT NULL OR m."convertedAt" IS NOT NULL THEN 1 ELSE 0 END) AS respondeu
+       FROM "MessageEvent" m JOIN "Campaign" cp ON cp.id = m."campaignId" AND cp."tenantId" = m."tenantId" AND cp."isSandbox" = 0
+       WHERE m."tenantId" = $1 AND m."clientId" IS NOT NULL AND m."sentAt" IS NOT NULL AND m."status" <> 'CONTROLE'
+         AND ${diaBrt('m."sentAt"')} >= $4
        GROUP BY 1
-     ) m ON m."clientId" = c.id
-     WHERE c."tenantId" = $1 AND c."limiteTotal" > 0 AND c."usosTotal" > 0 AND c."ultimoUsoReal" IS NOT NULL`,
+     ) mm ON mm."clientId" = c.id
+     WHERE c."tenantId" = $1 AND c."limiteTotal" > 0 AND c."usosTotal" > 0 AND c."ultimoUsoReal" IS NOT NULL ${C_TRATAVEL}`,
     tenantId,
-    ultimo
+    ultimo,
+    addDiasIso(ultimo, -29),
+    addDiasIso(ultimo, -89),
+    addDiasIso(ultimo, -30)
   );
 
   const [y, m, d] = ultimo.split("-").map(Number);
@@ -362,7 +368,18 @@ async function carregarRisco(tenantId: string, ultimo: string, extratoEmDia: boo
   };
 
   return linhas
-    .map((l) => {
+    .map((raw) => {
+      const l: LinhaRisco = {
+        ...raw,
+        limiteTotal: Number(raw.limiteTotal),
+        saldoDisponivel: Number(raw.saldoDisponivel),
+        lucro90: Number(raw.lucro90),
+        diasSemUso: Number(raw.diasSemUso),
+        usos30: Number(raw.usos30),
+        usos60Anteriores: Number(raw.usos60Anteriores),
+        enviadas: Number(raw.enviadas),
+        respondeu: Number(raw.respondeu),
+      };
       const ciclo = l.diaCicloAbertura ? infoCiclo(l.diaCicloAbertura) : null;
       const r: ResultadoRisco = pontuarRisco(
         {
@@ -471,8 +488,12 @@ router.get("/risco/audiencia", async (req, res) => {
     .sort((a, b) => b.r.nota - a.r.nota)
     .slice(0, 5000)
     .map((x) => x.l.id);
+  // `in` longo é dividido em pedaços que cabem no limite de parâmetros do D1 (config/d1Partes.ts).
   const aptos = ids.length
-    ? await prisma.client.findMany({ where: { tenantId, id: { in: ids }, autorizacaoComunicacao: true, optOutAt: null, ...ENVIAVEL_WHERE }, select: { id: true } })
+    ? await buscarEmPartes(
+        { tenantId, id: { in: ids }, autorizacaoComunicacao: true, optOutAt: null, anonymizedAt: null, bloqueadoLgpdAt: null, ...ENVIAVEL_WHERE },
+        (where) => prisma.client.findMany({ where, select: { id: true } })
+      )
     : [];
   res.json({ total: ids.length, autorizados: aptos.length, clientIds: aptos.map((a) => a.id), mensagem: suggestedMessage("inativos") ?? null });
 });
