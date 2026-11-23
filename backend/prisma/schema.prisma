@@ -105,6 +105,8 @@ model Tenant {
   cambioUsdBrl      Decimal? @db.Decimal(10, 4)
   // Metas mensais da tela Financeiro: { lucro?: number (R$), usos?: number }. Nulo = sem meta.
   metas             Json?
+  // Assistente de IA: { provedor: "anthropic" | "openai", modelo: string } escolhido em Configurações. Nulo = padrão do ambiente.
+  assistente        Json?
   createdAt         DateTime @default(now())
 
   users              User[]

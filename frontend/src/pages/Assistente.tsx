@@ -19,6 +19,8 @@ interface Msg {
 }
 interface Status {
   configurado: boolean;
+  provedor: "anthropic" | "openai";
+  rotuloProvedor: string;
   modelo: string;
   limiteDiario: number;
   usadasHoje: number;
@@ -143,9 +145,15 @@ export default function Assistente() {
           </h2>
           <p className="pd-sub">Pergunte sobre clientes, uso, cidades, convênios, financeiro e campanhas, ou peça um relatório.</p>
         </div>
-        {status?.configurado && (
-          <span className="pd-hint" style={{ margin: 0 }}>
-            {status.usadasHoje} de {status.limiteDiario} perguntas hoje
+        {status && (
+          <span className="pd-hint" style={{ margin: 0, textAlign: "right" }}>
+            {status.rotuloProvedor} · {status.modelo}
+            {status.configurado && (
+              <>
+                <br />
+                {status.usadasHoje} de {status.limiteDiario} perguntas hoje
+              </>
+            )}
           </span>
         )}
       </div>
@@ -161,7 +169,7 @@ export default function Assistente() {
         <div className="card pd-card" style={{ borderColor: "var(--warning)", background: "var(--warning-soft)" }}>
           <strong style={{ color: "var(--warning)" }}>Assistente não configurado neste ambiente.</strong>
           <p className="pd-card-sub" style={{ margin: "6px 0 0" }}>
-            Falta a chave de IA (variável <code>ANTHROPIC_API_KEY</code> do servidor). Peça a um administrador para configurá-la.
+            Falta a chave de {status.rotuloProvedor} (variável <code>{status.provedor === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"}</code> do servidor). Peça ao responsável técnico para criá-la, ou troque o provedor em Configurações.
           </p>
         </div>
       )}
