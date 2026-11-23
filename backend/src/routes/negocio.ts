@@ -41,8 +41,7 @@ async function ultimoDiaExtrato(tenantId: string): Promise<string | null> {
  * 30 dias até o último dia do extrato contra os 30 anteriores, inativos, lucro (juros das antecipações)
  * e o potencial de reativar 10% dos inativos. Ver services/convenioDesempenho.ts.
  */
-router.get("/convenios", async (req, res) => {
-  const { tenantId } = req.user!;
+export async function dadosConvenios(tenantId: string) {
   const ultimo = await ultimoDiaExtrato(tenantId);
 
   const [clientes, semConv, uso] = await Promise.all([
@@ -105,7 +104,7 @@ router.get("/convenios", async (req, res) => {
   );
   const frescor = ultimo ? avaliarFrescor(new Date(`${ultimo}T12:00:00-03:00`)) : null;
   const { sem = 0, total = 0 } = semConv[0] ?? {};
-  res.json({
+  return ({
     disponivel: !!ultimo,
     ultimoDiaExtrato: ultimo,
     extratoEmDia: frescor ? frescor.status === "OK" : false,
@@ -113,14 +112,15 @@ router.get("/convenios", async (req, res) => {
     semConvenio: { n: sem, pct: total > 0 ? Math.round((sem / total) * 1000) / 10 : 0 },
     ...resultado,
   });
-});
+}
+
+router.get("/convenios", async (req, res) => res.json(await dadosConvenios(req.user!.tenantId)));
 
 /**
  * GET /api/negocio/fontes — há quantos dias cada fonte foi atualizada (extrato, planilha de contas,
  * snapshot diário) e as informativas (último disparo, última mensagem recebida). Ver services/fontesFrescor.ts.
  */
-router.get("/fontes", async (req, res) => {
-  const { tenantId } = req.user!;
+export async function dadosFontes(tenantId: string) {
   const [extrato, contas, disparo, mensagem, snapshot] = await Promise.all([
     tenantRaw
       .query<{ ultima: Date | null }[]>(`SELECT max("occurredAt") AS ultima FROM "Purchase" WHERE "tenantId" = $1`, tenantId)
@@ -148,7 +148,7 @@ router.get("/fontes", async (req, res) => {
   ]);
 
   const agora = new Date();
-  res.json({
+  return ({
     hoje: todayBrt().toISOString().slice(0, 10),
     fontes: avaliarFontes(
       [
@@ -161,7 +161,9 @@ router.get("/fontes", async (req, res) => {
       agora
     ),
   });
-});
+}
+
+router.get("/fontes", async (req, res) => res.json(await dadosFontes(req.user!.tenantId)));
 
 /** Compras de uso (antecipação e compra à vista) dos dois meses comparados, já marcadas como 'atual' ou 'anterior'. */
 const BASE_FINANCEIRO = `(
@@ -203,11 +205,10 @@ const resumo = (t: Totais, m: "Atual" | "Anterior") => {
  * anterior até o mesmo dia, por semana, cidade e perfil de renda, com as metas e a projeção do
  * fechamento. Ver services/financeiro.ts.
  */
-router.get("/financeiro", async (req, res) => {
-  const { tenantId } = req.user!;
+export async function dadosFinanceiro(tenantId: string) {
   const ultimo = await ultimoDiaExtrato(tenantId);
   const periodo = ultimo ? periodoDoMes(ultimo) : null;
-  if (!ultimo || !periodo) return res.json({ disponivel: false, motivo: "SEM_EXTRATO" });
+  if (!ultimo || !periodo) return ({ disponivel: false, motivo: "SEM_EXTRATO" });
 
   const params = [tenantId, periodo.atual.de, periodo.atual.ate, periodo.anterior.de, periodo.anterior.ate];
   const perfilExpr = `(CASE WHEN x."limiteTotal" <= 0 THEN 'SEM_LIMITE' WHEN x."limiteTotal" <= ${LIMITE_MAXIMO.PF1} THEN 'PF1' WHEN x."limiteTotal" <= ${LIMITE_MAXIMO.PF2} THEN 'PF2' WHEN x."limiteTotal" <= ${LIMITE_MAXIMO.PF3} THEN 'PF3' ELSE 'PF4' END)`;
@@ -245,7 +246,7 @@ router.get("/financeiro", async (req, res) => {
   const fatia = (v: number) => (pesoLucro > 0 ? Math.round((v / pesoLucro) * 1000) / 10 : 0);
   const semanaDe = (mes: "atual" | "anterior", n: number) => semanas.find((s) => s.mes === mes && s.semana === n)?.lucro ?? 0;
 
-  res.json({
+  return ({
     disponivel: true,
     ultimoDiaExtrato: ultimo,
     extratoEmDia,
@@ -274,7 +275,9 @@ router.get("/financeiro", async (req, res) => {
     progresso: { lucro: progressoMeta(atual.lucro, metas.lucro), usos: progressoMeta(atual.usos, metas.usos) },
     projecao: { lucro: projetarMes(atual.lucro, periodo.diaAtual, periodo.diasNoMes, extratoEmDia), usos: projetarMes(atual.usos, periodo.diaAtual, periodo.diasNoMes, extratoEmDia) },
   });
-});
+}
+
+router.get("/financeiro", async (req, res) => res.json(await dadosFinanceiro(req.user!.tenantId)));
 
 const metasSchema = z.object({
   lucro: z.number().positive().max(1e9).nullable(),

@@ -1,5 +1,5 @@
 {
-  "builds": [{ "src": "api/index.ts", "use": "@vercel/node" }],
+  "builds": [{ "src": "api/index.ts", "use": "@vercel/node", "config": { "maxDuration": 60 } }],
   "routes": [{ "src": "/(.*)", "dest": "api/index.ts" }],
   "crons": [
     { "path": "/api/cron/dispatch", "schedule": "0 9 * * *" },
