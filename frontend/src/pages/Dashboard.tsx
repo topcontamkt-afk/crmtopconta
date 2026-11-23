@@ -29,6 +29,7 @@ import { api } from "../api/client";
 import OpportunityQueue from "../components/OpportunityQueue";
 import FrescorExtrato from "../components/FrescorExtrato";
 import PerfisRendaCard from "../components/PerfisRendaCard";
+import MelhorouCaiuCard, { MelhorouCaiu } from "../components/MelhorouCaiuCard";
 import CiclosCard from "../components/CiclosCard";
 import UsoPeriodoCard from "../components/UsoPeriodoCard";
 import AdesaoCicloCard from "../components/AdesaoCicloCard";
@@ -102,6 +103,7 @@ interface Overview {
   };
   cobertura: { key: string; label: string; preenchidos: number; pct: number; libera: string }[];
   insights: { tipo: "alerta" | "oportunidade" | "positivo" | "info"; texto: string }[];
+  melhorouCaiu: MelhorouCaiu | null;
   ultimaAtualizacao: string | null;
 }
 
@@ -305,6 +307,8 @@ export default function Dashboard() {
               }).`
             : "Histórico iniciado hoje: as variações aparecem a partir do segundo dia."}
       </p>
+
+      <MelhorouCaiuCard data={data.melhorouCaiu} temFiltro={temFiltro} />
 
       <div className="pd-row">
         <ChartCard data={data} tab={tab} setTab={setTab} temFiltro={temFiltro} />

@@ -3,6 +3,7 @@ import { hojeBrasilia } from "../services/ciclos";
 import { janelaCoberta, janelasDoCiclo } from "../services/cicloReport";
 import { antecipacaoSql, diaBrt, usoRealSql } from "../config/sql";
 import { faixaAdesao, faltamParaMeta, META_ADESAO, periodoAnterior, preencheDias, resolvePeriodo, taxaAdesao, variacaoPct, variacaoPontos } from "../services/usoPeriodo";
+import { buildMelhorouCaiu } from "../services/insights";
 import { avaliarFrescor, mensagemFrescor } from "../services/dataFreshness";
 import { ETAPA_CASE_SQL } from "../services/etapaUso";
 import { ENVIAVEL_WHERE } from "../services/segments";
@@ -627,6 +628,34 @@ router.get("/overview", async (req, res) => {
       : health && baselineHealth ? delta(health.score, baselineHealth.score) : null,
   };
 
+  // --- O que melhorou / o que caiu (só base inteira, com histórico anterior a hoje) -----------
+  const scoreAgora = usaReal ? realLoad.real?.score ?? null : health?.score ?? null;
+  const scoreBase = usaReal ? baselineSnap?.healthScore ?? null : baselineHealth?.score ?? null;
+  const melhorouCaiu =
+    baselineSnap && baseline && bl
+      ? buildMelhorouCaiu(
+          {
+            totalClientes: total,
+            ativos: kpis.ativos,
+            inativos: kpis.inativos,
+            semUso: kpis.semUso,
+            indefinidos: kpis.faixas["INDEFINIDO"] ?? 0,
+            usoLimitePct: kpis.limiteTotal > 0 ? (kpis.valorUtilizado / kpis.limiteTotal) * 100 : null,
+            score: scoreAgora !== null && scoreBase !== null ? scoreAgora : null,
+          },
+          {
+            totalClientes: bl.totalClientes,
+            ativos: bl.ativos,
+            inativos: bl.inativos,
+            semUso: bl.semUso,
+            indefinidos: (baselineSnap.faixas as Record<string, number> | null)?.["INDEFINIDO"] ?? 0,
+            usoLimitePct: bl.limiteTotal > 0 ? (bl.valorUtilizado / bl.limiteTotal) * 100 : null,
+            score: scoreAgora !== null && scoreBase !== null ? scoreBase : null,
+          },
+          baseline.dias
+        )
+      : null;
+
   // --- Funil e oportunidades ---------------------------------------------------------------
   const jaUtilizaram = Math.max(0, total - kpis.semUso - (kpis.faixas["INDEFINIDO"] ?? 0));
   const funil = [
@@ -779,6 +808,7 @@ router.get("/overview", async (req, res) => {
     campanhas: resultadoCampanhas,
     cobertura,
     insights,
+    melhorouCaiu: melhorouCaiu ? { ...melhorouCaiu, baseline } : null,
     ultimaAtualizacao: lastImport?.finishedAt || lastImport?.startedAt || null,
   });
 });

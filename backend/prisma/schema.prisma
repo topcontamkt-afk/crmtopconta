@@ -683,6 +683,7 @@ model DashboardSnapshot {
   encerradosNoDia Int      @default(0) // clientes com encerradoEm naquele dia
   faixas          Json // { FAIXA_USO: contagem }
   healthScore     Int? // nota por uso real do dia (null = sem extrato em dia; ver healthData.ts)
+  oportunidades   Json? // { chaveDaOportunidade: contagem } do dia, para a tendência da fila (null = não gravado)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
